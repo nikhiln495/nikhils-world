@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -15,28 +16,54 @@
   <div id="root"></div>
 
   <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+
   <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
 
   <!-- prop-types (recharts peer dep) -->
+
   <script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js" crossorigin="anonymous"></script>
 
   <!-- lucide-react needs lowercase 'react' global -->
+
   <script>window.react = window.React;</script>
 
   <!-- lucide-react UMD — global: LucideReact -->
+
   <script src="https://unpkg.com/lucide-react@0.263.1/dist/umd/lucide-react.js" crossorigin="anonymous"></script>
 
   <!-- recharts UMD — global: Recharts -->
+
   <script src="https://unpkg.com/recharts@2.9.0/umd/Recharts.js" crossorigin="anonymous"></script>
 
-  <!-- Firebase SDK (compat build — works in plain HTML with no bundler) -->
-  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+  <!-- Firebase SDK (compat build — primary CDN: gstatic) -->
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js" onerror="window.__fbCdnFailed=true"></script>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js" onerror="window.__fbCdnFailed=true"></script>
+
+  <!-- Cloudflare cdnjs fallback — only loads if gstatic was blocked -->
+
+  <script>
+    if (typeof firebase === 'undefined' || window.__fbCdnFailed) {
+      const fb1 = document.createElement('script');
+      fb1.src = 'https://cdnjs.cloudflare.com/ajax/libs/firebase/10.12.2/firebase-app-compat.min.js';
+      fb1.async = false;
+      const fb2 = document.createElement('script');
+      fb2.src = 'https://cdnjs.cloudflare.com/ajax/libs/firebase/10.12.2/firebase-firestore-compat.min.js';
+      fb2.async = false;
+      document.head.appendChild(fb1);
+      document.head.appendChild(fb2);
+    }
+  </script>
+
   <!-- Google Identity Services (for Drive sync) -->
+
   <script src="https://accounts.google.com/gsi/client" async></script>
 
   <!-- Fallback: ensure globals exist even if CDNs fail -->
+
   <script>
     window.LucideReact = window.LucideReact || {};
     window.Recharts = window.Recharts || {};
@@ -53,13 +80,36 @@
     };
 
     let db = null;
-    try {
-      if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
-      db = firebase.firestore();
-      console.log("✅ Nikhil's World — Firebase connected");
-    } catch(e) {
-      console.warn("⚠️ Firebase unavailable, falling back to localStorage:", e);
-    }
+    // window.__dbReady is a promise that resolves when Firebase is ready (or definitively unavailable)
+    window.__dbReady = new Promise((resolve) => {
+      const tryInit = () => {
+        try {
+          if (typeof firebase === 'undefined') return false;
+          if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+          db = firebase.firestore();
+          window.__dbAvailable = true;
+          console.log("✅ Nikhil's World — Firebase connected");
+          return true;
+        } catch (e) {
+          return false;
+        }
+      };
+
+      if (tryInit()) { resolve(true); return; }
+
+      // Firebase global wasn't there yet — wait up to 3 seconds, polling every 150ms.
+      let waited = 0;
+      const iv = setInterval(() => {
+        waited += 150;
+        if (tryInit()) { clearInterval(iv); resolve(true); return; }
+        if (waited >= 3000) {
+          clearInterval(iv);
+          window.__dbAvailable = false;
+          console.warn("⚠️ Firebase didn't load (network/content-blocker?). Falling back to localStorage. Data stays on this device only.");
+          resolve(false);
+        }
+      }, 150);
+    });
 
     // ── Storage API — Firestore with localStorage fallback ─────────
     // Keys with colons/slashes are sanitised for Firestore doc IDs
@@ -69,6 +119,8 @@
 
     window.storage = {
       get: async (key) => {
+        // Wait briefly for Firebase to finish initializing (resolves immediately if already done)
+        try { await window.__dbReady; } catch (_) {}
         // Try Firestore first
         if (db) {
           try {
@@ -94,7 +146,10 @@
       },
 
       set: async (key, value) => {
-        // Write to Firestore AND localStorage (belt + suspenders)
+        try { await window.__dbReady; } catch (_) {}
+        // Always write to localStorage (belt). Then try Firestore (suspenders).
+        let localOk = false;
+        try { localStorage.setItem(key, value); localOk = true; } catch(_) {}
         if (db) {
           try {
             await db.collection('appdata').doc(sanitiseKey(key)).set({
@@ -102,19 +157,17 @@
               key,
               updatedAt: new Date()
             });
-            // Mirror to localStorage as offline cache
-            try { localStorage.setItem(key, value); } catch(_) {}
             return true;
           } catch(e) {
             console.warn('Firestore set failed, using localStorage only:', e);
           }
         }
-        // Fallback: localStorage only
-        try { localStorage.setItem(key, value); return true; } catch(e) { return false; }
+        return localOk;
       },
 
       // Convenience: bulk export all appdata keys from Firestore
       exportAll: async () => {
+        try { await window.__dbReady; } catch (_) {}
         if (!db) return null;
         try {
           const snap = await db.collection('appdata').get();
@@ -122,11 +175,368 @@
           snap.forEach(doc => { out[doc.data().key || doc.id] = doc.data().value; });
           return out;
         } catch(e) { return null; }
-      }
+      },
+
+      // Lets the SaveStatusPill display "Local-only" mode distinctly
+      isCloudReady: () => !!window.__dbAvailable,
     };
   </script>
 
+  <!-- ─────────────────────────────────────────────────────────────
+       Shared utilities used by every applet:
+       • SaveStatusPill (visual state for Firebase autosave)
+       • useDebouncedPersist (hook: setState + debounced storage write + status)
+       • useGlanceData (hook: reads cross-applet data → Today strip + Pending list)
+       Exposed on window so each <script type="text/babel"> can pull from them.
+       ───────────────────────────────────────────────────────────── -->
+
+  <script type="text/babel">
+const { useState: __useState, useEffect: __useEffect, useRef: __useRef, useCallback: __useCallback } = React;
+
+// ── Save Status Pill ───────────────────────────────────────────
+function SaveStatusPill({ state }) {
+  // state: 'idle' | 'saving' | 'saved' | 'error' | 'offline' | 'booting' | 'localonly'
+  const map = {
+    booting:   { label: 'Connecting…',  color: '#9ca3af', bg: 'rgba(156,163,175,0.15)', dot: '#9ca3af' },
+    offline:   { label: 'Session only', color: '#a16207', bg: 'rgba(161,98,7,0.15)',  dot: '#a16207' },
+    saving:    { label: 'Saving…',      color: '#9ca3af', bg: 'rgba(156,163,175,0.15)', dot: '#9ca3af' },
+    saved:     { label: 'Saved',        color: '#3d5a3d', bg: 'rgba(61,90,61,0.15)',   dot: '#3d5a3d' },
+    error:     { label: 'Save failed',  color: '#b91c1c', bg: 'rgba(185,28,28,0.15)',  dot: '#b91c1c' },
+    idle:      { label: 'Auto-save on', color: '#3d5a3d', bg: 'rgba(61,90,61,0.10)',   dot: '#3d5a3d' },
+    localonly: { label: '🔒 Local-only',color: '#a16207', bg: 'rgba(161,98,7,0.15)',  dot: '#a16207' },
+  };
+  const m = map[state] || map.idle;
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5,
+      padding: '3px 10px', borderRadius: 99, fontSize: 11,
+      color: m.color, background: m.bg, fontWeight: 500
+    }}
+    title={state === 'localonly'
+      ? "Firebase didn't load (likely a content blocker, ad blocker, or strict network). Data is saving to this device only and won't sync until reload."
+      : ''}>
+      <span style={{
+        width: 6, height: 6, borderRadius: '50%', background: m.dot,
+        animation: state === 'saving' ? 'pulse 1s ease-in-out infinite' : 'none'
+      }}/>
+      {m.label}
+    </span>
+  );
+}
+
+// ── Hook: useDebouncedPersist ──────────────────────────────────
+// Returns [value, setValue, status]. Auto-loads from window.storage on mount;
+// auto-saves debounced (350ms) after every setValue. Mirrors Kaizen's pattern.
+function useDebouncedPersist(key, initialValue) {
+  const [value, setValueRaw] = __useState(initialValue);
+  const [status, setStatus] = __useState('booting'); // booting → idle/localonly
+  const [loaded, setLoaded] = __useState(false);
+  const timerRef = __useRef(null);
+
+  __useEffect(() => {
+    let cancel = false;
+    (async () => {
+      try {
+        // Wait for Firebase init promise (resolves immediately if already done, max 3s).
+        try { await window.__dbReady; } catch (_) {}
+        const cloudOK = window.storage?.isCloudReady?.() ?? true;
+
+        const result = await window.storage.get(key);
+        if (cancel) return;
+        if (result?.value) {
+          try { setValueRaw(JSON.parse(result.value)); } catch { setValueRaw(result.value); }
+        }
+        setStatus(cloudOK ? 'idle' : 'localonly');
+      } catch {
+        if (!cancel) setStatus('localonly');
+      } finally {
+        if (!cancel) setLoaded(true);
+      }
+    })();
+    return () => { cancel = true; };
+  }, [key]);
+
+  const setValue = __useCallback((next) => {
+    setValueRaw(prev => {
+      const v = typeof next === 'function' ? next(prev) : next;
+      if (!loaded) return v;
+      const cloudOK = window.storage?.isCloudReady?.() ?? true;
+      setStatus('saving');
+      clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(async () => {
+        try {
+          const ok = await window.storage.set(key, JSON.stringify(v));
+          if (!ok) { setStatus('error'); return; }
+          setStatus(cloudOK ? 'saved' : 'localonly');
+          if (cloudOK) setTimeout(() => setStatus('idle'), 1500);
+        } catch {
+          setStatus('error');
+        }
+      }, 350);
+      return v;
+    });
+  }, [key, loaded]);
+
+  return [value, setValue, status, loaded];
+}
+
+// ── Hook: useGlanceData ────────────────────────────────────────
+// Reads across all applet keys, returns:
+//   { today: {...stats}, pending: [...items], refresh: fn }
+// Refreshes on mount + every 30s + when window regains focus.
+function useGlanceData() {
+  const [data, setData] = __useState({ today: null, pending: [], loaded: false });
+
+  const refresh = __useCallback(async () => {
+    try {
+      const [foodRaw, kaizenTasksRaw, kaizenProjectsRaw, medsRaw, healthRaw] = await Promise.all([
+        window.storage.get('nikhil-food-log-v1'),
+        window.storage.get('kaizen3:tasks'),
+        window.storage.get('kaizen3:projects'),
+        window.storage.get('med-log-daily'),
+        window.storage.get('apple-health-import'),
+      ]);
+
+      const food     = foodRaw?.value     ? JSON.parse(foodRaw.value)     : {};
+      const tasks    = kaizenTasksRaw?.value    ? JSON.parse(kaizenTasksRaw.value)    : [];
+      const projects = kaizenProjectsRaw?.value ? JSON.parse(kaizenProjectsRaw.value) : [];
+      const meds     = medsRaw?.value     ? JSON.parse(medsRaw.value)     : {};
+      const health   = healthRaw?.value   ? JSON.parse(healthRaw.value)   : {};
+
+      // ── Today date key (local) ──
+      const t = new Date(); t.setHours(0,0,0,0);
+      const todayKey = t.toISOString().slice(0,10);
+
+      // ── Protein today ──
+      const todayMeals = food[todayKey]?.meals || [];
+      let proteinG = 0, kcalIn = 0;
+      todayMeals.forEach(m => m.items?.forEach(i => {
+        if (i.kcal) kcalIn += i.kcal;
+        if (i.notes) {
+          const px = i.notes.match(/~?(\d+(?:\.\d+)?)\s*g\s*protein/i);
+          if (px) proteinG += parseFloat(px[1]);
+        }
+      }));
+
+      // ── Burn today (food log health entry, or apple-health-import) ──
+      const fHealth = food[todayKey]?.health || {};
+      const hToday  = health.daily?.[todayKey] || {};
+      const active  = hToday.active_kcal ?? fHealth.active_kcal ?? null;
+      const basal   = hToday.basal_kcal  ?? fHealth.basal_kcal  ?? null;
+      const burn    = (active && basal) ? Math.round(active + basal) : (active ? active + 1500 : null);
+      const deficit = burn !== null ? Math.round(burn - kcalIn) : null;
+
+      const rhr   = hToday.rhr   ?? fHealth.rhr   ?? null;
+      const hrv   = hToday.hrv   ?? fHealth.hrv   ?? null;
+      const sleep = hToday.sleep_hours ?? fHealth.sleep_hours ?? null;
+      const steps = hToday.steps ?? fHealth.steps ?? null;
+
+      // ── Top urgent task ──
+      const urgent = tasks
+        .filter(t => t.status !== 'done')
+        .map(task => {
+          const proj = projects.find(p => p.id === task.projectId);
+          if (!proj) return null;
+          const fd = new Date(proj.finalDeadline + 'T00:00:00');
+          fd.setDate(fd.getDate() - (task.leadDays||0));
+          return { ...task, autoDeadline: fd.toISOString().slice(0,10), projectName: proj.name };
+        })
+        .filter(Boolean)
+        .sort((a,b) => (a.autoDeadline||'').localeCompare(b.autoDeadline||''));
+      const topUrgent = urgent[0] || null;
+      const dToday = (s) => Math.round((new Date(s+'T00:00:00') - new Date(todayKey+'T00:00:00'))/86400000);
+
+      // ── Pending inbox: aggregate ──
+      const pending = [];
+
+      // PAST DUE / Due Today tasks
+      urgent.forEach(t => {
+        const d = dToday(t.autoDeadline);
+        if (d <= 0) {
+          pending.push({
+            kind: 'task',
+            label: t.name,
+            sub: `${t.projectName} · ${d < 0 ? `${Math.abs(d)}d overdue` : 'due today'}`,
+            severity: d < 0 ? 'high' : 'med',
+            id: 't_'+t.id,
+          });
+        }
+      });
+
+      // Low-protein days in last 7
+      for (let i = 1; i <= 7; i++) {
+        const d = new Date(); d.setDate(d.getDate()-i); d.setHours(0,0,0,0);
+        const k = d.toISOString().slice(0,10);
+        const meals = food[k]?.meals;
+        if (!meals) continue;
+        let p = 0;
+        meals.forEach(m => m.items?.forEach(item => {
+          if (item.notes) {
+            const px = item.notes.match(/~?(\d+(?:\.\d+)?)\s*g\s*protein/i);
+            if (px) p += parseFloat(px[1]);
+          }
+        }));
+        if (p > 0 && p < 80) {
+          pending.push({
+            kind: 'protein',
+            label: `Low protein day · ${Math.round(p)}g`,
+            sub: d.toLocaleDateString('en-US',{weekday:'short', month:'short', day:'numeric'}),
+            severity: p < 50 ? 'high' : 'med',
+            id: 'p_'+k,
+          });
+        }
+      }
+
+      // Missed-med days (last 7) — checks daily med log
+      const medKeys = ['Etilaam','Bupropion','Dutasteride'];
+      for (let i = 0; i <= 6; i++) {
+        const d = new Date(); d.setDate(d.getDate()-i); d.setHours(0,0,0,0);
+        const k = d.toISOString().slice(0,10);
+        const log = meds[k] || {};
+        const missed = medKeys.filter(m => !log[m]);
+        if (i === 0) {
+          // Today: only flag if user has logged ANY med today (otherwise it's "not yet")
+          if (Object.keys(log).length > 0 && missed.length > 0) {
+            pending.push({
+              kind: 'med',
+              label: `Today: ${missed.join(', ')} not logged`,
+              sub: 'core meds',
+              severity: 'med',
+              id: 'm_'+k,
+            });
+          }
+        } else {
+          // Past day with no log at all OR missing core meds
+          if (Object.keys(log).length === 0 || missed.length === medKeys.length) {
+            pending.push({
+              kind: 'med',
+              label: `${d.toLocaleDateString('en-US',{weekday:'short', month:'short', day:'numeric'})}: no meds logged`,
+              sub: '',
+              severity: 'low',
+              id: 'm_'+k,
+            });
+          } else if (missed.length > 0) {
+            pending.push({
+              kind: 'med',
+              label: `${d.toLocaleDateString('en-US',{weekday:'short', month:'short', day:'numeric'})}: missed ${missed.join(', ')}`,
+              sub: '',
+              severity: 'low',
+              id: 'm_'+k,
+            });
+          }
+        }
+      }
+
+      const today = {
+        date: todayKey,
+        proteinG: Math.round(proteinG),
+        proteinPct: Math.round((proteinG/130)*100),
+        kcalIn: Math.round(kcalIn),
+        burn,
+        deficit,
+        rhr, hrv, sleep, steps,
+        topUrgent,
+      };
+
+      setData({ today, pending, loaded: true });
+    } catch (e) {
+      console.warn('useGlanceData refresh failed', e);
+      setData(d => ({ ...d, loaded: true }));
+    }
+  }, []);
+
+  __useEffect(() => {
+    refresh();
+    const iv = setInterval(refresh, 30000);
+    const onFocus = () => refresh();
+    window.addEventListener('focus', onFocus);
+    return () => { clearInterval(iv); window.removeEventListener('focus', onFocus); };
+  }, [refresh]);
+
+  return { ...data, refresh };
+}
+
+// ── TodayStrip — pinned at top of every view ──────────────────
+function TodayStrip({ data, onPendingClick, theme = 'dark' }) {
+  const t = data.today;
+  const isDark = theme === 'dark';
+  const colors = isDark
+    ? { bg:'#1a1d27', border:'#2a2e3d', text:'#e4e4e7', muted:'#9ca3af', accent:'#60a5fa' }
+    : { bg:'#fffdf9', border:'#e8e0d0', text:'#1a1814', muted:'#6b6660', accent:'#3d5a3d' };
+
+  const proteinColor = !t || t.proteinG === 0 ? colors.muted
+    : t.proteinG >= 130 ? '#22c55e'
+    : t.proteinG >= 80  ? '#eab308'
+    : '#ef4444';
+
+  const Pill = ({ label, value, color, onClick }) => (
+    <div onClick={onClick} style={{
+      flex: '1 1 auto', minWidth: 0, padding: '6px 10px',
+      borderRight: `1px solid ${colors.border}`, cursor: onClick ? 'pointer' : 'default'
+    }}>
+      <div style={{ fontSize: 9, color: colors.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 1 }}>{label}</div>
+      <div style={{ fontSize: 13, fontWeight: 700, color: color || colors.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{value}</div>
+    </div>
+  );
+
+  if (!data.loaded) {
+    return (
+      <div style={{ background: colors.bg, borderBottom: `1px solid ${colors.border}`, padding: '6px 10px', fontSize: 11, color: colors.muted, textAlign: 'center' }}>
+        Loading today…
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      background: colors.bg, borderBottom: `1px solid ${colors.border}`,
+      display: 'flex', alignItems: 'stretch', overflowX: 'auto',
+      WebkitOverflowScrolling: 'touch'
+    }}>
+      <Pill
+        label="Protein"
+        value={t.proteinG === 0 ? '—' : `${t.proteinG}g · ${t.proteinPct}%`}
+        color={proteinColor}
+      />
+      <Pill
+        label="Deficit"
+        value={t.deficit === null ? '—' : (t.deficit >= 0 ? `−${t.deficit.toLocaleString()}` : `+${Math.abs(t.deficit).toLocaleString()}`)}
+        color={t.deficit === null ? colors.muted : (t.deficit >= 0 ? '#22c55e' : '#f87171')}
+      />
+      <Pill label="RHR" value={t.rhr ? `${t.rhr}` : '—'} color={t.rhr ? colors.text : colors.muted}/>
+      <Pill label="Sleep" value={t.sleep ? `${t.sleep}h` : '—'} color={t.sleep ? colors.text : colors.muted}/>
+      <Pill
+        label="Top task"
+        value={t.topUrgent ? t.topUrgent.name : '—'}
+        color={t.topUrgent ? colors.accent : colors.muted}
+      />
+      {data.pending.length > 0 && (
+        <div onClick={onPendingClick} style={{
+          flexShrink: 0, padding: '6px 12px', cursor: 'pointer',
+          background: data.pending.some(p=>p.severity==='high') ? '#7f1d1d' : '#78350f',
+          color: '#fff', display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600
+        }}>
+          {data.pending.length} pending →
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Expose
+window.SaveStatusPill = SaveStatusPill;
+window.useDebouncedPersist = useDebouncedPersist;
+window.useGlanceData = useGlanceData;
+window.TodayStrip = TodayStrip;
+
+// CSS keyframes
+const __style = document.createElement('style');
+__style.textContent = `@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.4 } }`;
+document.head.appendChild(__style);
+  </script>
+
   <!-- KaizenApp -->
+
   <script type="text/babel">
 const { useState, useEffect, useRef } = React;
 const _LR = window.LucideReact || {};
@@ -483,6 +893,8 @@ function KaizenApp() {
     reflect:   <ReflectView  logs={logs} setLogs={setLogs} tasks={enriched} allTasks={tasks} setTasks={setTasks} projects={projects}/>,
   };
 
+  const glance = window.useGlanceData();
+
   return (
     <div style={{minHeight:'100vh',background:'linear-gradient(180deg,#faf7f2 0%,#f4ede0 100%)',fontFamily:'"DM Sans",system-ui,sans-serif',color:'#1a1814'}}>
       <style>{`
@@ -497,98 +909,103 @@ function KaizenApp() {
         @keyframes spin{to{transform:rotate(360deg)}}
       `}</style>
 
-      <div style={{maxWidth:720,margin:'0 auto',padding:'24px 16px 120px'}}>
+```
+  <window.TodayStrip data={glance} theme="light" onPendingClick={() => window.dispatchEvent(new CustomEvent('open-pending'))}/>
 
-        {/* HEADER */}
-        <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:20}}>
-          <div>
-            <div style={{fontSize:11,color:'#6b6660',textTransform:'uppercase',letterSpacing:'0.1em'}}>
-              Good {greeting()}, Nikhil
-            </div>
-            <h1 className="fd" style={{fontSize:38,fontWeight:400,letterSpacing:'-0.02em',margin:'2px 0 4px'}}>
-              Kaizen
-            </h1>
-            <StatusPill/>
-          </div>
-          <div style={{display:'flex',gap:8,alignItems:'center',marginTop:4}}>
-            <input type="file" accept="application/json" ref={fileRef} onChange={doImport} style={{display:'none'}}/>
-            <button onClick={()=>fileRef.current?.click()} style={ghostBtn}>Load</button>
-            <button onClick={doExport} style={solidBtn}><Download size={12}/> Backup</button>
-          </div>
+  <div style={{maxWidth:720,margin:'0 auto',padding:'20px 16px 120px'}}>
+
+    {/* HEADER */}
+    <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:20}}>
+      <div>
+        <div style={{fontSize:11,color:'#6b6660',textTransform:'uppercase',letterSpacing:'0.1em'}}>
+          Good {greeting()}, Nikhil
         </div>
-
-        {/* Offline warning */}
-        {storeSt==='offline' && (
-          <div style={{...alertBox, background:'#fffbeb',borderColor:'#fde68a',color:'#78350f',marginBottom:16}}>
-            Auto-save unavailable. Hit <strong>Backup</strong> before closing the tab.
-          </div>
-        )}
-
-        {/* Flash notice */}
-        {notice && (
-          <div style={{...alertBox,
-            background: notice.kind==='ok'?'#f0fdf4':'#fef2f2',
-            borderColor: notice.kind==='ok'?'#bbf7d0':'#fecaca',
-            color: notice.kind==='ok'?'#14532d':'#7f1d1d',
-            marginBottom:16
-          }}>{notice.text}</div>
-        )}
-
-        {/* MAIN VIEW */}
-        {VIEWS[view]}
+        <h1 className="fd" style={{fontSize:38,fontWeight:400,letterSpacing:'-0.02em',margin:'2px 0 4px'}}>
+          Kaizen
+        </h1>
+        <StatusPill/>
       </div>
-
-      {/* BOTTOM NAV */}
-      <nav style={{
-        position:'fixed',bottom:0,left:0,right:0,
-        background:'#fffdf9',borderTop:'1px solid #e8e0d0',
-        paddingBottom:'env(safe-area-inset-bottom)'
-      }}>
-        <div style={{maxWidth:720,margin:'0 auto',display:'flex'}}>
-          {[
-            {id:'today',     label:'Today',    I:Sun},
-            {id:'tasks',     label:'Tasks',    I:CheckCircle2},
-            {id:'projects',  label:'Projects', I:Layers},
-            {id:'templates', label:'Specs',    I:BookOpen},
-            {id:'reflect',   label:'Reflect',  I:RotateCcw},
-          ].map(({id,label,I})=>{
-            const active = view===id;
-            return (
-              <button key={id} onClick={()=>setView(id)} style={{
-                flex:1,display:'flex',flexDirection:'column',alignItems:'center',
-                padding:'10px 4px',border:'none',background:'transparent',cursor:'pointer',
-                color: active?'#3d5a3d':'#6b6660'
-              }}>
-                <I size={20} strokeWidth={active?2:1.5}/>
-                <span style={{fontSize:10,marginTop:3,fontWeight:active?600:400}}>{label}</span>
-              </button>
-            );
-          })}
-        </div>
-      </nav>
+      <div style={{display:'flex',gap:8,alignItems:'center',marginTop:4}}>
+        <input type="file" accept="application/json" ref={fileRef} onChange={doImport} style={{display:'none'}}/>
+        <button onClick={()=>fileRef.current?.click()} style={ghostBtn}>Load</button>
+        <button onClick={doExport} style={solidBtn}><Download size={12}/> Backup</button>
+      </div>
     </div>
-  );
+
+    {/* Offline warning */}
+    {storeSt==='offline' && (
+      <div style={{...alertBox, background:'#fffbeb',borderColor:'#fde68a',color:'#78350f',marginBottom:16}}>
+        Auto-save unavailable. Hit <strong>Backup</strong> before closing the tab.
+      </div>
+    )}
+
+    {/* Flash notice */}
+    {notice && (
+      <div style={{...alertBox,
+        background: notice.kind==='ok'?'#f0fdf4':'#fef2f2',
+        borderColor: notice.kind==='ok'?'#bbf7d0':'#fecaca',
+        color: notice.kind==='ok'?'#14532d':'#7f1d1d',
+        marginBottom:16
+      }}>{notice.text}</div>
+    )}
+
+    {/* MAIN VIEW */}
+    {VIEWS[view]}
+  </div>
+
+  {/* BOTTOM NAV */}
+  <nav style={{
+    position:'fixed',bottom:0,left:0,right:0,
+    background:'#fffdf9',borderTop:'1px solid #e8e0d0',
+    paddingBottom:'env(safe-area-inset-bottom)'
+  }}>
+    <div style={{maxWidth:720,margin:'0 auto',display:'flex'}}>
+      {[
+        {id:'today',     label:'Today',    I:Sun},
+        {id:'tasks',     label:'Tasks',    I:CheckCircle2},
+        {id:'projects',  label:'Projects', I:Layers},
+        {id:'templates', label:'Specs',    I:BookOpen},
+        {id:'reflect',   label:'Reflect',  I:RotateCcw},
+      ].map(({id,label,I})=>{
+        const active = view===id;
+        return (
+          <button key={id} onClick={()=>setView(id)} style={{
+            flex:1,display:'flex',flexDirection:'column',alignItems:'center',
+            padding:'10px 4px',border:'none',background:'transparent',cursor:'pointer',
+            color: active?'#3d5a3d':'#6b6660'
+          }}>
+            <I size={20} strokeWidth={active?2:1.5}/>
+            <span style={{fontSize:10,marginTop:3,fontWeight:active?600:400}}>{label}</span>
+          </button>
+        );
+      })}
+    </div>
+  </nav>
+</div>
+```
+
+);
 }
 
 // shared button styles
 const ghostBtn = {
-  fontSize:12,color:'#6b6660',display:'flex',alignItems:'center',gap:4,
-  padding:'6px 12px',borderRadius:99,border:'1px solid #e8e0d0',
-  background:'#fffdf9',cursor:'pointer'
+fontSize:12,color:’#6b6660’,display:‘flex’,alignItems:‘center’,gap:4,
+padding:‘6px 12px’,borderRadius:99,border:‘1px solid #e8e0d0’,
+background:’#fffdf9’,cursor:‘pointer’
 };
 const solidBtn = {
-  fontSize:12,color:'#faf7f2',display:'flex',alignItems:'center',gap:4,
-  padding:'6px 12px',borderRadius:99,border:'none',
-  background:'#3d5a3d',cursor:'pointer'
+fontSize:12,color:’#faf7f2’,display:‘flex’,alignItems:‘center’,gap:4,
+padding:‘6px 12px’,borderRadius:99,border:‘none’,
+background:’#3d5a3d’,cursor:‘pointer’
 };
-const alertBox = { fontSize:12,padding:'8px 12px',borderRadius:8,border:'1px solid' };
+const alertBox = { fontSize:12,padding:‘8px 12px’,borderRadius:8,border:‘1px solid’ };
 
 function Pill({icon,label,color}) {
-  return (
-    <span style={{display:'inline-flex',alignItems:'center',gap:4,fontSize:11,color}}>
-      {icon}{label}
-    </span>
-  );
+return (
+<span style={{display:‘inline-flex’,alignItems:‘center’,gap:4,fontSize:11,color}}>
+{icon}{label}
+</span>
+);
 }
 
 // ─────────────────────────────────────────────────────
@@ -596,264 +1013,267 @@ function Pill({icon,label,color}) {
 // ─────────────────────────────────────────────────────
 
 function TodayView({ log, updateLog, tasks, allTasks, setTasks, projects }) {
-  const [doneInput,    setDoneInput]    = useState('');
-  const [brainOpen,    setBrainOpen]    = useState(false);
-  const [reflectOpen,  setReflectOpen]  = useState(false);
-  const [editingDoneId,setEditingDoneId]= useState(null);
-  const [editingTaskId,setEditingTaskId]= useState(null);
-  const [expandedSubs, setExpandedSubs] = useState({});
+const [doneInput,    setDoneInput]    = useState(’’);
+const [brainOpen,    setBrainOpen]    = useState(false);
+const [reflectOpen,  setReflectOpen]  = useState(false);
+const [editingDoneId,setEditingDoneId]= useState(null);
+const [editingTaskId,setEditingTaskId]= useState(null);
+const [expandedSubs, setExpandedSubs] = useState({});
 
-  const addDone = () => {
-    const text = doneInput.trim();
-    if (!text) return;
-    updateLog({ done: [...(log.done||[]), {id:uid(),text,at:new Date().toISOString()}] });
-    setDoneInput('');
-  };
+const addDone = () => {
+const text = doneInput.trim();
+if (!text) return;
+updateLog({ done: […(log.done||[]), {id:uid(),text,at:new Date().toISOString()}] });
+setDoneInput(’’);
+};
 
-  const removeDone = id => updateLog({ done:(log.done||[]).filter(d=>d.id!==id) });
+const removeDone = id => updateLog({ done:(log.done||[]).filter(d=>d.id!==id) });
 
-  const updateDone = (id, text) => {
-    const trimmed = (text||'').trim();
-    if (!trimmed) { removeDone(id); return; }
-    updateLog({ done: (log.done||[]).map(d => d.id===id ? {...d, text:trimmed} : d) });
-  };
+const updateDone = (id, text) => {
+const trimmed = (text||’’).trim();
+if (!trimmed) { removeDone(id); return; }
+updateLog({ done: (log.done||[]).map(d => d.id===id ? {…d, text:trimmed} : d) });
+};
 
-  const toggleTask = id =>
-    setTasks(allTasks.map(t => t.id===id ? {...t,status:t.status==='done'?'open':'done'} : t));
+const toggleTask = id =>
+setTasks(allTasks.map(t => t.id===id ? {…t,status:t.status===‘done’?‘open’:‘done’} : t));
 
-  const saveTask = (id, patch) => {
-    setTasks(allTasks.map(t => t.id===id ? {...t,...patch} : t));
-    setEditingTaskId(null);
-  };
+const saveTask = (id, patch) => {
+setTasks(allTasks.map(t => t.id===id ? {…t,…patch} : t));
+setEditingTaskId(null);
+};
 
-  const deleteTask = id => {
-    setTasks(allTasks.filter(t => t.id!==id));
-    setEditingTaskId(null);
-  };
+const deleteTask = id => {
+setTasks(allTasks.filter(t => t.id!==id));
+setEditingTaskId(null);
+};
 
-  const toggleSubtask = (taskId, subId) =>
-    setTasks(allTasks.map(t => t.id===taskId
-      ? {...t, subtasks:(t.subtasks||[]).map(s=>s.id===subId?{...s,status:s.status==='done'?'open':'done'}:s)}
-      : t));
+const toggleSubtask = (taskId, subId) =>
+setTasks(allTasks.map(t => t.id===taskId
+? {…t, subtasks:(t.subtasks||[]).map(s=>s.id===subId?{…s,status:s.status===‘done’?‘open’:‘done’}:s)}
+: t));
 
-  const toggleExpand = id => setExpandedSubs(s=>({...s,[id]:!s[id]}));
+const toggleExpand = id => setExpandedSubs(s=>({…s,[id]:!s[id]}));
 
-  const urgent    = tasks.filter(t=>['PAST DUE','Due Today','Due Tomorrow'].includes(t.urgency));
-  const startSoon = tasks.filter(t=>t.urgency==='Better Start Soon');
+const urgent    = tasks.filter(t=>[‘PAST DUE’,‘Due Today’,‘Due Tomorrow’].includes(t.urgency));
+const startSoon = tasks.filter(t=>t.urgency===‘Better Start Soon’);
 
-  const renderTaskWithEdit = (t) => editingTaskId===t.id
-    ? <TaskEditor key={t.id} task={t} projects={projects||[]} onSave={p=>saveTask(t.id,p)} onCancel={()=>setEditingTaskId(null)} onDelete={()=>deleteTask(t.id)}/>
-    : (
-      <div key={t.id} style={{position:'relative'}}>
-        <TaskRow task={t} onToggle={()=>toggleTask(t.id)}
-          expanded={!!expandedSubs[t.id]}
-          onToggleExpand={()=>toggleExpand(t.id)}
-          onToggleSubtask={sid=>toggleSubtask(t.id,sid)}/>
-        <button onClick={()=>setEditingTaskId(t.id)} title="Edit task" style={{
-          position:'absolute',top:12,right:12,background:'none',border:'none',cursor:'pointer',color:'#6b6660',opacity:0.5,padding:4
-        }}>
-          <Edit3 size={13}/>
-        </button>
+const renderTaskWithEdit = (t) => editingTaskId===t.id
+? <TaskEditor key={t.id} task={t} projects={projects||[]} onSave={p=>saveTask(t.id,p)} onCancel={()=>setEditingTaskId(null)} onDelete={()=>deleteTask(t.id)}/>
+: (
+<div key={t.id} style={{position:‘relative’}}>
+<TaskRow task={t} onToggle={()=>toggleTask(t.id)}
+expanded={!!expandedSubs[t.id]}
+onToggleExpand={()=>toggleExpand(t.id)}
+onToggleSubtask={sid=>toggleSubtask(t.id,sid)}/>
+<button onClick={()=>setEditingTaskId(t.id)} title=“Edit task” style={{
+position:‘absolute’,top:12,right:12,background:‘none’,border:‘none’,cursor:‘pointer’,color:’#6b6660’,opacity:0.5,padding:4
+}}>
+<Edit3 size={13}/>
+</button>
+</div>
+);
+
+return (
+<div style={{display:‘flex’,flexDirection:‘column’,gap:16}}>
+
+```
+  {/* Highlight + micro */}
+  <div className="card" style={{padding:20}}>
+    <div style={sectionLabel}>The one thing today</div>
+    <input
+      value={log.highlight||''}
+      onChange={e=>updateLog({highlight:e.target.value})}
+      placeholder="If only one thing happens, what makes today a win?"
+      style={{...ghostInput,fontSize:20,fontFamily:'Fraunces,Georgia,serif',fontWeight:400,marginTop:6}}
+    />
+    <div style={{borderTop:'1px solid #e8e0d0',marginTop:16,paddingTop:14}}>
+      <div style={{...sectionLabel,display:'flex',alignItems:'center',gap:4}}>
+        <Zap size={11}/> Smallest first move
       </div>
-    );
-
-  return (
-    <div style={{display:'flex',flexDirection:'column',gap:16}}>
-
-      {/* Highlight + micro */}
-      <div className="card" style={{padding:20}}>
-        <div style={sectionLabel}>The one thing today</div>
-        <input
-          value={log.highlight||''}
-          onChange={e=>updateLog({highlight:e.target.value})}
-          placeholder="If only one thing happens, what makes today a win?"
-          style={{...ghostInput,fontSize:20,fontFamily:'Fraunces,Georgia,serif',fontWeight:400,marginTop:6}}
-        />
-        <div style={{borderTop:'1px solid #e8e0d0',marginTop:16,paddingTop:14}}>
-          <div style={{...sectionLabel,display:'flex',alignItems:'center',gap:4}}>
-            <Zap size={11}/> Smallest first move
-          </div>
-          <input
-            value={log.micro||''}
-            onChange={e=>updateLog({micro:e.target.value})}
-            placeholder="Not the goal — the first physical step."
-            style={{...ghostInput,fontSize:14,marginTop:6}}
-          />
-        </div>
-      </div>
-
-      {/* Done list */}
-      <div className="card" style={{padding:20}}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
-          <div style={sectionLabel}>Ta-da list</div>
-          <span className="fm" style={{fontSize:11,color:'#6b6660'}}>{(log.done||[]).length} wins</span>
-        </div>
-        <div style={{display:'flex',gap:8,marginBottom:12}}>
-          <input
-            value={doneInput}
-            onChange={e=>setDoneInput(e.target.value)}
-            onKeyDown={e=>e.key==='Enter'&&addDone()}
-            placeholder="What just got done?"
-            style={{flex:1,padding:'8px 12px',borderRadius:10,border:'1px solid #e8e0d0',fontSize:14,background:'#faf7f2'}}
-          />
-          <button onClick={addDone} style={{...solidBtn,padding:'8px 12px',borderRadius:10}}>
-            <Plus size={16}/>
-          </button>
-        </div>
-        <ul style={{listStyle:'none',padding:0,margin:0,display:'flex',flexDirection:'column',gap:6}}>
-          {(log.done||[]).length===0 && (
-            <li style={{fontSize:13,color:'#6b6660',fontStyle:'italic'}}>
-              Nothing yet — but you've already done more than you think.
-            </li>
-          )}
-          {(log.done||[]).slice().reverse().map(d=>(
-            <li key={d.id} style={{display:'flex',alignItems:'flex-start',gap:8}}>
-              <CheckCircle2 size={15} style={{color:'#3d5a3d',flexShrink:0,marginTop:2}}/>
-              {editingDoneId===d.id ? (
-                <input
-                  autoFocus
-                  defaultValue={d.text}
-                  onBlur={e=>{ updateDone(d.id, e.target.value); setEditingDoneId(null); }}
-                  onKeyDown={e=>{
-                    if (e.key==='Enter') { updateDone(d.id, e.target.value); setEditingDoneId(null); }
-                    if (e.key==='Escape') setEditingDoneId(null);
-                  }}
-                  style={{flex:1,fontSize:13,lineHeight:1.4,background:'#faf7f2',border:'1px solid #e8e0d0',borderRadius:6,padding:'3px 8px'}}
-                />
-              ) : (
-                <span
-                  onClick={()=>setEditingDoneId(d.id)}
-                  title="Click to edit"
-                  style={{flex:1,fontSize:13,lineHeight:1.4,cursor:'text'}}
-                >{d.text}</span>
-              )}
-              <button onClick={()=>removeDone(d.id)} style={{background:'none',border:'none',cursor:'pointer',color:'#6b6660',padding:0}}>
-                <X size={13}/>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </div>
-
-      {/* Urgent tasks */}
-      {urgent.length>0 && (
-        <div>
-          <div style={{...sectionLabel,paddingLeft:4,marginBottom:8}}>Needs you now</div>
-          {urgent.map(renderTaskWithEdit)}
-        </div>
-      )}
-      {startSoon.length>0 && (
-        <div>
-          <div style={{...sectionLabel,paddingLeft:4,marginBottom:8,marginTop:4}}>Better start soon</div>
-          {startSoon.map(renderTaskWithEdit)}
-        </div>
-      )}
-      {tasks.length===0 && (
-        <div style={{...emptyState}}>
-          No tasks. Add a project → auto-builds your task chain.
-        </div>
-      )}
-
-      {/* Brain dump */}
-      <Collapsible open={brainOpen} setOpen={setBrainOpen} label="Brain dump" icon={<FileText size={12}/>}>
-        <textarea
-          value={log.brainDump||''}
-          onChange={e=>updateLog({brainDump:e.target.value})}
-          placeholder="Empty the head onto the page. No structure required."
-          rows={6}
-          style={{...textArea}}
-        />
-      </Collapsible>
-
-      {/* Reflection */}
-      <Collapsible open={reflectOpen} setOpen={setReflectOpen} label="End-of-day reflection" icon={<RotateCcw size={12}/>}>
-        <textarea
-          value={log.reflection||''}
-          onChange={e=>updateLog({reflection:e.target.value})}
-          placeholder="What worked? What didn't? One adjustment for tomorrow."
-          rows={4}
-          style={{...textArea}}
-        />
-      </Collapsible>
+      <input
+        value={log.micro||''}
+        onChange={e=>updateLog({micro:e.target.value})}
+        placeholder="Not the goal — the first physical step."
+        style={{...ghostInput,fontSize:14,marginTop:6}}
+      />
     </div>
-  );
+  </div>
+
+  {/* Done list */}
+  <div className="card" style={{padding:20}}>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+      <div style={sectionLabel}>Ta-da list</div>
+      <span className="fm" style={{fontSize:11,color:'#6b6660'}}>{(log.done||[]).length} wins</span>
+    </div>
+    <div style={{display:'flex',gap:8,marginBottom:12}}>
+      <input
+        value={doneInput}
+        onChange={e=>setDoneInput(e.target.value)}
+        onKeyDown={e=>e.key==='Enter'&&addDone()}
+        placeholder="What just got done?"
+        style={{flex:1,padding:'8px 12px',borderRadius:10,border:'1px solid #e8e0d0',fontSize:14,background:'#faf7f2'}}
+      />
+      <button onClick={addDone} style={{...solidBtn,padding:'8px 12px',borderRadius:10}}>
+        <Plus size={16}/>
+      </button>
+    </div>
+    <ul style={{listStyle:'none',padding:0,margin:0,display:'flex',flexDirection:'column',gap:6}}>
+      {(log.done||[]).length===0 && (
+        <li style={{fontSize:13,color:'#6b6660',fontStyle:'italic'}}>
+          Nothing yet — but you've already done more than you think.
+        </li>
+      )}
+      {(log.done||[]).slice().reverse().map(d=>(
+        <li key={d.id} style={{display:'flex',alignItems:'flex-start',gap:8}}>
+          <CheckCircle2 size={15} style={{color:'#3d5a3d',flexShrink:0,marginTop:2}}/>
+          {editingDoneId===d.id ? (
+            <input
+              autoFocus
+              defaultValue={d.text}
+              onBlur={e=>{ updateDone(d.id, e.target.value); setEditingDoneId(null); }}
+              onKeyDown={e=>{
+                if (e.key==='Enter') { updateDone(d.id, e.target.value); setEditingDoneId(null); }
+                if (e.key==='Escape') setEditingDoneId(null);
+              }}
+              style={{flex:1,fontSize:13,lineHeight:1.4,background:'#faf7f2',border:'1px solid #e8e0d0',borderRadius:6,padding:'3px 8px'}}
+            />
+          ) : (
+            <span
+              onClick={()=>setEditingDoneId(d.id)}
+              title="Click to edit"
+              style={{flex:1,fontSize:13,lineHeight:1.4,cursor:'text'}}
+            >{d.text}</span>
+          )}
+          <button onClick={()=>removeDone(d.id)} style={{background:'none',border:'none',cursor:'pointer',color:'#6b6660',padding:0}}>
+            <X size={13}/>
+          </button>
+        </li>
+      ))}
+    </ul>
+  </div>
+
+  {/* Urgent tasks */}
+  {urgent.length>0 && (
+    <div>
+      <div style={{...sectionLabel,paddingLeft:4,marginBottom:8}}>Needs you now</div>
+      {urgent.map(renderTaskWithEdit)}
+    </div>
+  )}
+  {startSoon.length>0 && (
+    <div>
+      <div style={{...sectionLabel,paddingLeft:4,marginBottom:8,marginTop:4}}>Better start soon</div>
+      {startSoon.map(renderTaskWithEdit)}
+    </div>
+  )}
+  {tasks.length===0 && (
+    <div style={{...emptyState}}>
+      No tasks. Add a project → auto-builds your task chain.
+    </div>
+  )}
+
+  {/* Brain dump */}
+  <Collapsible open={brainOpen} setOpen={setBrainOpen} label="Brain dump" icon={<FileText size={12}/>}>
+    <textarea
+      value={log.brainDump||''}
+      onChange={e=>updateLog({brainDump:e.target.value})}
+      placeholder="Empty the head onto the page. No structure required."
+      rows={6}
+      style={{...textArea}}
+    />
+  </Collapsible>
+
+  {/* Reflection */}
+  <Collapsible open={reflectOpen} setOpen={setReflectOpen} label="End-of-day reflection" icon={<RotateCcw size={12}/>}>
+    <textarea
+      value={log.reflection||''}
+      onChange={e=>updateLog({reflection:e.target.value})}
+      placeholder="What worked? What didn't? One adjustment for tomorrow."
+      rows={4}
+      style={{...textArea}}
+    />
+  </Collapsible>
+</div>
+```
+
+);
 }
 
 function Collapsible({open,setOpen,label,icon,children}) {
-  return (
-    <div className="card" style={{overflow:'hidden'}}>
-      <button onClick={()=>setOpen(!open)} style={{
-        width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',
-        padding:'14px 20px',background:'none',border:'none',cursor:'pointer',
-      }}>
-        <span style={{...sectionLabel,display:'flex',alignItems:'center',gap:6}}>{icon}{label}</span>
-        {open ? <ChevronDown size={15} style={{color:'#6b6660'}}/> : <ChevronRight size={15} style={{color:'#6b6660'}}/>}
-      </button>
-      {open && <div style={{padding:'0 20px 20px'}}>{children}</div>}
-    </div>
-  );
+return (
+<div className=“card” style={{overflow:‘hidden’}}>
+<button onClick={()=>setOpen(!open)} style={{
+width:‘100%’,display:‘flex’,alignItems:‘center’,justifyContent:‘space-between’,
+padding:‘14px 20px’,background:‘none’,border:‘none’,cursor:‘pointer’,
+}}>
+<span style={{…sectionLabel,display:‘flex’,alignItems:‘center’,gap:6}}>{icon}{label}</span>
+{open ? <ChevronDown size={15} style={{color:’#6b6660’}}/> : <ChevronRight size={15} style={{color:’#6b6660’}}/>}
+</button>
+{open && <div style={{padding:‘0 20px 20px’}}>{children}</div>}
+</div>
+);
 }
 
 function TaskRow({task,onToggle,expanded,onToggleExpand,onToggleSubtask}) {
-  const sp = SPRINTS.find(s=>s.id===task.sprint);
-  const subs = task.subtasks || [];
-  const subDone = subs.filter(s=>s.status==='done').length;
-  const hasSubs = subs.length > 0;
+const sp = SPRINTS.find(s=>s.id===task.sprint);
+const subs = task.subtasks || [];
+const subDone = subs.filter(s=>s.status===‘done’).length;
+const hasSubs = subs.length > 0;
 
-  return (
-    <div className="card" style={{padding:'14px 16px',marginBottom:8}}>
-      <div style={{display:'flex',gap:12,alignItems:'flex-start'}}>
-        <button onClick={onToggle} style={{background:'none',border:'none',cursor:'pointer',padding:0,marginTop:2,flexShrink:0}}>
-          {task.status==='done'
-            ? <CheckCircle2 size={20} style={{color:'#3d5a3d'}}/>
-            : <Circle      size={20} style={{color:'#6b6660'}}/>}
-        </button>
-        <div style={{flex:1,minWidth:0}}>
-          <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:8}}>
-            <span style={{fontSize:13,lineHeight:1.35,textDecoration:task.status==='done'?'line-through':'none',color:task.status==='done'?'#6b6660':'#1a1814'}}>
-              {task.name}
-            </span>
-            <span className={urgencyStyle(task.urgency)} style={{fontSize:10,padding:'2px 8px',borderRadius:99,border:'1px solid',whiteSpace:'nowrap',flexShrink:0}}>
-              {task.urgency}
-            </span>
-          </div>
-          <div style={{marginTop:4,display:'flex',flexWrap:'wrap',gap:'0 8px',fontSize:11,color:'#6b6660',alignItems:'center'}}>
-            <span className="fm">{fmtDate(task.autoDeadline)}</span>
-            <span>·</span>
-            <span style={{maxWidth:140,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{task.projectName}</span>
-            {sp&&<><span>·</span><span>{sp.short}</span></>}
-            {task.est&&<><span>·</span><span className="fm">~{task.est}m</span></>}
-            {hasSubs && (
-              <>
-                <span>·</span>
-                <button onClick={onToggleExpand} style={{background:'none',border:'none',cursor:'pointer',color:'#3d5a3d',padding:0,fontSize:11,display:'inline-flex',alignItems:'center',gap:3}}>
-                  {expanded ? <ChevronDown size={11}/> : <ChevronRight size={11}/>}
-                  <span className="fm">{subDone}/{subs.length}</span>
-                  <span>sub</span>
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-      </div>
-      {hasSubs && expanded && (
-        <div style={{marginTop:10,marginLeft:32,paddingLeft:8,borderLeft:'2px solid #e8e0d0',display:'flex',flexDirection:'column',gap:5}}>
-          {subs.map(s=>(
-            <div key={s.id} style={{display:'flex',alignItems:'center',gap:8}}>
-              <button onClick={()=>onToggleSubtask&&onToggleSubtask(s.id)} style={{background:'none',border:'none',cursor:'pointer',padding:0,flexShrink:0,display:'flex'}}>
-                {s.status==='done'
-                  ? <CheckCircle2 size={14} style={{color:'#3d5a3d'}}/>
-                  : <Circle size={14} style={{color:'#6b6660'}}/>}
-              </button>
-              <span style={{fontSize:12,lineHeight:1.4,textDecoration:s.status==='done'?'line-through':'none',color:s.status==='done'?'#6b6660':'#1a1814'}}>
-                {s.name}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+return (
+<div className=“card” style={{padding:‘14px 16px’,marginBottom:8}}>
+<div style={{display:‘flex’,gap:12,alignItems:‘flex-start’}}>
+<button onClick={onToggle} style={{background:‘none’,border:‘none’,cursor:‘pointer’,padding:0,marginTop:2,flexShrink:0}}>
+{task.status===‘done’
+? <CheckCircle2 size={20} style={{color:’#3d5a3d’}}/>
+: <Circle      size={20} style={{color:’#6b6660’}}/>}
+</button>
+<div style={{flex:1,minWidth:0}}>
+<div style={{display:‘flex’,alignItems:‘flex-start’,justifyContent:‘space-between’,gap:8}}>
+<span style={{fontSize:13,lineHeight:1.35,textDecoration:task.status===‘done’?‘line-through’:‘none’,color:task.status===‘done’?’#6b6660’:’#1a1814’}}>
+{task.name}
+</span>
+<span className={urgencyStyle(task.urgency)} style={{fontSize:10,padding:‘2px 8px’,borderRadius:99,border:‘1px solid’,whiteSpace:‘nowrap’,flexShrink:0}}>
+{task.urgency}
+</span>
+</div>
+<div style={{marginTop:4,display:‘flex’,flexWrap:‘wrap’,gap:‘0 8px’,fontSize:11,color:’#6b6660’,alignItems:‘center’}}>
+<span className="fm">{fmtDate(task.autoDeadline)}</span>
+<span>·</span>
+<span style={{maxWidth:140,overflow:‘hidden’,textOverflow:‘ellipsis’,whiteSpace:‘nowrap’}}>{task.projectName}</span>
+{sp&&<><span>·</span><span>{sp.short}</span></>}
+{task.est&&<><span>·</span><span className="fm">~{task.est}m</span></>}
+{hasSubs && (
+<>
+<span>·</span>
+<button onClick={onToggleExpand} style={{background:‘none’,border:‘none’,cursor:‘pointer’,color:’#3d5a3d’,padding:0,fontSize:11,display:‘inline-flex’,alignItems:‘center’,gap:3}}>
+{expanded ? <ChevronDown size={11}/> : <ChevronRight size={11}/>}
+<span className="fm">{subDone}/{subs.length}</span>
+<span>sub</span>
+</button>
+</>
+)}
+</div>
+</div>
+</div>
+{hasSubs && expanded && (
+<div style={{marginTop:10,marginLeft:32,paddingLeft:8,borderLeft:‘2px solid #e8e0d0’,display:‘flex’,flexDirection:‘column’,gap:5}}>
+{subs.map(s=>(
+<div key={s.id} style={{display:‘flex’,alignItems:‘center’,gap:8}}>
+<button onClick={()=>onToggleSubtask&&onToggleSubtask(s.id)} style={{background:‘none’,border:‘none’,cursor:‘pointer’,padding:0,flexShrink:0,display:‘flex’}}>
+{s.status===‘done’
+? <CheckCircle2 size={14} style={{color:’#3d5a3d’}}/>
+: <Circle size={14} style={{color:’#6b6660’}}/>}
+</button>
+<span style={{fontSize:12,lineHeight:1.4,textDecoration:s.status===‘done’?‘line-through’:‘none’,color:s.status===‘done’?’#6b6660’:’#1a1814’}}>
+{s.name}
+</span>
+</div>
+))}
+</div>
+)}
+</div>
+);
 }
 
 // ─────────────────────────────────────────────────────
@@ -861,264 +1281,270 @@ function TaskRow({task,onToggle,expanded,onToggleExpand,onToggleSubtask}) {
 // ─────────────────────────────────────────────────────
 
 function TasksView({tasks,allTasks,projects,setTasks}) {
-  const [filter,  setFilter]  = useState('open');
-  const [editing, setEditing] = useState(null);
-  const [adding,  setAdding]  = useState(false);
-  const [expandedSubs, setExpandedSubs] = useState({});
+const [filter,  setFilter]  = useState(‘open’);
+const [editing, setEditing] = useState(null);
+const [adding,  setAdding]  = useState(false);
+const [expandedSubs, setExpandedSubs] = useState({});
 
-  const toggleTask = id =>
-    setTasks(allTasks.map(t=>t.id===id?{...t,status:t.status==='done'?'open':'done'}:t));
+const toggleTask = id =>
+setTasks(allTasks.map(t=>t.id===id?{…t,status:t.status===‘done’?‘open’:‘done’}:t));
 
-  const toggleSubtask = (taskId, subId) =>
-    setTasks(allTasks.map(t => t.id===taskId
-      ? {...t, subtasks:(t.subtasks||[]).map(s=>s.id===subId?{...s,status:s.status==='done'?'open':'done'}:s)}
-      : t));
+const toggleSubtask = (taskId, subId) =>
+setTasks(allTasks.map(t => t.id===taskId
+? {…t, subtasks:(t.subtasks||[]).map(s=>s.id===subId?{…s,status:s.status===‘done’?‘open’:‘done’}:s)}
+: t));
 
-  const toggleExpand = id => setExpandedSubs(s=>({...s,[id]:!s[id]}));
+const toggleExpand = id => setExpandedSubs(s=>({…s,[id]:!s[id]}));
 
-  const saveTask  = (id,patch) => { setTasks(allTasks.map(t=>t.id===id?{...t,...patch}:t)); setEditing(null); };
-  const deleteTask = id => { setTasks(allTasks.filter(t=>t.id!==id)); setEditing(null); };
+const saveTask  = (id,patch) => { setTasks(allTasks.map(t=>t.id===id?{…t,…patch}:t)); setEditing(null); };
+const deleteTask = id => { setTasks(allTasks.filter(t=>t.id!==id)); setEditing(null); };
 
-  const addTask = patch => {
-    if (!patch.name?.trim()) return;
-    const newTask = {
-      id: uid(),
-      projectId: patch.projectId,
-      name: patch.name.trim(),
-      leadDays: patch.leadDays ?? 0,
-      sprint: patch.sprint || 'S3',
-      estimatedTime: patch.estimatedTime || 30,
-      est: patch.estimatedTime || 30,
-      actualTime: patch.actualTime || null,
-      status: 'open',
-      subtasks: [],
-      createdAt: new Date().toISOString(),
-    };
-    setTasks([...allTasks, newTask]);
-    setAdding(false);
-  };
+const addTask = patch => {
+if (!patch.name?.trim()) return;
+const newTask = {
+id: uid(),
+projectId: patch.projectId,
+name: patch.name.trim(),
+leadDays: patch.leadDays ?? 0,
+sprint: patch.sprint || ‘S3’,
+estimatedTime: patch.estimatedTime || 30,
+est: patch.estimatedTime || 30,
+actualTime: patch.actualTime || null,
+status: ‘open’,
+subtasks: [],
+createdAt: new Date().toISOString(),
+};
+setTasks([…allTasks, newTask]);
+setAdding(false);
+};
 
-  const filtered = filter==='all'  ? tasks
-    : filter==='open' ? tasks.filter(t=>t.status!=='done')
-    : tasks.filter(t=>t.sprint===filter);
+const filtered = filter===‘all’  ? tasks
+: filter===‘open’ ? tasks.filter(t=>t.status!==‘done’)
+: tasks.filter(t=>t.sprint===filter);
 
-  return (
-    <div>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:12}}>
-        <h2 className="fd" style={{fontSize:28,fontWeight:400,margin:0}}>Tasks</h2>
-        <div style={{display:'flex',gap:8,alignItems:'center'}}>
-          <span className="fm" style={{fontSize:11,color:'#6b6660'}}>{filtered.length}</span>
-          {projects.length>0 && !adding && (
-            <button onClick={()=>setAdding(true)} style={{...solidBtn,borderRadius:99,padding:'5px 12px'}}>
-              <Plus size={13}/> Add
-            </button>
-          )}
-        </div>
-      </div>
+return (
+<div>
+<div style={{display:‘flex’,justifyContent:‘space-between’,alignItems:‘baseline’,marginBottom:12}}>
+<h2 className="fd" style={{fontSize:28,fontWeight:400,margin:0}}>Tasks</h2>
+<div style={{display:‘flex’,gap:8,alignItems:‘center’}}>
+<span className=“fm” style={{fontSize:11,color:’#6b6660’}}>{filtered.length}</span>
+{projects.length>0 && !adding && (
+<button onClick={()=>setAdding(true)} style={{…solidBtn,borderRadius:99,padding:‘5px 12px’}}>
+<Plus size={13}/> Add
+</button>
+)}
+</div>
+</div>
 
-      {adding && (
-        <NewTaskForm projects={projects} onSave={addTask} onCancel={()=>setAdding(false)}/>
-      )}
+```
+  {adding && (
+    <NewTaskForm projects={projects} onSave={addTask} onCancel={()=>setAdding(false)}/>
+  )}
 
-      {projects.length===0 && !adding && (
-        <div style={{...emptyState,marginBottom:12}}>
-          Create a project first (Projects tab) — that gives tasks a home.
-        </div>
-      )}
-
-      <div style={{display:'flex',gap:6,overflowX:'auto',paddingBottom:4,marginBottom:16}}>
-        {[{id:'all',label:'All'},{id:'open',label:'Open'},...SPRINTS.map(s=>({id:s.id,label:s.short}))].map(f=>(
-          <button key={f.id} onClick={()=>setFilter(f.id)} style={{
-            padding:'5px 12px',borderRadius:99,fontSize:12,whiteSpace:'nowrap',cursor:'pointer',
-            ...(filter===f.id
-              ? {background:'#1a1814',color:'#faf7f2',border:'none'}
-              : {background:'none',color:'#6b6660',border:'1px solid #e8e0d0'})
-          }}>{f.label}</button>
-        ))}
-      </div>
-
-      {filtered.length===0 && <div style={emptyState}>No tasks here.</div>}
-      {filtered.map(t => editing===t.id
-        ? <TaskEditor key={t.id} task={t} projects={projects} onSave={p=>saveTask(t.id,p)} onCancel={()=>setEditing(null)} onDelete={()=>deleteTask(t.id)}/>
-        : (
-          <div key={t.id} style={{position:'relative'}}>
-            <TaskRow task={t} onToggle={()=>toggleTask(t.id)}
-              expanded={!!expandedSubs[t.id]}
-              onToggleExpand={()=>toggleExpand(t.id)}
-              onToggleSubtask={sid=>toggleSubtask(t.id,sid)}/>
-            <button onClick={()=>setEditing(t.id)} style={{
-              position:'absolute',top:12,right:44,background:'none',border:'none',cursor:'pointer',color:'#6b6660',opacity:0.5
-            }}>
-              <Edit3 size={13}/>
-            </button>
-          </div>
-        )
-      )}
+  {projects.length===0 && !adding && (
+    <div style={{...emptyState,marginBottom:12}}>
+      Create a project first (Projects tab) — that gives tasks a home.
     </div>
-  );
+  )}
+
+  <div style={{display:'flex',gap:6,overflowX:'auto',paddingBottom:4,marginBottom:16}}>
+    {[{id:'all',label:'All'},{id:'open',label:'Open'},...SPRINTS.map(s=>({id:s.id,label:s.short}))].map(f=>(
+      <button key={f.id} onClick={()=>setFilter(f.id)} style={{
+        padding:'5px 12px',borderRadius:99,fontSize:12,whiteSpace:'nowrap',cursor:'pointer',
+        ...(filter===f.id
+          ? {background:'#1a1814',color:'#faf7f2',border:'none'}
+          : {background:'none',color:'#6b6660',border:'1px solid #e8e0d0'})
+      }}>{f.label}</button>
+    ))}
+  </div>
+
+  {filtered.length===0 && <div style={emptyState}>No tasks here.</div>}
+  {filtered.map(t => editing===t.id
+    ? <TaskEditor key={t.id} task={t} projects={projects} onSave={p=>saveTask(t.id,p)} onCancel={()=>setEditing(null)} onDelete={()=>deleteTask(t.id)}/>
+    : (
+      <div key={t.id} style={{position:'relative'}}>
+        <TaskRow task={t} onToggle={()=>toggleTask(t.id)}
+          expanded={!!expandedSubs[t.id]}
+          onToggleExpand={()=>toggleExpand(t.id)}
+          onToggleSubtask={sid=>toggleSubtask(t.id,sid)}/>
+        <button onClick={()=>setEditing(t.id)} style={{
+          position:'absolute',top:12,right:44,background:'none',border:'none',cursor:'pointer',color:'#6b6660',opacity:0.5
+        }}>
+          <Edit3 size={13}/>
+        </button>
+      </div>
+    )
+  )}
+</div>
+```
+
+);
 }
 
 function NewTaskForm({projects,onSave,onCancel}) {
-  const [name,    setName]    = useState('');
-  const [projId,  setProjId]  = useState(projects[0]?.id || '');
-  const [sprint,  setSprint]  = useState('S3');
-  const [ld,      setLd]      = useState(0);
-  const [est,     setEst]     = useState(30);
+const [name,    setName]    = useState(’’);
+const [projId,  setProjId]  = useState(projects[0]?.id || ‘’);
+const [sprint,  setSprint]  = useState(‘S3’);
+const [ld,      setLd]      = useState(0);
+const [est,     setEst]     = useState(30);
 
-  return (
-    <div className="card" style={{padding:16,marginBottom:12}}>
-      <input value={name} onChange={e=>setName(e.target.value)} placeholder="Task name" autoFocus
-        style={{...ghostInput,fontSize:14,fontWeight:600,borderBottom:'1px solid #e8e0d0',paddingBottom:8,marginBottom:12,width:'100%'}}/>
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
-        <label style={{fontSize:11,gridColumn:'span 2'}}>
-          <span style={{color:'#6b6660',display:'block',marginBottom:3}}>Project</span>
-          <select value={projId} onChange={e=>setProjId(e.target.value)} style={selectStyle}>
-            {projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
-        </label>
-        <label style={{fontSize:11}}>
-          <span style={{color:'#6b6660',display:'block',marginBottom:3}}>Sprint</span>
-          <select value={sprint} onChange={e=>setSprint(e.target.value)} style={selectStyle}>
-            {SPRINTS.map(s=><option key={s.id} value={s.id}>{s.short}</option>)}
-          </select>
-        </label>
-        <label style={{fontSize:11}}>
-          <span style={{color:'#6b6660',display:'block',marginBottom:3}}>Lead days</span>
-          <input type="number" value={ld} onChange={e=>setLd(+e.target.value||0)} style={{...selectStyle,fontFamily:'monospace'}}/>
-        </label>
-        <label style={{fontSize:11,gridColumn:'span 2'}}>
-          <span style={{color:'#6b6660',display:'block',marginBottom:3}}>Est (min)</span>
-          <input type="number" value={est} onChange={e=>setEst(+e.target.value||0)} style={{...selectStyle,fontFamily:'monospace'}}/>
-        </label>
-      </div>
-      <div style={{display:'flex',gap:8}}>
-        <button onClick={()=>onSave({name,projectId:projId,sprint,leadDays:ld,estimatedTime:est})}
-          style={{...solidBtn,flex:1,justifyContent:'center',borderRadius:10,padding:9}}>
-          <Save size={13}/> Add task
-        </button>
-        <button onClick={onCancel} style={{...ghostBtn,borderRadius:10,padding:'9px 14px'}}>Cancel</button>
-      </div>
-    </div>
-  );
+return (
+<div className="card" style={{padding:16,marginBottom:12}}>
+<input value={name} onChange={e=>setName(e.target.value)} placeholder=“Task name” autoFocus
+style={{…ghostInput,fontSize:14,fontWeight:600,borderBottom:‘1px solid #e8e0d0’,paddingBottom:8,marginBottom:12,width:‘100%’}}/>
+<div style={{display:‘grid’,gridTemplateColumns:‘1fr 1fr’,gap:10,marginBottom:12}}>
+<label style={{fontSize:11,gridColumn:‘span 2’}}>
+<span style={{color:’#6b6660’,display:‘block’,marginBottom:3}}>Project</span>
+<select value={projId} onChange={e=>setProjId(e.target.value)} style={selectStyle}>
+{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+</select>
+</label>
+<label style={{fontSize:11}}>
+<span style={{color:’#6b6660’,display:‘block’,marginBottom:3}}>Sprint</span>
+<select value={sprint} onChange={e=>setSprint(e.target.value)} style={selectStyle}>
+{SPRINTS.map(s=><option key={s.id} value={s.id}>{s.short}</option>)}
+</select>
+</label>
+<label style={{fontSize:11}}>
+<span style={{color:’#6b6660’,display:‘block’,marginBottom:3}}>Lead days</span>
+<input type=“number” value={ld} onChange={e=>setLd(+e.target.value||0)} style={{…selectStyle,fontFamily:‘monospace’}}/>
+</label>
+<label style={{fontSize:11,gridColumn:‘span 2’}}>
+<span style={{color:’#6b6660’,display:‘block’,marginBottom:3}}>Est (min)</span>
+<input type=“number” value={est} onChange={e=>setEst(+e.target.value||0)} style={{…selectStyle,fontFamily:‘monospace’}}/>
+</label>
+</div>
+<div style={{display:‘flex’,gap:8}}>
+<button onClick={()=>onSave({name,projectId:projId,sprint,leadDays:ld,estimatedTime:est})}
+style={{…solidBtn,flex:1,justifyContent:‘center’,borderRadius:10,padding:9}}>
+<Save size={13}/> Add task
+</button>
+<button onClick={onCancel} style={{…ghostBtn,borderRadius:10,padding:‘9px 14px’}}>Cancel</button>
+</div>
+</div>
+);
 }
 
 function TaskEditor({task,projects,onSave,onCancel,onDelete}) {
-  const [name,    setName]    = useState(task.name);
-  const [ld,      setLd]      = useState(task.leadDays);
-  const [sprint,  setSprint]  = useState(task.sprint);
-  const [est,     setEst]     = useState(task.est||task.estimatedTime||30);
-  const [actual,  setActual]  = useState(task.actualTime||'');
-  const [projId,  setProjId]  = useState(task.projectId);
-  const [conf,    setConf]    = useState(false);
-  const [subs,    setSubs]    = useState(task.subtasks || []);
-  const [subInput,setSubInput]= useState('');
-  const [editingSubId, setEditingSubId] = useState(null);
+const [name,    setName]    = useState(task.name);
+const [ld,      setLd]      = useState(task.leadDays);
+const [sprint,  setSprint]  = useState(task.sprint);
+const [est,     setEst]     = useState(task.est||task.estimatedTime||30);
+const [actual,  setActual]  = useState(task.actualTime||’’);
+const [projId,  setProjId]  = useState(task.projectId);
+const [conf,    setConf]    = useState(false);
+const [subs,    setSubs]    = useState(task.subtasks || []);
+const [subInput,setSubInput]= useState(’’);
+const [editingSubId, setEditingSubId] = useState(null);
 
-  const addSub = () => {
-    const t = subInput.trim();
-    if (!t) return;
-    setSubs([...subs, {id:uid(), name:t, status:'open'}]);
-    setSubInput('');
-  };
-  const updateSub = (id, n) => {
-    const t = (n||'').trim();
-    if (!t) { setSubs(subs.filter(s=>s.id!==id)); return; }
-    setSubs(subs.map(s=>s.id===id?{...s,name:t}:s));
-  };
-  const removeSub = id => setSubs(subs.filter(s=>s.id!==id));
-  const toggleSub = id => setSubs(subs.map(s=>s.id===id?{...s,status:s.status==='done'?'open':'done'}:s));
+const addSub = () => {
+const t = subInput.trim();
+if (!t) return;
+setSubs([…subs, {id:uid(), name:t, status:‘open’}]);
+setSubInput(’’);
+};
+const updateSub = (id, n) => {
+const t = (n||’’).trim();
+if (!t) { setSubs(subs.filter(s=>s.id!==id)); return; }
+setSubs(subs.map(s=>s.id===id?{…s,name:t}:s));
+};
+const removeSub = id => setSubs(subs.filter(s=>s.id!==id));
+const toggleSub = id => setSubs(subs.map(s=>s.id===id?{…s,status:s.status===‘done’?‘open’:‘done’}:s));
 
-  return (
-    <div className="card" style={{padding:16,marginBottom:8}}>
-      <input value={name} onChange={e=>setName(e.target.value)}
-        style={{...ghostInput,fontSize:14,fontWeight:600,borderBottom:'1px solid #e8e0d0',paddingBottom:8,marginBottom:12,width:'100%'}}/>
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
-        {[
-          {label:'Project', el:<select value={projId} onChange={e=>setProjId(e.target.value)} style={selectStyle}>
-            {projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>},
-          {label:'Sprint',  el:<select value={sprint} onChange={e=>setSprint(e.target.value)} style={selectStyle}>
-            {SPRINTS.map(s=><option key={s.id} value={s.id}>{s.short}</option>)}</select>},
-          {label:'Lead days',el:<input type="number" value={ld} onChange={e=>setLd(+e.target.value||0)} style={{...selectStyle,fontFamily:'monospace'}}/>},
-          {label:'Est (min)',el:<input type="number" value={est} onChange={e=>setEst(+e.target.value||0)} style={{...selectStyle,fontFamily:'monospace'}}/>},
-        ].map(({label,el},i)=>(
-          <label key={i} style={{fontSize:11}}>
-            <span style={{color:'#6b6660',display:'block',marginBottom:3}}>{label}</span>
-            {el}
-          </label>
-        ))}
-        <label style={{fontSize:11,gridColumn:'span 2'}}>
-          <span style={{color:'#6b6660',display:'block',marginBottom:3}}>Actual min (fill in after)</span>
-          <input type="number" value={actual} onChange={e=>setActual(e.target.value)} style={{...selectStyle,fontFamily:'monospace',width:'100%'}}/>
-        </label>
-      </div>
+return (
+<div className="card" style={{padding:16,marginBottom:8}}>
+<input value={name} onChange={e=>setName(e.target.value)}
+style={{…ghostInput,fontSize:14,fontWeight:600,borderBottom:‘1px solid #e8e0d0’,paddingBottom:8,marginBottom:12,width:‘100%’}}/>
+<div style={{display:‘grid’,gridTemplateColumns:‘1fr 1fr’,gap:10,marginBottom:12}}>
+{[
+{label:‘Project’, el:<select value={projId} onChange={e=>setProjId(e.target.value)} style={selectStyle}>
+{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>},
+{label:‘Sprint’,  el:<select value={sprint} onChange={e=>setSprint(e.target.value)} style={selectStyle}>
+{SPRINTS.map(s=><option key={s.id} value={s.id}>{s.short}</option>)}</select>},
+{label:‘Lead days’,el:<input type=“number” value={ld} onChange={e=>setLd(+e.target.value||0)} style={{…selectStyle,fontFamily:‘monospace’}}/>},
+{label:‘Est (min)’,el:<input type=“number” value={est} onChange={e=>setEst(+e.target.value||0)} style={{…selectStyle,fontFamily:‘monospace’}}/>},
+].map(({label,el},i)=>(
+<label key={i} style={{fontSize:11}}>
+<span style={{color:’#6b6660’,display:‘block’,marginBottom:3}}>{label}</span>
+{el}
+</label>
+))}
+<label style={{fontSize:11,gridColumn:‘span 2’}}>
+<span style={{color:’#6b6660’,display:‘block’,marginBottom:3}}>Actual min (fill in after)</span>
+<input type=“number” value={actual} onChange={e=>setActual(e.target.value)} style={{…selectStyle,fontFamily:‘monospace’,width:‘100%’}}/>
+</label>
+</div>
 
-      {/* Sub-tasks section */}
-      <div style={{borderTop:'1px solid #e8e0d0',paddingTop:12,marginBottom:12}}>
-        <div style={{...sectionLabel,marginBottom:8,display:'flex',alignItems:'center',gap:6}}>
-          <Layers size={11}/>Sub-tasks ({subs.length})
-        </div>
-        <div style={{display:'flex',gap:6,marginBottom:subs.length>0?10:0}}>
-          <input
-            value={subInput}
-            onChange={e=>setSubInput(e.target.value)}
-            onKeyDown={e=>e.key==='Enter'&&addSub()}
-            placeholder="Add a sub-task and hit Enter"
-            style={{flex:1,padding:'6px 10px',borderRadius:8,border:'1px solid #e8e0d0',fontSize:12,background:'#faf7f2'}}
-          />
-          <button onClick={addSub} style={{...solidBtn,padding:'6px 10px',borderRadius:8}}>
-            <Plus size={13}/>
-          </button>
-        </div>
-        {subs.length>0 && (
-          <ul style={{listStyle:'none',padding:0,margin:0,display:'flex',flexDirection:'column',gap:5}}>
-            {subs.map(s=>(
-              <li key={s.id} style={{display:'flex',alignItems:'center',gap:8,padding:'4px 0'}}>
-                <button onClick={()=>toggleSub(s.id)} style={{background:'none',border:'none',cursor:'pointer',padding:0,flexShrink:0,display:'flex'}}>
-                  {s.status==='done'
-                    ? <CheckCircle2 size={14} style={{color:'#3d5a3d'}}/>
-                    : <Circle size={14} style={{color:'#6b6660'}}/>}
-                </button>
-                {editingSubId===s.id ? (
-                  <input
-                    autoFocus
-                    defaultValue={s.name}
-                    onBlur={e=>{ updateSub(s.id, e.target.value); setEditingSubId(null); }}
-                    onKeyDown={e=>{
-                      if (e.key==='Enter') { updateSub(s.id, e.target.value); setEditingSubId(null); }
-                      if (e.key==='Escape') setEditingSubId(null);
-                    }}
-                    style={{flex:1,fontSize:12,background:'#faf7f2',border:'1px solid #e8e0d0',borderRadius:6,padding:'3px 6px'}}
-                  />
-                ) : (
-                  <span onClick={()=>setEditingSubId(s.id)} title="Click to edit"
-                    style={{flex:1,fontSize:12,cursor:'text',textDecoration:s.status==='done'?'line-through':'none',color:s.status==='done'?'#6b6660':'#1a1814'}}>
-                    {s.name}
-                  </span>
-                )}
-                <button onClick={()=>removeSub(s.id)} style={{background:'none',border:'none',cursor:'pointer',color:'#6b6660',padding:0}}>
-                  <X size={12}/>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      <div style={{display:'flex',gap:8}}>
-        <button onClick={()=>onSave({name,leadDays:ld,sprint,estimatedTime:est,est,actualTime:actual?+actual:null,projectId:projId,subtasks:subs})}
-          style={{...solidBtn,flex:1,justifyContent:'center',borderRadius:10,padding:'9px'}}>
-          <Save size={13}/> Save
-        </button>
-        <button onClick={onCancel} style={{...ghostBtn,borderRadius:10,padding:'9px 14px'}}>Cancel</button>
-        {conf
-          ? <button onClick={onDelete} style={{padding:'9px 14px',borderRadius:10,background:'#fee2e2',color:'#991b1b',border:'none',cursor:'pointer',fontSize:13}}>Sure?</button>
-          : <button onClick={()=>setConf(true)} style={{padding:'9px 12px',borderRadius:10,border:'1px solid #fecaca',background:'none',color:'#dc2626',cursor:'pointer'}}>
-              <Trash2 size={14}/>
-            </button>
-        }
-      </div>
+```
+  {/* Sub-tasks section */}
+  <div style={{borderTop:'1px solid #e8e0d0',paddingTop:12,marginBottom:12}}>
+    <div style={{...sectionLabel,marginBottom:8,display:'flex',alignItems:'center',gap:6}}>
+      <Layers size={11}/>Sub-tasks ({subs.length})
     </div>
-  );
+    <div style={{display:'flex',gap:6,marginBottom:subs.length>0?10:0}}>
+      <input
+        value={subInput}
+        onChange={e=>setSubInput(e.target.value)}
+        onKeyDown={e=>e.key==='Enter'&&addSub()}
+        placeholder="Add a sub-task and hit Enter"
+        style={{flex:1,padding:'6px 10px',borderRadius:8,border:'1px solid #e8e0d0',fontSize:12,background:'#faf7f2'}}
+      />
+      <button onClick={addSub} style={{...solidBtn,padding:'6px 10px',borderRadius:8}}>
+        <Plus size={13}/>
+      </button>
+    </div>
+    {subs.length>0 && (
+      <ul style={{listStyle:'none',padding:0,margin:0,display:'flex',flexDirection:'column',gap:5}}>
+        {subs.map(s=>(
+          <li key={s.id} style={{display:'flex',alignItems:'center',gap:8,padding:'4px 0'}}>
+            <button onClick={()=>toggleSub(s.id)} style={{background:'none',border:'none',cursor:'pointer',padding:0,flexShrink:0,display:'flex'}}>
+              {s.status==='done'
+                ? <CheckCircle2 size={14} style={{color:'#3d5a3d'}}/>
+                : <Circle size={14} style={{color:'#6b6660'}}/>}
+            </button>
+            {editingSubId===s.id ? (
+              <input
+                autoFocus
+                defaultValue={s.name}
+                onBlur={e=>{ updateSub(s.id, e.target.value); setEditingSubId(null); }}
+                onKeyDown={e=>{
+                  if (e.key==='Enter') { updateSub(s.id, e.target.value); setEditingSubId(null); }
+                  if (e.key==='Escape') setEditingSubId(null);
+                }}
+                style={{flex:1,fontSize:12,background:'#faf7f2',border:'1px solid #e8e0d0',borderRadius:6,padding:'3px 6px'}}
+              />
+            ) : (
+              <span onClick={()=>setEditingSubId(s.id)} title="Click to edit"
+                style={{flex:1,fontSize:12,cursor:'text',textDecoration:s.status==='done'?'line-through':'none',color:s.status==='done'?'#6b6660':'#1a1814'}}>
+                {s.name}
+              </span>
+            )}
+            <button onClick={()=>removeSub(s.id)} style={{background:'none',border:'none',cursor:'pointer',color:'#6b6660',padding:0}}>
+              <X size={12}/>
+            </button>
+          </li>
+        ))}
+      </ul>
+    )}
+  </div>
+
+  <div style={{display:'flex',gap:8}}>
+    <button onClick={()=>onSave({name,leadDays:ld,sprint,estimatedTime:est,est,actualTime:actual?+actual:null,projectId:projId,subtasks:subs})}
+      style={{...solidBtn,flex:1,justifyContent:'center',borderRadius:10,padding:'9px'}}>
+      <Save size={13}/> Save
+    </button>
+    <button onClick={onCancel} style={{...ghostBtn,borderRadius:10,padding:'9px 14px'}}>Cancel</button>
+    {conf
+      ? <button onClick={onDelete} style={{padding:'9px 14px',borderRadius:10,background:'#fee2e2',color:'#991b1b',border:'none',cursor:'pointer',fontSize:13}}>Sure?</button>
+      : <button onClick={()=>setConf(true)} style={{padding:'9px 12px',borderRadius:10,border:'1px solid #fecaca',background:'none',color:'#dc2626',cursor:'pointer'}}>
+          <Trash2 size={14}/>
+        </button>
+    }
+  </div>
+</div>
+```
+
+);
 }
 
 // ─────────────────────────────────────────────────────
@@ -1126,163 +1552,166 @@ function TaskEditor({task,projects,onSave,onCancel,onDelete}) {
 // ─────────────────────────────────────────────────────
 
 function ProjectsView({projects,tasks,setProjects,setTasks}) {
-  const [adding,  setAdding]  = useState(false);
-  const [confDel, setConfDel] = useState(null);
-  const [editingId, setEditingId] = useState(null);
+const [adding,  setAdding]  = useState(false);
+const [confDel, setConfDel] = useState(null);
+const [editingId, setEditingId] = useState(null);
 
-  const addProject = ({name,archetype,finalDeadline}) => {
-    const id = uid();
-    setProjects([...projects,{id,name,archetype,finalDeadline,status:'active',createdAt:new Date().toISOString()}]);
-    const newTasks = (TEMPLATES[archetype]||[]).map(t=>({
-      id:uid(),projectId:id,name:t.name,leadDays:t.leadDays,sprint:t.sprint,
-      estimatedTime:t.est,est:t.est,actualTime:null,status:'open',subtasks:[],createdAt:new Date().toISOString()
-    }));
-    setTasks([...tasks,...newTasks]);
-    setAdding(false);
-  };
+const addProject = ({name,archetype,finalDeadline}) => {
+const id = uid();
+setProjects([…projects,{id,name,archetype,finalDeadline,status:‘active’,createdAt:new Date().toISOString()}]);
+const newTasks = (TEMPLATES[archetype]||[]).map(t=>({
+id:uid(),projectId:id,name:t.name,leadDays:t.leadDays,sprint:t.sprint,
+estimatedTime:t.est,est:t.est,actualTime:null,status:‘open’,subtasks:[],createdAt:new Date().toISOString()
+}));
+setTasks([…tasks,…newTasks]);
+setAdding(false);
+};
 
-  const saveProject = (id, patch) => {
-    setProjects(projects.map(p => p.id===id ? {...p, ...patch} : p));
-    setEditingId(null);
-  };
+const saveProject = (id, patch) => {
+setProjects(projects.map(p => p.id===id ? {…p, …patch} : p));
+setEditingId(null);
+};
 
-  const delProject = id => {
-    setProjects(projects.filter(p=>p.id!==id));
-    setTasks(tasks.filter(t=>t.projectId!==id));
-    setConfDel(null);
-  };
+const delProject = id => {
+setProjects(projects.filter(p=>p.id!==id));
+setTasks(tasks.filter(t=>t.projectId!==id));
+setConfDel(null);
+};
 
-  const stats = projects.map(p=>{
-    const pt = tasks.filter(t=>t.projectId===p.id);
-    const done = pt.filter(t=>t.status==='done').length;
-    return {...p,total:pt.length,done,pct:pt.length?Math.round(done/pt.length*100):0};
-  });
+const stats = projects.map(p=>{
+const pt = tasks.filter(t=>t.projectId===p.id);
+const done = pt.filter(t=>t.status===‘done’).length;
+return {…p,total:pt.length,done,pct:pt.length?Math.round(done/pt.length*100):0};
+});
 
-  return (
-    <div>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:16}}>
-        <h2 className="fd" style={{fontSize:28,fontWeight:400,margin:0}}>Projects</h2>
-        <button onClick={()=>setAdding(true)} style={{...solidBtn,borderRadius:99}}>
-          <Plus size={14}/> New
-        </button>
-      </div>
+return (
+<div>
+<div style={{display:‘flex’,justifyContent:‘space-between’,alignItems:‘baseline’,marginBottom:16}}>
+<h2 className="fd" style={{fontSize:28,fontWeight:400,margin:0}}>Projects</h2>
+<button onClick={()=>setAdding(true)} style={{…solidBtn,borderRadius:99}}>
+<Plus size={14}/> New
+</button>
+</div>
 
-      {adding && <ProjectForm onSave={addProject} onCancel={()=>setAdding(false)}/>}
+```
+  {adding && <ProjectForm onSave={addProject} onCancel={()=>setAdding(false)}/>}
 
-      {stats.length===0&&!adding && (
-        <div style={emptyState}>
-          No projects yet. Add one real live thing — Premera call, DSGN F130, blood panel.
-        </div>
-      )}
-      {stats.map(p=> editingId===p.id ? (
-        <ProjectEditor key={p.id} project={p}
-          onSave={patch=>saveProject(p.id,patch)}
-          onCancel={()=>setEditingId(null)}/>
-      ) : (
-        <div key={p.id} className="card" style={{padding:16,marginBottom:8}}>
-          <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:8}}>
-            <div style={{flex:1,minWidth:0}}>
-              <div style={{fontSize:14,fontWeight:500,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.name}</div>
-              <div style={{fontSize:11,color:'#6b6660',marginTop:3,display:'flex',gap:6}}>
-                <span>{p.archetype}</span><span>·</span>
-                <span className="fm">due {fmtDate(p.finalDeadline)}</span>
-              </div>
-            </div>
-            {confDel===p.id ? (
-              <div style={{display:'flex',gap:6}}>
-                <button onClick={()=>delProject(p.id)} style={{fontSize:11,padding:'4px 10px',borderRadius:6,background:'#fee2e2',color:'#991b1b',border:'none',cursor:'pointer'}}>Delete</button>
-                <button onClick={()=>setConfDel(null)} style={{fontSize:11,padding:'4px 10px',borderRadius:6,background:'none',color:'#6b6660',border:'1px solid #e8e0d0',cursor:'pointer'}}>Cancel</button>
-              </div>
-            ):(
-              <div style={{display:'flex',gap:8}}>
-                <button onClick={()=>setEditingId(p.id)} title="Edit project" style={{background:'none',border:'none',cursor:'pointer',color:'#6b6660'}}>
-                  <Edit3 size={14}/>
-                </button>
-                <button onClick={()=>setConfDel(p.id)} title="Delete project" style={{background:'none',border:'none',cursor:'pointer',color:'#6b6660'}}>
-                  <Trash2 size={14}/>
-                </button>
-              </div>
-            )}
-          </div>
-          <div style={{marginTop:12,display:'flex',alignItems:'center',gap:8}}>
-            <div style={{flex:1,height:4,background:'#faf7f2',borderRadius:4,overflow:'hidden'}}>
-              <div style={{height:'100%',width:`${p.pct}%`,background:'#3d5a3d',borderRadius:4}}/>
-            </div>
-            <span className="fm" style={{fontSize:11,color:'#6b6660'}}>{p.done}/{p.total}</span>
-          </div>
-        </div>
-      ))}
+  {stats.length===0&&!adding && (
+    <div style={emptyState}>
+      No projects yet. Add one real live thing — Premera call, DSGN F130, blood panel.
     </div>
-  );
+  )}
+  {stats.map(p=> editingId===p.id ? (
+    <ProjectEditor key={p.id} project={p}
+      onSave={patch=>saveProject(p.id,patch)}
+      onCancel={()=>setEditingId(null)}/>
+  ) : (
+    <div key={p.id} className="card" style={{padding:16,marginBottom:8}}>
+      <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:8}}>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:14,fontWeight:500,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.name}</div>
+          <div style={{fontSize:11,color:'#6b6660',marginTop:3,display:'flex',gap:6}}>
+            <span>{p.archetype}</span><span>·</span>
+            <span className="fm">due {fmtDate(p.finalDeadline)}</span>
+          </div>
+        </div>
+        {confDel===p.id ? (
+          <div style={{display:'flex',gap:6}}>
+            <button onClick={()=>delProject(p.id)} style={{fontSize:11,padding:'4px 10px',borderRadius:6,background:'#fee2e2',color:'#991b1b',border:'none',cursor:'pointer'}}>Delete</button>
+            <button onClick={()=>setConfDel(null)} style={{fontSize:11,padding:'4px 10px',borderRadius:6,background:'none',color:'#6b6660',border:'1px solid #e8e0d0',cursor:'pointer'}}>Cancel</button>
+          </div>
+        ):(
+          <div style={{display:'flex',gap:8}}>
+            <button onClick={()=>setEditingId(p.id)} title="Edit project" style={{background:'none',border:'none',cursor:'pointer',color:'#6b6660'}}>
+              <Edit3 size={14}/>
+            </button>
+            <button onClick={()=>setConfDel(p.id)} title="Delete project" style={{background:'none',border:'none',cursor:'pointer',color:'#6b6660'}}>
+              <Trash2 size={14}/>
+            </button>
+          </div>
+        )}
+      </div>
+      <div style={{marginTop:12,display:'flex',alignItems:'center',gap:8}}>
+        <div style={{flex:1,height:4,background:'#faf7f2',borderRadius:4,overflow:'hidden'}}>
+          <div style={{height:'100%',width:`${p.pct}%`,background:'#3d5a3d',borderRadius:4}}/>
+        </div>
+        <span className="fm" style={{fontSize:11,color:'#6b6660'}}>{p.done}/{p.total}</span>
+      </div>
+    </div>
+  ))}
+</div>
+```
+
+);
 }
 
 function ProjectEditor({project,onSave,onCancel}) {
-  const [name,     setName]     = useState(project.name);
-  const [archetype,setArchetype]= useState(project.archetype);
-  const [deadline, setDeadline] = useState(project.finalDeadline);
+const [name,     setName]     = useState(project.name);
+const [archetype,setArchetype]= useState(project.archetype);
+const [deadline, setDeadline] = useState(project.finalDeadline);
 
-  return (
-    <div className="card" style={{padding:16,marginBottom:8}}>
-      <input value={name} onChange={e=>setName(e.target.value)} placeholder="Project name" autoFocus
-        style={{...ghostInput,fontSize:14,fontWeight:600,borderBottom:'1px solid #e8e0d0',paddingBottom:8,marginBottom:12,width:'100%'}}/>
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
-        <label style={{fontSize:11}}>
-          <span style={{color:'#6b6660',display:'block',marginBottom:3}}>Archetype</span>
-          <select value={archetype} onChange={e=>setArchetype(e.target.value)} style={selectStyle}>
-            {ARCHETYPES.map(a=><option key={a} value={a}>{a}</option>)}
-          </select>
-        </label>
-        <label style={{fontSize:11}}>
-          <span style={{color:'#6b6660',display:'block',marginBottom:3}}>Final deadline</span>
-          <input type="date" value={deadline} onChange={e=>setDeadline(e.target.value)} style={{...selectStyle,fontFamily:'monospace'}}/>
-        </label>
-      </div>
-      <p style={{fontSize:11,color:'#6b6660',fontStyle:'italic',marginBottom:12}}>
-        Editing the deadline shifts every task's auto-deadline (lead-day chain). Existing tasks stay; archetype change does not auto-rebuild.
-      </p>
-      <div style={{display:'flex',gap:8}}>
-        <button onClick={()=>name.trim()&&onSave({name:name.trim(),archetype,finalDeadline:deadline})}
-          style={{...solidBtn,flex:1,justifyContent:'center',borderRadius:10,padding:9}}>
-          <Save size={13}/> Save
-        </button>
-        <button onClick={onCancel} style={{...ghostBtn,borderRadius:10,padding:'9px 14px'}}>Cancel</button>
-      </div>
-    </div>
-  );
+return (
+<div className="card" style={{padding:16,marginBottom:8}}>
+<input value={name} onChange={e=>setName(e.target.value)} placeholder=“Project name” autoFocus
+style={{…ghostInput,fontSize:14,fontWeight:600,borderBottom:‘1px solid #e8e0d0’,paddingBottom:8,marginBottom:12,width:‘100%’}}/>
+<div style={{display:‘grid’,gridTemplateColumns:‘1fr 1fr’,gap:10,marginBottom:12}}>
+<label style={{fontSize:11}}>
+<span style={{color:’#6b6660’,display:‘block’,marginBottom:3}}>Archetype</span>
+<select value={archetype} onChange={e=>setArchetype(e.target.value)} style={selectStyle}>
+{ARCHETYPES.map(a=><option key={a} value={a}>{a}</option>)}
+</select>
+</label>
+<label style={{fontSize:11}}>
+<span style={{color:’#6b6660’,display:‘block’,marginBottom:3}}>Final deadline</span>
+<input type=“date” value={deadline} onChange={e=>setDeadline(e.target.value)} style={{…selectStyle,fontFamily:‘monospace’}}/>
+</label>
+</div>
+<p style={{fontSize:11,color:’#6b6660’,fontStyle:‘italic’,marginBottom:12}}>
+Editing the deadline shifts every task’s auto-deadline (lead-day chain). Existing tasks stay; archetype change does not auto-rebuild.
+</p>
+<div style={{display:‘flex’,gap:8}}>
+<button onClick={()=>name.trim()&&onSave({name:name.trim(),archetype,finalDeadline:deadline})}
+style={{…solidBtn,flex:1,justifyContent:‘center’,borderRadius:10,padding:9}}>
+<Save size={13}/> Save
+</button>
+<button onClick={onCancel} style={{…ghostBtn,borderRadius:10,padding:‘9px 14px’}}>Cancel</button>
+</div>
+</div>
+);
 }
 
 function ProjectForm({onSave,onCancel}) {
-  const def = (() => { const d=new Date(); d.setDate(d.getDate()+7); return d.toISOString().slice(0,10); })();
-  const [name,     setName]     = useState('');
-  const [archetype,setArchetype]= useState(ARCHETYPES[0]);
-  const [deadline, setDeadline] = useState(def);
+const def = (() => { const d=new Date(); d.setDate(d.getDate()+7); return d.toISOString().slice(0,10); })();
+const [name,     setName]     = useState(’’);
+const [archetype,setArchetype]= useState(ARCHETYPES[0]);
+const [deadline, setDeadline] = useState(def);
 
-  return (
-    <div className="card" style={{padding:16,marginBottom:12}}>
-      <input value={name} onChange={e=>setName(e.target.value)} placeholder="Project name" autoFocus
-        style={{...ghostInput,fontSize:14,fontWeight:600,borderBottom:'1px solid #e8e0d0',paddingBottom:8,marginBottom:12,width:'100%'}}/>
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:10}}>
-        <label style={{fontSize:11}}>
-          <span style={{color:'#6b6660',display:'block',marginBottom:3}}>Archetype</span>
-          <select value={archetype} onChange={e=>setArchetype(e.target.value)} style={selectStyle}>
-            {ARCHETYPES.map(a=><option key={a} value={a}>{a}</option>)}
-          </select>
-        </label>
-        <label style={{fontSize:11}}>
-          <span style={{color:'#6b6660',display:'block',marginBottom:3}}>Final deadline</span>
-          <input type="date" value={deadline} onChange={e=>setDeadline(e.target.value)} style={{...selectStyle,fontFamily:'monospace'}}/>
-        </label>
-      </div>
-      <p style={{fontSize:11,color:'#6b6660',fontStyle:'italic',marginBottom:12}}>Auto-creates task chain from template. Edit any task after.</p>
-      <div style={{display:'flex',gap:8}}>
-        <button onClick={()=>name.trim()&&onSave({name:name.trim(),archetype,finalDeadline:deadline})}
-          style={{...solidBtn,flex:1,justifyContent:'center',borderRadius:10,padding:9}}>
-          Create + auto-build tasks
-        </button>
-        <button onClick={onCancel} style={{...ghostBtn,borderRadius:10,padding:'9px 14px'}}>Cancel</button>
-      </div>
-    </div>
-  );
+return (
+<div className="card" style={{padding:16,marginBottom:12}}>
+<input value={name} onChange={e=>setName(e.target.value)} placeholder=“Project name” autoFocus
+style={{…ghostInput,fontSize:14,fontWeight:600,borderBottom:‘1px solid #e8e0d0’,paddingBottom:8,marginBottom:12,width:‘100%’}}/>
+<div style={{display:‘grid’,gridTemplateColumns:‘1fr 1fr’,gap:10,marginBottom:10}}>
+<label style={{fontSize:11}}>
+<span style={{color:’#6b6660’,display:‘block’,marginBottom:3}}>Archetype</span>
+<select value={archetype} onChange={e=>setArchetype(e.target.value)} style={selectStyle}>
+{ARCHETYPES.map(a=><option key={a} value={a}>{a}</option>)}
+</select>
+</label>
+<label style={{fontSize:11}}>
+<span style={{color:’#6b6660’,display:‘block’,marginBottom:3}}>Final deadline</span>
+<input type=“date” value={deadline} onChange={e=>setDeadline(e.target.value)} style={{…selectStyle,fontFamily:‘monospace’}}/>
+</label>
+</div>
+<p style={{fontSize:11,color:’#6b6660’,fontStyle:‘italic’,marginBottom:12}}>Auto-creates task chain from template. Edit any task after.</p>
+<div style={{display:‘flex’,gap:8}}>
+<button onClick={()=>name.trim()&&onSave({name:name.trim(),archetype,finalDeadline:deadline})}
+style={{…solidBtn,flex:1,justifyContent:‘center’,borderRadius:10,padding:9}}>
+Create + auto-build tasks
+</button>
+<button onClick={onCancel} style={{…ghostBtn,borderRadius:10,padding:‘9px 14px’}}>Cancel</button>
+</div>
+</div>
+);
 }
 
 // ─────────────────────────────────────────────────────
@@ -1290,36 +1719,36 @@ function ProjectForm({onSave,onCancel}) {
 // ─────────────────────────────────────────────────────
 
 function TemplatesView() {
-  return (
-    <div>
-      <h2 className="fd" style={{fontSize:28,fontWeight:400,marginBottom:4}}>Specs</h2>
-      <p style={{fontSize:12,color:'#6b6660',marginBottom:16}}>Lead-day chains. New projects auto-fill from these.</p>
-      {Object.entries(TEMPLATES).map(([arch,ts])=>(
-        <div key={arch} className="card" style={{padding:16,marginBottom:10}}>
-          <div style={{fontSize:14,fontWeight:600,marginBottom:10}}>{arch}</div>
-          {ts.map((t,i)=>{
-            const sp=SPRINTS.find(s=>s.id===t.sprint);
-            return (
-              <div key={i} style={{display:'flex',gap:8,alignItems:'baseline',fontSize:12,marginBottom:5}}>
-                <span className="fm" style={{color:'#6b6660',width:32,flexShrink:0}}>L{t.leadDays}</span>
-                <span style={{flex:1}}>{t.name}</span>
-                <span style={{color:'#6b6660'}}>{sp?.short}</span>
-                <span className="fm" style={{color:'#6b6660',width:36,textAlign:'right'}}>{t.est}m</span>
-              </div>
-            );
-          })}
-        </div>
-      ))}
-      <div className="card" style={{padding:16}}>
-        <div style={{fontSize:13,fontWeight:600,marginBottom:10}}>Sprint legend</div>
-        {SPRINTS.map(s=>(
-          <div key={s.id} style={{display:'flex',alignItems:'center',gap:8,fontSize:12,color:'#6b6660',marginBottom:5}}>
-            <s.Icon size={12}/>{s.label}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
+return (
+<div>
+<h2 className="fd" style={{fontSize:28,fontWeight:400,marginBottom:4}}>Specs</h2>
+<p style={{fontSize:12,color:’#6b6660’,marginBottom:16}}>Lead-day chains. New projects auto-fill from these.</p>
+{Object.entries(TEMPLATES).map(([arch,ts])=>(
+<div key={arch} className="card" style={{padding:16,marginBottom:10}}>
+<div style={{fontSize:14,fontWeight:600,marginBottom:10}}>{arch}</div>
+{ts.map((t,i)=>{
+const sp=SPRINTS.find(s=>s.id===t.sprint);
+return (
+<div key={i} style={{display:‘flex’,gap:8,alignItems:‘baseline’,fontSize:12,marginBottom:5}}>
+<span className=“fm” style={{color:’#6b6660’,width:32,flexShrink:0}}>L{t.leadDays}</span>
+<span style={{flex:1}}>{t.name}</span>
+<span style={{color:’#6b6660’}}>{sp?.short}</span>
+<span className=“fm” style={{color:’#6b6660’,width:36,textAlign:‘right’}}>{t.est}m</span>
+</div>
+);
+})}
+</div>
+))}
+<div className="card" style={{padding:16}}>
+<div style={{fontSize:13,fontWeight:600,marginBottom:10}}>Sprint legend</div>
+{SPRINTS.map(s=>(
+<div key={s.id} style={{display:‘flex’,alignItems:‘center’,gap:8,fontSize:12,color:’#6b6660’,marginBottom:5}}>
+<s.Icon size={12}/>{s.label}
+</div>
+))}
+</div>
+</div>
+);
 }
 
 // ─────────────────────────────────────────────────────
@@ -1327,187 +1756,190 @@ function TemplatesView() {
 // ─────────────────────────────────────────────────────
 
 function ReflectView({logs, setLogs, tasks, allTasks, setTasks, projects}) {
-  const [expandedDate, setExpandedDate] = useState(null);
-  const dates = Object.keys(logs).sort().reverse().slice(0,30);
-  const last7  = dates.slice(0,7);
+const [expandedDate, setExpandedDate] = useState(null);
+const dates = Object.keys(logs).sort().reverse().slice(0,90);
+const last7  = dates.slice(0,7);
 
-  const hlDays = last7.filter(d=>{
-    const l=logs[d];
-    return l?.highlight&&(l?.done||[]).length>0;
-  }).length;
+const hlDays = last7.filter(d=>{
+const l=logs[d];
+return l?.highlight&&(l?.done||[]).length>0;
+}).length;
 
-  const timed = tasks.filter(t=>t.status==='done'&&t.actualTime&&(t.estimatedTime||t.est));
-  const avgVar = timed.length
-    ? Math.round(timed.reduce((s,t)=>s+(t.actualTime-(t.estimatedTime||t.est)),0)/timed.length)
-    : null;
+const timed = tasks.filter(t=>t.status===‘done’&&t.actualTime&&(t.estimatedTime||t.est));
+const avgVar = timed.length
+? Math.round(timed.reduce((s,t)=>s+(t.actualTime-(t.estimatedTime||t.est)),0)/timed.length)
+: null;
 
-  const updateDayLog = (date, patch) => {
-    const cur = logs[date] || { brainDump:'', highlight:'', micro:'', done:[], reflection:'' };
-    setLogs({ ...logs, [date]: { ...cur, ...patch } });
-  };
+const updateDayLog = (date, patch) => {
+const cur = logs[date] || { brainDump:’’, highlight:’’, micro:’’, done:[], reflection:’’ };
+setLogs({ …logs, [date]: { …cur, …patch } });
+};
 
-  return (
-    <div>
-      <h2 className="fd" style={{fontSize:28,fontWeight:400,marginBottom:4}}>Reflect</h2>
-      <p style={{fontSize:12,color:'#6b6660',marginBottom:16}}>Tap any day to expand and edit. Patterns matter more than any single day.</p>
+return (
+<div>
+<h2 className="fd" style={{fontSize:28,fontWeight:400,marginBottom:4}}>Reflect</h2>
+<p style={{fontSize:12,color:’#6b6660’,marginBottom:16}}>Tap any day to expand and edit. Patterns matter more than any single day.</p>
 
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:16}}>
-        {[
-          {label:'Highlight days',  value:`${hlDays}/7`,    sub:'last 7 with a win'},
-          {label:'Time variance',   value: avgVar===null?'—':`${avgVar>0?'+':''}${avgVar}m`, sub:'avg over/under'},
-        ].map(c=>(
-          <div key={c.label} className="card" style={{padding:16}}>
-            <div style={{fontSize:10,textTransform:'uppercase',letterSpacing:'0.1em',color:'#6b6660'}}>{c.label}</div>
-            <div className="fd" style={{fontSize:32,fontWeight:400,margin:'4px 0 2px'}}>{c.value}</div>
-            <div style={{fontSize:10,color:'#6b6660'}}>{c.sub}</div>
-          </div>
-        ))}
+```
+  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:16}}>
+    {[
+      {label:'Highlight days',  value:`${hlDays}/7`,    sub:'last 7 with a win'},
+      {label:'Time variance',   value: avgVar===null?'—':`${avgVar>0?'+':''}${avgVar}m`, sub:'avg over/under'},
+    ].map(c=>(
+      <div key={c.label} className="card" style={{padding:16}}>
+        <div style={{fontSize:10,textTransform:'uppercase',letterSpacing:'0.1em',color:'#6b6660'}}>{c.label}</div>
+        <div className="fd" style={{fontSize:32,fontWeight:400,margin:'4px 0 2px'}}>{c.value}</div>
+        <div style={{fontSize:10,color:'#6b6660'}}>{c.sub}</div>
       </div>
+    ))}
+  </div>
 
-      <div style={{fontSize:10,textTransform:'uppercase',letterSpacing:'0.1em',color:'#6b6660',marginBottom:8,paddingLeft:2}}>
-        Recent days
-      </div>
-      {dates.length===0 && (
-        <div style={emptyState}>No logs yet. Today's entries will start showing up here tomorrow.</div>
-      )}
-      {dates.map(d=>{
-        const l = logs[d] || {};
-        const isOpen = expandedDate===d;
-        return (
-          <div key={d} className="card" style={{padding:16,marginBottom:8}}>
-            <div onClick={()=>setExpandedDate(isOpen?null:d)} style={{cursor:'pointer'}}>
-              <div style={{display:'flex',justifyContent:'space-between',marginBottom:6,alignItems:'center'}}>
-                <span className="fm" style={{fontSize:11,color:'#6b6660'}}>{fmtDate(d)}</span>
-                <div style={{display:'flex',gap:10,alignItems:'center'}}>
-                  <span style={{fontSize:11,color:'#6b6660'}}>{(l.done||[]).length} wins</span>
-                  {isOpen ? <ChevronDown size={14} style={{color:'#6b6660'}}/> : <ChevronRight size={14} style={{color:'#6b6660'}}/>}
-                </div>
-              </div>
-              {!isOpen && l.highlight && (
-                <div style={{fontSize:13,marginBottom:4}}>
-                  <span style={{fontSize:10,textTransform:'uppercase',letterSpacing:'0.08em',color:'#6b6660'}}>Highlight · </span>
-                  {l.highlight}
-                </div>
-              )}
-              {!isOpen && l.reflection && (
-                <div style={{fontSize:12,color:'#6b6660',fontStyle:'italic',lineHeight:1.5,marginTop:6}}>{l.reflection}</div>
-              )}
+  <div style={{fontSize:10,textTransform:'uppercase',letterSpacing:'0.1em',color:'#6b6660',marginBottom:8,paddingLeft:2}}>
+    Recent days
+  </div>
+  {dates.length===0 && (
+    <div style={emptyState}>No logs yet. Today's entries will start showing up here tomorrow.</div>
+  )}
+  {dates.map(d=>{
+    const l = logs[d] || {};
+    const isOpen = expandedDate===d;
+    return (
+      <div key={d} className="card" style={{padding:16,marginBottom:8}}>
+        <div onClick={()=>setExpandedDate(isOpen?null:d)} style={{cursor:'pointer'}}>
+          <div style={{display:'flex',justifyContent:'space-between',marginBottom:6,alignItems:'center'}}>
+            <span className="fm" style={{fontSize:11,color:'#6b6660'}}>{fmtDate(d)}</span>
+            <div style={{display:'flex',gap:10,alignItems:'center'}}>
+              <span style={{fontSize:11,color:'#6b6660'}}>{(l.done||[]).length} wins</span>
+              {isOpen ? <ChevronDown size={14} style={{color:'#6b6660'}}/> : <ChevronRight size={14} style={{color:'#6b6660'}}/>}
             </div>
-            {isOpen && (
-              <div style={{marginTop:14,paddingTop:14,borderTop:'1px solid #e8e0d0'}}>
-                <DayLogEditor
-                  log={l}
-                  updateLog={patch=>updateDayLog(d,patch)}
-                />
-              </div>
-            )}
           </div>
-        );
-      })}
-    </div>
-  );
+          {!isOpen && l.highlight && (
+            <div style={{fontSize:13,marginBottom:4}}>
+              <span style={{fontSize:10,textTransform:'uppercase',letterSpacing:'0.08em',color:'#6b6660'}}>Highlight · </span>
+              {l.highlight}
+            </div>
+          )}
+          {!isOpen && l.reflection && (
+            <div style={{fontSize:12,color:'#6b6660',fontStyle:'italic',lineHeight:1.5,marginTop:6}}>{l.reflection}</div>
+          )}
+        </div>
+        {isOpen && (
+          <div style={{marginTop:14,paddingTop:14,borderTop:'1px solid #e8e0d0'}}>
+            <DayLogEditor
+              log={l}
+              updateLog={patch=>updateDayLog(d,patch)}
+            />
+          </div>
+        )}
+      </div>
+    );
+  })}
+</div>
+```
+
+);
 }
 
 function DayLogEditor({ log, updateLog }) {
-  const [doneInput,    setDoneInput]    = useState('');
-  const [editingDoneId,setEditingDoneId]= useState(null);
+const [doneInput,    setDoneInput]    = useState(’’);
+const [editingDoneId,setEditingDoneId]= useState(null);
 
-  const addDone = () => {
-    const text = doneInput.trim();
-    if (!text) return;
-    updateLog({ done: [...(log.done||[]), {id:uid(),text,at:new Date().toISOString()}] });
-    setDoneInput('');
-  };
-  const removeDone = id => updateLog({ done:(log.done||[]).filter(d=>d.id!==id) });
-  const updateDone = (id, text) => {
-    const trimmed = (text||'').trim();
-    if (!trimmed) { removeDone(id); return; }
-    updateLog({ done: (log.done||[]).map(d => d.id===id ? {...d, text:trimmed} : d) });
-  };
+const addDone = () => {
+const text = doneInput.trim();
+if (!text) return;
+updateLog({ done: […(log.done||[]), {id:uid(),text,at:new Date().toISOString()}] });
+setDoneInput(’’);
+};
+const removeDone = id => updateLog({ done:(log.done||[]).filter(d=>d.id!==id) });
+const updateDone = (id, text) => {
+const trimmed = (text||’’).trim();
+if (!trimmed) { removeDone(id); return; }
+updateLog({ done: (log.done||[]).map(d => d.id===id ? {…d, text:trimmed} : d) });
+};
 
-  return (
-    <div style={{display:'flex',flexDirection:'column',gap:12}}>
-      <div>
-        <div style={sectionLabel}>The one thing</div>
-        <input
-          value={log.highlight||''}
-          onChange={e=>updateLog({highlight:e.target.value})}
-          placeholder="The win for this day"
-          style={{...ghostInput,fontSize:16,fontFamily:'Fraunces,Georgia,serif',marginTop:4,borderBottom:'1px solid #e8e0d0',paddingBottom:6}}
-        />
-      </div>
-      <div>
-        <div style={sectionLabel}>Smallest first move</div>
-        <input
-          value={log.micro||''}
-          onChange={e=>updateLog({micro:e.target.value})}
-          placeholder="The first physical step"
-          style={{...ghostInput,fontSize:13,marginTop:4,borderBottom:'1px solid #e8e0d0',paddingBottom:6}}
-        />
-      </div>
-      <div>
-        <div style={{...sectionLabel,marginBottom:8}}>Ta-da list ({(log.done||[]).length})</div>
-        <div style={{display:'flex',gap:8,marginBottom:10}}>
-          <input
-            value={doneInput}
-            onChange={e=>setDoneInput(e.target.value)}
-            onKeyDown={e=>e.key==='Enter'&&addDone()}
-            placeholder="What got done?"
-            style={{flex:1,padding:'7px 10px',borderRadius:8,border:'1px solid #e8e0d0',fontSize:13,background:'#faf7f2'}}
-          />
-          <button onClick={addDone} style={{...solidBtn,padding:'7px 10px',borderRadius:8}}>
-            <Plus size={14}/>
-          </button>
-        </div>
-        <ul style={{listStyle:'none',padding:0,margin:0,display:'flex',flexDirection:'column',gap:6}}>
-          {(log.done||[]).slice().reverse().map(d=>(
-            <li key={d.id} style={{display:'flex',alignItems:'flex-start',gap:8}}>
-              <CheckCircle2 size={14} style={{color:'#3d5a3d',flexShrink:0,marginTop:2}}/>
-              {editingDoneId===d.id ? (
-                <input
-                  autoFocus
-                  defaultValue={d.text}
-                  onBlur={e=>{ updateDone(d.id, e.target.value); setEditingDoneId(null); }}
-                  onKeyDown={e=>{
-                    if (e.key==='Enter') { updateDone(d.id, e.target.value); setEditingDoneId(null); }
-                    if (e.key==='Escape') setEditingDoneId(null);
-                  }}
-                  style={{flex:1,fontSize:13,lineHeight:1.4,background:'#faf7f2',border:'1px solid #e8e0d0',borderRadius:6,padding:'3px 8px'}}
-                />
-              ) : (
-                <span onClick={()=>setEditingDoneId(d.id)} title="Click to edit" style={{flex:1,fontSize:13,lineHeight:1.4,cursor:'text'}}>
-                  {d.text}
-                </span>
-              )}
-              <button onClick={()=>removeDone(d.id)} style={{background:'none',border:'none',cursor:'pointer',color:'#6b6660',padding:0}}>
-                <X size={12}/>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </div>
-      <div>
-        <div style={{...sectionLabel,marginBottom:6}}>Brain dump</div>
-        <textarea
-          value={log.brainDump||''}
-          onChange={e=>updateLog({brainDump:e.target.value})}
-          placeholder="Empty the head onto the page."
-          rows={4}
-          style={textArea}
-        />
-      </div>
-      <div>
-        <div style={{...sectionLabel,marginBottom:6}}>Reflection</div>
-        <textarea
-          value={log.reflection||''}
-          onChange={e=>updateLog({reflection:e.target.value})}
-          placeholder="What worked? What didn't?"
-          rows={3}
-          style={textArea}
-        />
-      </div>
-    </div>
-  );
+return (
+<div style={{display:‘flex’,flexDirection:‘column’,gap:12}}>
+<div>
+<div style={sectionLabel}>The one thing</div>
+<input
+value={log.highlight||’’}
+onChange={e=>updateLog({highlight:e.target.value})}
+placeholder=“The win for this day”
+style={{…ghostInput,fontSize:16,fontFamily:‘Fraunces,Georgia,serif’,marginTop:4,borderBottom:‘1px solid #e8e0d0’,paddingBottom:6}}
+/>
+</div>
+<div>
+<div style={sectionLabel}>Smallest first move</div>
+<input
+value={log.micro||’’}
+onChange={e=>updateLog({micro:e.target.value})}
+placeholder=“The first physical step”
+style={{…ghostInput,fontSize:13,marginTop:4,borderBottom:‘1px solid #e8e0d0’,paddingBottom:6}}
+/>
+</div>
+<div>
+<div style={{...sectionLabel,marginBottom:8}}>Ta-da list ({(log.done||[]).length})</div>
+<div style={{display:‘flex’,gap:8,marginBottom:10}}>
+<input
+value={doneInput}
+onChange={e=>setDoneInput(e.target.value)}
+onKeyDown={e=>e.key===‘Enter’&&addDone()}
+placeholder=“What got done?”
+style={{flex:1,padding:‘7px 10px’,borderRadius:8,border:‘1px solid #e8e0d0’,fontSize:13,background:’#faf7f2’}}
+/>
+<button onClick={addDone} style={{…solidBtn,padding:‘7px 10px’,borderRadius:8}}>
+<Plus size={14}/>
+</button>
+</div>
+<ul style={{listStyle:‘none’,padding:0,margin:0,display:‘flex’,flexDirection:‘column’,gap:6}}>
+{(log.done||[]).slice().reverse().map(d=>(
+<li key={d.id} style={{display:‘flex’,alignItems:‘flex-start’,gap:8}}>
+<CheckCircle2 size={14} style={{color:’#3d5a3d’,flexShrink:0,marginTop:2}}/>
+{editingDoneId===d.id ? (
+<input
+autoFocus
+defaultValue={d.text}
+onBlur={e=>{ updateDone(d.id, e.target.value); setEditingDoneId(null); }}
+onKeyDown={e=>{
+if (e.key===‘Enter’) { updateDone(d.id, e.target.value); setEditingDoneId(null); }
+if (e.key===‘Escape’) setEditingDoneId(null);
+}}
+style={{flex:1,fontSize:13,lineHeight:1.4,background:’#faf7f2’,border:‘1px solid #e8e0d0’,borderRadius:6,padding:‘3px 8px’}}
+/>
+) : (
+<span onClick={()=>setEditingDoneId(d.id)} title=“Click to edit” style={{flex:1,fontSize:13,lineHeight:1.4,cursor:‘text’}}>
+{d.text}
+</span>
+)}
+<button onClick={()=>removeDone(d.id)} style={{background:‘none’,border:‘none’,cursor:‘pointer’,color:’#6b6660’,padding:0}}>
+<X size={12}/>
+</button>
+</li>
+))}
+</ul>
+</div>
+<div>
+<div style={{...sectionLabel,marginBottom:6}}>Brain dump</div>
+<textarea
+value={log.brainDump||’’}
+onChange={e=>updateLog({brainDump:e.target.value})}
+placeholder=“Empty the head onto the page.”
+rows={4}
+style={textArea}
+/>
+</div>
+<div>
+<div style={{...sectionLabel,marginBottom:6}}>Reflection</div>
+<textarea
+value={log.reflection||’’}
+onChange={e=>updateLog({reflection:e.target.value})}
+placeholder=“What worked? What didn’t?”
+rows={3}
+style={textArea}
+/>
+</div>
+</div>
+);
 }
 
 // ─────────────────────────────────────────────────────
@@ -1515,32 +1947,32 @@ function DayLogEditor({ log, updateLog }) {
 // ─────────────────────────────────────────────────────
 
 const sectionLabel = {
-  fontSize:10,textTransform:'uppercase',letterSpacing:'0.1em',color:'#6b6660'
+fontSize:10,textTransform:‘uppercase’,letterSpacing:‘0.1em’,color:’#6b6660’
 };
 const ghostInput = {
-  width:'100%',background:'transparent',border:'none',outline:'none',
-  color:'#1a1814',padding:0,boxSizing:'border-box'
+width:‘100%’,background:‘transparent’,border:‘none’,outline:‘none’,
+color:’#1a1814’,padding:0,boxSizing:‘border-box’
 };
 const textArea = {
-  width:'100%',background:'#faf7f2',border:'1px solid #e8e0d0',borderRadius:10,
-  padding:12,fontSize:13,lineHeight:1.6,boxSizing:'border-box',resize:'vertical'
+width:‘100%’,background:’#faf7f2’,border:‘1px solid #e8e0d0’,borderRadius:10,
+padding:12,fontSize:13,lineHeight:1.6,boxSizing:‘border-box’,resize:‘vertical’
 };
 const selectStyle = {
-  width:'100%',padding:'6px 8px',borderRadius:8,border:'1px solid #e8e0d0',
-  background:'#faf7f2',fontSize:12
+width:‘100%’,padding:‘6px 8px’,borderRadius:8,border:‘1px solid #e8e0d0’,
+background:’#faf7f2’,fontSize:12
 };
 const emptyState = {
-  background:'#faf7f2',borderRadius:16,padding:24,textAlign:'center',
-  fontSize:13,color:'#6b6660',fontStyle:'italic',
-  border:'1px dashed #e8e0d0',marginBottom:8
+background:’#faf7f2’,borderRadius:16,padding:24,textAlign:‘center’,
+fontSize:13,color:’#6b6660’,fontStyle:‘italic’,
+border:‘1px dashed #e8e0d0’,marginBottom:8
 };
-
 
 window.KaizenApp = KaizenApp;
 
   </script>
 
   <!-- FoodLog -->
+
   <script type="text/babel">
 const { useState, useEffect } = React;
 
@@ -2169,14 +2601,43 @@ function getTotalBurn(h) {
   return 2700;
 }
 
-function MealCard({ meal, accent, bg }) {
+// ── Helpers shared by enhanced FoodLog ─────────────────────────────
+const HUNGER_TAGS = {
+  hunger: { label: '🍽️ hunger', color: '#3da35d' },
+  boredom:{ label: '😶 boredom',color: '#d95d39' },
+  social: { label: '👥 social', color: '#7059bf' },
+};
+
+const SODIUM_TRIGGERS = ['smart dog','chorizo','calzone','costco pizza','dominos','pizza','grilled cheese','soy sauce'];
+function detectSodiumStack(meals) {
+  if (!meals) return null;
+  const hits = new Set();
+  meals.forEach(m => m.items?.forEach(i => {
+    const n = (i.name || '').toLowerCase();
+    SODIUM_TRIGGERS.forEach(t => { if (n.includes(t)) hits.add(t); });
+  }));
+  return hits.size >= 2 ? Array.from(hits) : null;
+}
+
+function proteinTier(grams) {
+  if (grams >= 130) return { color:'#22c55e', bg:'rgba(34,197,94,0.15)', label:'on target' };
+  if (grams >= 80)  return { color:'#eab308', bg:'rgba(234,179,8,0.18)', label:'mid' };
+  return                  { color:'#ef4444', bg:'rgba(239,68,68,0.15)', label:'low' };
+}
+
+function MealCard({ meal, accent, bg, onEdit, editable }) {
   const total = meal.items.reduce((s, i) => s + (i.kcal || 0), 0);
   return (
-    <div style={{ background: bg, borderRadius: 14, padding: "16px 18px", marginBottom: 12, borderLeft: `4px solid ${accent}`, boxShadow: meal.protein_highlight ? `0 0 0 2px ${accent}44` : "0 2px 8px rgba(0,0,0,0.05)" }}>
+    <div style={{ background: bg, borderRadius: 14, padding: "16px 18px", marginBottom: 12, borderLeft: `4px solid ${accent}`, boxShadow: meal.protein_highlight ? `0 0 0 2px ${accent}44` : "0 2px 8px rgba(0,0,0,0.05)", position:'relative' }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
         <div>
           <span style={{ fontFamily: "Georgia, serif", fontWeight: 700, fontSize: 14, color: "#1a1a2e" }}>{meal.label}</span>
           <span style={{ fontSize: 11, color: "#999", marginLeft: 8 }}>{meal.time}</span>
+          {meal.hungerTag && HUNGER_TAGS[meal.hungerTag] && (
+            <span style={{ fontSize: 10, marginLeft: 8, padding: '2px 8px', borderRadius: 99, background: HUNGER_TAGS[meal.hungerTag].color+'22', color: HUNGER_TAGS[meal.hungerTag].color, fontWeight: 600 }}>
+              {HUNGER_TAGS[meal.hungerTag].label}
+            </span>
+          )}
         </div>
         <span style={{ fontWeight: 800, fontSize: 15, color: accent }}>{total} kcal</span>
       </div>
@@ -2190,22 +2651,75 @@ function MealCard({ meal, accent, bg }) {
         </div>
       ))}
       {meal.note && <div style={{ marginTop: 8, fontSize: 11, color: "#c8a24a", fontStyle: "italic" }}>{meal.note}</div>}
+      {meal.photoLink && (
+        <a href={meal.photoLink} target="_blank" rel="noopener" style={{ marginTop: 8, display:'inline-block', fontSize: 11, color: '#2e86ab', textDecoration: 'underline' }}>
+          📷 view photo
+        </a>
+      )}
+      {editable && (
+        <button onClick={onEdit} title="Edit meal" style={{
+          position:'absolute', top:10, right:10, background:'rgba(255,255,255,0.7)', border:'1px solid #ddd',
+          borderRadius:6, fontSize:10, padding:'3px 8px', cursor:'pointer', color:'#666'
+        }}>edit</button>
+      )}
     </div>
   );
 }
 
-function DayView({ date, data }) {
+function DayView({ date, data, editable, onUpdate, onDeleteDay }) {
+  const [editingMealId, setEditingMealId] = useState(null);
+  const [addingMeal, setAddingMeal] = useState(false);
+  const [editingHealth, setEditingHealth] = useState(false);
+  const [editingDayMeta, setEditingDayMeta] = useState(false);
   const totalIntake = calcTotal(data.meals);
   const protein = calcProtein(data.meals);
   const totalBurn = getTotalBurn(data.health);
   const deficit = totalBurn - totalIntake;
-  const isToday = date === "2026-04-27";
+  const today = new Date(); today.setHours(0,0,0,0);
+  const isToday = date === today.toISOString().slice(0,10);
   const sodium = SODIUM_DATA[date];
+  const sodiumStack = detectSodiumStack(data.meals);
+  const tier = proteinTier(protein);
+
+  const updateMeal = (mealId, patch) => {
+    const newMeals = data.meals.map(m => m.id === mealId ? { ...m, ...patch } : m);
+    onUpdate({ ...data, meals: newMeals });
+    setEditingMealId(null);
+  };
+  const deleteMeal = (mealId) => {
+    if (!confirm('Delete this entry?')) return;
+    onUpdate({ ...data, meals: data.meals.filter(m => m.id !== mealId) });
+    setEditingMealId(null);
+  };
+  const addMeal = (meal) => {
+    onUpdate({ ...data, meals: [...data.meals, { ...meal, id: 'm_'+Math.random().toString(36).slice(2,8) }] });
+    setAddingMeal(false);
+  };
+  const saveHealth = (h) => {
+    onUpdate({ ...data, health: h });
+    setEditingHealth(false);
+  };
+  const saveDayMeta = (m) => {
+    onUpdate({ ...data, ...m });
+    setEditingDayMeta(false);
+  };
+
   return (
     <div>
-      <div style={{ background: "linear-gradient(135deg,#0f1f35 0%,#1e3a5f 100%)", borderRadius: 18, padding: "20px 22px", marginBottom: 18, color: "white" }}>
-        <div style={{ fontSize: 10, opacity: 0.5, letterSpacing: 2, textTransform: "uppercase", marginBottom: 2 }}>{data.label}</div>
-        <div style={{ fontFamily: "Georgia, serif", fontSize: 18, fontWeight: 700, marginBottom: 16 }}>{formatDate(date)}</div>
+      {sodiumStack && (
+        <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 12, padding: '12px 14px', marginBottom: 14, color: '#7f1d1d', fontSize: 12, lineHeight: 1.5 }}>
+          🚨 <strong>Sodium stack detected:</strong> {sodiumStack.join(' + ')} on the same day. The rule: never combine more than one of these. If two are already in, swap the next high-sodium item for something lower.
+        </div>
+      )}
+      <div style={{ background: "linear-gradient(135deg,#0f1f35 0%,#1e3a5f 100%)", borderRadius: 18, padding: "20px 22px", marginBottom: 18, color: "white", position:'relative' }}>
+        {editable && (
+          <div style={{ position:'absolute', top:14, right:14, display:'flex', gap:6 }}>
+            <button onClick={()=>setEditingDayMeta(true)} style={{ background:'rgba(255,255,255,0.15)', border:'none', borderRadius:6, color:'#fff', fontSize:11, padding:'4px 10px', cursor:'pointer' }}>edit label</button>
+            <button onClick={()=>setEditingHealth(true)} style={{ background:'rgba(255,255,255,0.15)', border:'none', borderRadius:6, color:'#fff', fontSize:11, padding:'4px 10px', cursor:'pointer' }}>edit health</button>
+          </div>
+        )}
+        <div style={{ fontSize: 10, opacity: 0.5, letterSpacing: 2, textTransform: "uppercase", marginBottom: 2 }}>{data.label || 'Untitled day'}</div>
+        <div style={{ fontFamily: "Georgia, serif", fontSize: 18, fontWeight: 700, marginBottom: 16 }}>{formatDate(date)}{isToday && <span style={{ marginLeft: 8, fontSize: 11, padding: '2px 8px', borderRadius: 99, background: 'rgba(129,199,132,0.3)', color: '#81c784' }}>today</span>}</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 12 }}>
           {[
             { label: isToday ? "Intake so far" : "Intake", value: totalIntake, color: "#f4a261" },
@@ -2220,12 +2734,10 @@ function DayView({ date, data }) {
           ))}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-          {protein > 0 && (
-            <div style={{ background: protein >= 120 ? "rgba(61,163,93,0.35)" : "rgba(61,163,93,0.2)", borderRadius: 10, padding: "9px 13px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: 11, color: "#81c784" }}>💪 Protein</span>
-              <span style={{ fontSize: 15, fontWeight: 800, color: "#81c784" }}>{protein}g<span style={{ fontSize: 10, opacity: 0.7 }}>/130g</span>{protein >= 130 ? " 🎯" : ""}</span>
-            </div>
-          )}
+          <div style={{ background: tier.bg, borderRadius: 10, padding: "9px 13px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 11, color: tier.color }}>💪 Protein <span style={{ opacity: 0.7, marginLeft: 4 }}>({tier.label})</span></span>
+            <span style={{ fontSize: 15, fontWeight: 800, color: tier.color }}>{protein}g<span style={{ fontSize: 10, opacity: 0.7 }}>/130g</span>{protein >= 130 ? " 🎯" : ""}</span>
+          </div>
           {sodium?.mg && (
             <div style={{ background: "rgba(255,255,255,0.07)", borderRadius: 10, padding: "9px 13px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ fontSize: 11, opacity: 0.7 }}>🧂 Sodium</span>
@@ -2255,9 +2767,182 @@ function DayView({ date, data }) {
         {data.health.notes && <div style={{ marginTop: 11, fontSize: 11, opacity: 0.6, lineHeight: 1.5 }}>🏃 {data.health.notes}</div>}
         {data.health.sleep_note && <div style={{ marginTop: 6, fontSize: 11, opacity: 0.5, fontStyle: "italic", lineHeight: 1.5 }}>💤 {data.health.sleep_note}</div>}
       </div>
-      {data.meals.map((meal, i) => (
-        <MealCard key={meal.id} meal={meal} accent={MEAL_ACCENTS[i % MEAL_ACCENTS.length]} bg={MEAL_COLORS[i % MEAL_COLORS.length]} />
+
+      {editingDayMeta && (
+        <DayMetaEditor data={data} onSave={saveDayMeta} onCancel={()=>setEditingDayMeta(false)}/>
+      )}
+
+      {editingHealth && (
+        <HealthEditor health={data.health} onSave={saveHealth} onCancel={()=>setEditingHealth(false)}/>
+      )}
+
+      {data.meals.map((meal, i) => editingMealId === meal.id ? (
+        <MealEditor key={meal.id} meal={meal} onSave={p=>updateMeal(meal.id,p)} onCancel={()=>setEditingMealId(null)} onDelete={()=>deleteMeal(meal.id)}/>
+      ) : (
+        <MealCard
+          key={meal.id} meal={meal}
+          accent={MEAL_ACCENTS[i % MEAL_ACCENTS.length]}
+          bg={MEAL_COLORS[i % MEAL_COLORS.length]}
+          editable={editable}
+          onEdit={() => setEditingMealId(meal.id)}
+        />
       ))}
+
+      {editable && (
+        addingMeal ? (
+          <MealEditor meal={null} onSave={addMeal} onCancel={()=>setAddingMeal(false)}/>
+        ) : (
+          <button onClick={()=>setAddingMeal(true)} style={{
+            width:'100%', padding:'14px 16px', marginBottom:12,
+            background: '#fffdf9', border:'2px dashed #c8a24a', borderRadius:14,
+            color:'#c8a24a', fontFamily:'Georgia, serif', fontSize:13, fontWeight:600, cursor:'pointer'
+          }}>
+            + Add entry
+          </button>
+        )
+      )}
+
+      {editable && onDeleteDay && (
+        <button onClick={()=>{ if (confirm('Delete this entire day?')) onDeleteDay(date); }} style={{
+          marginTop:8, padding:'8px 14px', background:'transparent', border:'1px solid #fecaca',
+          color:'#dc2626', borderRadius:8, fontSize:11, cursor:'pointer'
+        }}>delete day</button>
+      )}
+    </div>
+  );
+}
+
+function DayMetaEditor({ data, onSave, onCancel }) {
+  const [label, setLabel] = useState(data.label || '');
+  return (
+    <div style={{ background:'#fffdf9', border:'1px solid #e8e0d0', borderRadius:14, padding:16, marginBottom:14 }}>
+      <div style={{ fontSize: 11, color:'#6b6660', textTransform:'uppercase', letterSpacing:1, marginBottom:8 }}>Day label</div>
+      <input value={label} onChange={e=>setLabel(e.target.value)} placeholder="What kind of day?"
+        style={{ width:'100%', padding:'8px 10px', fontSize:14, border:'1px solid #e8e0d0', borderRadius:8, background:'#faf7f2', boxSizing:'border-box', marginBottom:10, fontFamily:'Georgia,serif' }}
+      />
+      <div style={{ display:'flex', gap:8 }}>
+        <button onClick={()=>onSave({ label })} style={{ flex:1, padding:'9px 14px', background:'#0f1f35', color:'#fff', border:'none', borderRadius:8, fontWeight:700, cursor:'pointer', fontSize:13 }}>Save</button>
+        <button onClick={onCancel} style={{ padding:'9px 14px', background:'transparent', color:'#6b6660', border:'1px solid #e8e0d0', borderRadius:8, cursor:'pointer', fontSize:13 }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function HealthEditor({ health, onSave, onCancel }) {
+  const [h, setH] = useState({
+    steps: health.steps ?? '',
+    active_kcal: health.active_kcal ?? '',
+    basal_kcal: health.basal_kcal ?? '',
+    rhr: health.rhr ?? '',
+    hrv: health.hrv ?? '',
+    sleep_hours: health.sleep_hours ?? '',
+    sodium_mg: health.sodium_mg ?? '',
+    notes: health.notes ?? '',
+    sleep_note: health.sleep_note ?? '',
+  });
+  const num = v => v === '' || v === null ? null : Number(v);
+  const fields = [
+    ['steps','Steps'], ['active_kcal','Active kcal'], ['basal_kcal','Basal kcal'],
+    ['rhr','RHR (bpm)'], ['hrv','HRV (ms)'], ['sleep_hours','Sleep (h)'], ['sodium_mg','Sodium (mg)']
+  ];
+  return (
+    <div style={{ background:'#fffdf9', border:'1px solid #e8e0d0', borderRadius:14, padding:16, marginBottom:14 }}>
+      <div style={{ fontSize: 11, color:'#6b6660', textTransform:'uppercase', letterSpacing:1, marginBottom:10 }}>Health stats</div>
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:10 }}>
+        {fields.map(([k,l]) => (
+          <label key={k} style={{ fontSize:11, color:'#6b6660' }}>
+            {l}
+            <input type="number" value={h[k] ?? ''} onChange={e=>setH({...h, [k]: e.target.value})}
+              style={{ width:'100%', padding:'6px 8px', fontSize:13, border:'1px solid #e8e0d0', borderRadius:6, background:'#faf7f2', boxSizing:'border-box', fontFamily:'monospace' }}/>
+          </label>
+        ))}
+      </div>
+      <label style={{ fontSize:11, color:'#6b6660', display:'block', marginBottom:6 }}>
+        Notes
+        <input value={h.notes} onChange={e=>setH({...h, notes:e.target.value})}
+          style={{ width:'100%', padding:'6px 8px', fontSize:12, border:'1px solid #e8e0d0', borderRadius:6, background:'#faf7f2', boxSizing:'border-box' }}/>
+      </label>
+      <label style={{ fontSize:11, color:'#6b6660', display:'block', marginBottom:10 }}>
+        Sleep note
+        <input value={h.sleep_note} onChange={e=>setH({...h, sleep_note:e.target.value})}
+          style={{ width:'100%', padding:'6px 8px', fontSize:12, border:'1px solid #e8e0d0', borderRadius:6, background:'#faf7f2', boxSizing:'border-box' }}/>
+      </label>
+      <div style={{ display:'flex', gap:8 }}>
+        <button onClick={()=>onSave({
+          steps: num(h.steps), active_kcal: num(h.active_kcal), basal_kcal: num(h.basal_kcal),
+          rhr: num(h.rhr), hrv: num(h.hrv), sleep_hours: num(h.sleep_hours), sodium_mg: num(h.sodium_mg),
+          notes: h.notes, sleep_note: h.sleep_note,
+        })} style={{ flex:1, padding:'9px 14px', background:'#0f1f35', color:'#fff', border:'none', borderRadius:8, fontWeight:700, cursor:'pointer', fontSize:13 }}>Save</button>
+        <button onClick={onCancel} style={{ padding:'9px 14px', background:'transparent', color:'#6b6660', border:'1px solid #e8e0d0', borderRadius:8, cursor:'pointer', fontSize:13 }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function MealEditor({ meal, onSave, onCancel, onDelete }) {
+  const [label, setLabel]   = useState(meal?.label || '');
+  const [time,  setTime]    = useState(meal?.time  || 'All day');
+  const [hungerTag, setHungerTag] = useState(meal?.hungerTag || '');
+  const [photoLink, setPhotoLink] = useState(meal?.photoLink || '');
+  const [note,  setNote]    = useState(meal?.note  || '');
+  const [highlight, setHighlight] = useState(meal?.protein_highlight ?? false);
+  const [items, setItems] = useState(meal?.items?.length ? meal.items : [{ name:'', kcal:0, notes:'' }]);
+  const [conf, setConf] = useState(false);
+
+  const updItem = (i, patch) => setItems(items.map((it,j) => j===i ? {...it, ...patch} : it));
+  const rmItem  = (i) => setItems(items.filter((_,j)=>j!==i));
+  const addItem = () => setItems([...items, { name:'', kcal:0, notes:'' }]);
+
+  return (
+    <div style={{ background:'#fffdf9', border:'1px solid #c8a24a', borderRadius:14, padding:16, marginBottom:14 }}>
+      <div style={{ display:'grid', gridTemplateColumns:'2fr 1fr', gap:10, marginBottom:10 }}>
+        <input value={label} onChange={e=>setLabel(e.target.value)} placeholder="Meal label (e.g. Yogurt bowl)"
+          style={{ padding:'8px 10px', fontSize:13, border:'1px solid #e8e0d0', borderRadius:6, fontFamily:'Georgia,serif', fontWeight:700 }}/>
+        <input value={time} onChange={e=>setTime(e.target.value)} placeholder="Time"
+          style={{ padding:'8px 10px', fontSize:12, border:'1px solid #e8e0d0', borderRadius:6 }}/>
+      </div>
+      <div style={{ display:'flex', gap:8, marginBottom:10, alignItems:'center', flexWrap:'wrap' }}>
+        <span style={{ fontSize:11, color:'#6b6660' }}>Driver:</span>
+        {['','hunger','boredom','social'].map(tag => (
+          <button key={tag||'none'} onClick={()=>setHungerTag(tag)} style={{
+            padding:'4px 10px', borderRadius:99, border: hungerTag===tag ? `1px solid ${HUNGER_TAGS[tag]?.color||'#999'}` : '1px solid #e8e0d0',
+            background: hungerTag===tag ? (HUNGER_TAGS[tag]?.color||'#888')+'22' : 'transparent',
+            color: hungerTag===tag ? (HUNGER_TAGS[tag]?.color||'#888') : '#6b6660',
+            fontSize:10, cursor:'pointer'
+          }}>{tag === '' ? '—' : HUNGER_TAGS[tag].label}</button>
+        ))}
+        <label style={{ fontSize:11, color:'#6b6660', marginLeft:'auto', display:'flex', alignItems:'center', gap:4 }}>
+          <input type="checkbox" checked={highlight} onChange={e=>setHighlight(e.target.checked)}/> protein anchor
+        </label>
+      </div>
+      <input value={photoLink} onChange={e=>setPhotoLink(e.target.value)} placeholder="📷 Photo link (Google Photos / Drive)"
+        style={{ width:'100%', padding:'7px 10px', fontSize:11, border:'1px solid #e8e0d0', borderRadius:6, marginBottom:10, boxSizing:'border-box', background:'#faf7f2' }}/>
+      <div style={{ fontSize:10, color:'#6b6660', textTransform:'uppercase', letterSpacing:1, marginBottom:6 }}>Items</div>
+      {items.map((it,i)=>(
+        <div key={i} style={{ display:'grid', gridTemplateColumns:'2fr 70px 90px 28px', gap:6, marginBottom:6 }}>
+          <input value={it.name} onChange={e=>updItem(i,{name:e.target.value})} placeholder="What"
+            style={{ padding:'6px 8px', fontSize:12, border:'1px solid #e8e0d0', borderRadius:6 }}/>
+          <input type="number" value={it.kcal} onChange={e=>updItem(i,{kcal: +e.target.value || 0})} placeholder="kcal"
+            style={{ padding:'6px 8px', fontSize:12, border:'1px solid #e8e0d0', borderRadius:6, fontFamily:'monospace' }}/>
+          <input value={it.notes} onChange={e=>updItem(i,{notes:e.target.value})} placeholder="~Xg protein, etc"
+            style={{ padding:'6px 8px', fontSize:11, border:'1px solid #e8e0d0', borderRadius:6 }}/>
+          <button onClick={()=>rmItem(i)} style={{ background:'none', border:'1px solid #fecaca', color:'#dc2626', borderRadius:6, cursor:'pointer', fontSize:14 }}>×</button>
+        </div>
+      ))}
+      <button onClick={addItem} style={{ marginBottom:10, padding:'5px 10px', background:'transparent', border:'1px dashed #c8a24a', color:'#c8a24a', borderRadius:6, fontSize:11, cursor:'pointer' }}>+ item</button>
+      <input value={note} onChange={e=>setNote(e.target.value)} placeholder="Note (optional — what made this stand out?)"
+        style={{ width:'100%', padding:'7px 10px', fontSize:11, border:'1px solid #e8e0d0', borderRadius:6, marginBottom:10, boxSizing:'border-box', fontStyle:'italic' }}/>
+      <div style={{ display:'flex', gap:8 }}>
+        <button onClick={()=>onSave({ label, time, hungerTag: hungerTag || undefined, photoLink, note, protein_highlight: highlight, items: items.filter(it=>it.name.trim()) })}
+          style={{ flex:1, padding:'9px 14px', background:'#3da35d', color:'#fff', border:'none', borderRadius:8, fontWeight:700, cursor:'pointer', fontSize:13 }}>
+          Save
+        </button>
+        <button onClick={onCancel} style={{ padding:'9px 14px', background:'transparent', color:'#6b6660', border:'1px solid #e8e0d0', borderRadius:8, cursor:'pointer', fontSize:13 }}>Cancel</button>
+        {onDelete && (conf
+          ? <button onClick={onDelete} style={{ padding:'9px 14px', background:'#fee2e2', color:'#991b1b', border:'none', borderRadius:8, cursor:'pointer', fontSize:13 }}>Sure?</button>
+          : <button onClick={()=>setConf(true)} style={{ padding:'9px 14px', background:'transparent', color:'#dc2626', border:'1px solid #fecaca', borderRadius:8, cursor:'pointer', fontSize:13 }}>Delete</button>
+        )}
+      </div>
     </div>
   );
 }
@@ -2393,62 +3078,147 @@ function WeekSummary({ log }) {
 }
 
 function FoodLog() {
-  const [log, setLog] = useState(null);
-  const [activeDate, setActiveDate] = useState("2026-04-27");
-  const [loaded, setLoaded] = useState(false);
+  const [log, setLog, status, loaded] = window.useDebouncedPersist(STORAGE_KEY, null);
+  const glance = window.useGlanceData();
+  const todayKey = (() => { const d = new Date(); d.setHours(0,0,0,0); return d.toISOString().slice(0,10); })();
+  const [activeDate, setActiveDate] = useState(todayKey);
   const [showSummary, setShowSummary] = useState(false);
+  const [creatingDay, setCreatingDay] = useState(false);
+  const [pickerDate, setPickerDate] = useState(todayKey);
 
+  // Seed initialLog on first run, default activeDate to today
   useEffect(() => {
-    (async () => {
-      try {
-        const stored = await window.storage.get(STORAGE_KEY);
-        if (stored?.value) {
-          const parsed = JSON.parse(stored.value);
-          const merged = { ...initialLog, ...parsed };
-          setLog(merged);
-          setActiveDate(Object.keys(merged).sort().reverse()[0]);
-        } else {
-          setLog(initialLog);
-          await window.storage.set(STORAGE_KEY, JSON.stringify(initialLog));
-        }
-      } catch {
-        setLog(initialLog);
-        try { await window.storage.set(STORAGE_KEY, JSON.stringify(initialLog)); } catch {}
-      }
-      setLoaded(true);
-    })();
-  }, []);
+    if (!loaded) return;
+    if (log === null) {
+      setLog(initialLog);
+      // pick today if it exists, else most recent
+      setActiveDate(todayKey in initialLog ? todayKey : Object.keys(initialLog).sort().reverse()[0]);
+    } else if (log && !log[activeDate]) {
+      const dates = Object.keys(log).sort().reverse();
+      if (dates.length) setActiveDate(todayKey in log ? todayKey : dates[0]);
+    }
+    // eslint-disable-next-line
+  }, [loaded]);
 
-  const dates = log ? Object.keys(log).sort().reverse() : [];
-  if (!loaded) return <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:200, color:"#aaa", fontFamily:"Georgia, serif" }}>Loading…</div>;
+  if (!loaded || log === null) return (
+    <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:200, color:"#aaa", fontFamily:"Georgia, serif" }}>Loading…</div>
+  );
+
+  const dates = Object.keys(log).sort().reverse();
+  const updateDay = (newDayData) => setLog({ ...log, [activeDate]: newDayData });
+  const deleteDay = (date) => {
+    const n = { ...log }; delete n[date];
+    setLog(n);
+    if (activeDate === date) setActiveDate(Object.keys(n).sort().reverse()[0] || todayKey);
+  };
+  const startNewDay = (date, label) => {
+    if (log[date]) {
+      setActiveDate(date);
+      setCreatingDay(false);
+      return;
+    }
+    setLog({
+      ...log,
+      [date]: { label: label || 'New day', meals: [], health: {} }
+    });
+    setActiveDate(date);
+    setCreatingDay(false);
+  };
+
+  // Calculate protein for each existing day so we can color-code
+  const proteinByDate = {};
+  dates.forEach(d => {
+    proteinByDate[d] = calcProtein(log[d].meals);
+  });
 
   return (
-    <div style={{ maxWidth:600, margin:"0 auto", padding:"24px 16px 48px", fontFamily:"Georgia, serif", background:"#f7f7f5", minHeight:"100vh" }}>
-      <div style={{ marginBottom:20 }}>
-        <div style={{ fontSize:10, letterSpacing:3, color:"#bbb", textTransform:"uppercase", marginBottom:2 }}>Nikhil · Personal Health</div>
-        <h1 style={{ fontSize:23, fontWeight:800, margin:0, color:"#0f1f35", letterSpacing:-0.5 }}>Food & Activity Log</h1>
-        <p style={{ fontSize:12, color:"#bbb", margin:"4px 0 0", fontStyle:"italic" }}>Mar 22 – Apr 22 · Apple Health synced ✅</p>
+    <div style={{ background:"#f7f7f5", minHeight:"100vh", display:'flex', flexDirection:'column' }}>
+      <window.TodayStrip data={glance} theme="light" onPendingClick={() => window.dispatchEvent(new CustomEvent('open-pending'))}/>
+      <div style={{ maxWidth:600, margin:"0 auto", padding:"20px 16px 48px", fontFamily:"Georgia, serif", width:'100%', boxSizing:'border-box' }}>
+        <div style={{ marginBottom:16, display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:10 }}>
+          <div>
+            <div style={{ fontSize:10, letterSpacing:3, color:"#bbb", textTransform:"uppercase", marginBottom:2 }}>Nikhil · Personal Health</div>
+            <h1 style={{ fontSize:23, fontWeight:800, margin:0, color:"#0f1f35", letterSpacing:-0.5 }}>Food & Activity Log</h1>
+            <div style={{ marginTop:6 }}><window.SaveStatusPill state={status}/></div>
+          </div>
+        </div>
+
+        {/* Date picker / new day controls */}
+        <div style={{ display:'flex', gap:8, marginBottom:14, flexWrap:'wrap', alignItems:'center' }}>
+          <input type="date" value={pickerDate} onChange={e => setPickerDate(e.target.value)}
+            style={{ padding:'7px 10px', fontSize:12, border:'1px solid #e4e4e0', borderRadius:8, background:'#fff', fontFamily:'Georgia,serif' }}/>
+          <button onClick={() => {
+            if (log[pickerDate]) { setActiveDate(pickerDate); setShowSummary(false); }
+            else setCreatingDay(true);
+          }} style={{
+            padding:'7px 14px', borderRadius:20, border:'none',
+            background: log[pickerDate] ? '#0f1f35' : '#3da35d',
+            color:'#fff', fontFamily:'Georgia,serif', fontSize:12.5, cursor:'pointer', fontWeight:600
+          }}>
+            {log[pickerDate] ? 'Go to date' : '+ New day'}
+          </button>
+          <button onClick={() => { setActiveDate(todayKey); setShowSummary(false); if (!log[todayKey]) setCreatingDay(true); }} style={{
+            padding:'7px 14px', borderRadius:20, border:'1px solid #ccc', background:'transparent',
+            color:'#0f1f35', fontFamily:'Georgia,serif', fontSize:12.5, cursor:'pointer'
+          }}>Today</button>
+        </div>
+
+        {creatingDay && (
+          <div style={{ background:'#fff', border:'1px solid #3da35d', borderRadius:12, padding:14, marginBottom:14 }}>
+            <div style={{ fontSize:12, color:'#666', marginBottom:8 }}>Creating new day for <strong>{pickerDate}</strong></div>
+            <NewDayQuickForm date={pickerDate} onCreate={startNewDay} onCancel={()=>setCreatingDay(false)}/>
+          </div>
+        )}
+
+        {/* Day pills with color-coded protein */}
+        <div style={{ display:"flex", gap:6, marginBottom:18, overflowX:"auto", paddingBottom:6, WebkitOverflowScrolling:'touch' }}>
+          {dates.map(d => {
+            const isActive = d===activeDate && !showSummary;
+            const tier = proteinTier(proteinByDate[d]);
+            return (
+              <button key={d} onClick={() => { setActiveDate(d); setShowSummary(false); }} style={{
+                padding:"7px 13px", borderRadius:20, border: isActive ? 'none' : `2px solid ${tier.color}`,
+                background: isActive ? "#0f1f35" : "#fff",
+                color: isActive ? "white" : "#666",
+                fontFamily:"Georgia, serif", fontSize:12.5, cursor:"pointer",
+                whiteSpace:"nowrap", fontWeight: isActive ? 700 : 500, position:'relative'
+              }}>
+                {new Date(d+"T12:00:00").toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}
+                <span style={{ display:'inline-block', width:6, height:6, borderRadius:'50%', background:tier.color, marginLeft:6, verticalAlign:'middle' }}/>
+              </button>
+            );
+          })}
+          <button onClick={() => setShowSummary(true)} style={{
+            padding:"7px 14px", borderRadius:20, border:"none",
+            background: showSummary ? "#3da35d" : "#e4e4e0",
+            color: showSummary ? "white" : "#666",
+            fontFamily:"Georgia, serif", fontSize:12.5, cursor:"pointer", whiteSpace:"nowrap"
+          }}>📊 Avg</button>
+        </div>
+
+        {showSummary
+          ? <WeekSummary log={log} />
+          : log?.[activeDate]
+            ? <DayView date={activeDate} data={log[activeDate]} editable={true} onUpdate={updateDay} onDeleteDay={deleteDay}/>
+            : <div style={{ background:'#fff', borderRadius:12, padding:24, color:'#999', textAlign:'center', fontStyle:'italic' }}>No data for this day. Use the date picker above to start a new day.</div>
+        }
+        <div style={{ marginTop:32, textAlign:"center", fontSize:10, color:"#ccc", letterSpacing:2, textTransform:"uppercase" }}>
+          Raven Claw Engineering · Health Log v2
+        </div>
       </div>
-      <div style={{ display:"flex", gap:8, marginBottom:18, overflowX:"auto", paddingBottom:4 }}>
-        {dates.map(d => (
-          <button key={d} onClick={() => { setActiveDate(d); setShowSummary(false); }} style={{
-            padding:"7px 15px", borderRadius:20, border:"none",
-            background: d===activeDate && !showSummary ? "#0f1f35" : "#e4e4e0",
-            color: d===activeDate && !showSummary ? "white" : "#666",
-            fontFamily:"Georgia, serif", fontSize:12.5, cursor:"pointer",
-            whiteSpace:"nowrap", fontWeight: d===activeDate && !showSummary ? 700 : 400
-          }}>{new Date(d+"T12:00:00").toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}</button>
-        ))}
-        <button onClick={() => setShowSummary(true)} style={{
-          padding:"7px 15px", borderRadius:20, border:"none",
-          background: showSummary ? "#3da35d" : "#e4e4e0",
-          color: showSummary ? "white" : "#666",
-          fontFamily:"Georgia, serif", fontSize:12.5, cursor:"pointer", whiteSpace:"nowrap"
-        }}>📊 Avg</button>
-      </div>
-      {showSummary ? <WeekSummary log={log} /> : log?.[activeDate] && <DayView date={activeDate} data={log[activeDate]} />}
-      <div style={{ marginTop:32, textAlign:"center", fontSize:10, color:"#ccc", letterSpacing:2, textTransform:"uppercase" }}>
-        Raven Claw Engineering · Health Log v1
+    </div>
+  );
+}
+
+function NewDayQuickForm({ date, onCreate, onCancel }) {
+  const [label, setLabel] = useState('');
+  return (
+    <div>
+      <input value={label} onChange={e=>setLabel(e.target.value)} placeholder="Day label (optional, e.g. 'Travel day' or 'Long ski')"
+        style={{ width:'100%', padding:'8px 10px', fontSize:13, border:'1px solid #e8e0d0', borderRadius:8, marginBottom:8, boxSizing:'border-box', fontFamily:'Georgia,serif' }}/>
+      <div style={{ display:'flex', gap:8 }}>
+        <button onClick={()=>onCreate(date, label)} style={{ flex:1, padding:'9px 14px', background:'#3da35d', color:'#fff', border:'none', borderRadius:8, fontWeight:700, cursor:'pointer', fontSize:13 }}>Create day</button>
+        <button onClick={onCancel} style={{ padding:'9px 14px', background:'transparent', color:'#6b6660', border:'1px solid #e8e0d0', borderRadius:8, cursor:'pointer', fontSize:13 }}>Cancel</button>
       </div>
     </div>
   );
@@ -2460,8 +3230,9 @@ window.FoodLog = FoodLog;
   </script>
 
   <!-- HealthDashboard -->
+
   <script type="text/babel">
-const { useState, useMemo } = React;
+const { useState, useEffect, useMemo } = React;
 const _RC = window.Recharts || {};
 const BarChart = _RC.BarChart || (() => null);
 const Bar = _RC.Bar || (() => null);
@@ -2478,6 +3249,19 @@ const Cell = _RC.Cell || (() => null);
 const Legend = _RC.Legend || (() => null);
 const AreaChart = _RC.AreaChart || (() => null);
 const Area = _RC.Area || (() => null);
+
+// Local helper since calcProtein lives in the FoodLog scope
+function calcProtein(meals) {
+  if (!meals) return 0;
+  let t = 0;
+  meals.forEach(m => m.items?.forEach(i => {
+    if (i.notes) {
+      const x = i.notes.match(/~?(\d+(?:\.\d+)?)\s*g\s*protein/i);
+      if (x) t += parseFloat(x[1]);
+    }
+  }));
+  return Math.round(t);
+}
 
 
 const COLORS = {
@@ -3003,11 +3787,77 @@ const VitalsTab = () => {
 };
 
 // ── TAB: MEDICATIONS ──────────────────────────────
-const MedsTab = () => {
+const MedsTab = ({ medLog = {}, setMedLog }) => {
   const categories = [...new Set(medications.map(m => m.category))];
+  const today = (() => { const d = new Date(); d.setHours(0,0,0,0); return d.toISOString().slice(0,10); })();
+  const trackedMeds = ['Etilaam','Bupropion','Dutasteride','Minoxidil','Ksheerabala','Dhanavantaram','M.S. Ayurvedic'];
+  const todayLog = medLog[today] || {};
+  const toggleMed = (m) => {
+    if (!setMedLog) return;
+    setMedLog({ ...medLog, [today]: { ...todayLog, [m]: !todayLog[m] } });
+  };
+
+  // Adherence streak per med (last 14 days) — display only, not gamified
+  const adherenceLast14 = trackedMeds.map(m => {
+    let taken = 0;
+    for (let i = 0; i < 14; i++) {
+      const d = new Date(); d.setDate(d.getDate() - i); d.setHours(0,0,0,0);
+      const k = d.toISOString().slice(0,10);
+      if (medLog[k]?.[m]) taken++;
+    }
+    return { name: m, taken, total: 14 };
+  });
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <Card title="Adherence Overview" accent={COLORS.accent}>
+      {setMedLog && (
+        <Card title="Today's medication check-in" accent={COLORS.green}>
+          <div style={{ fontSize: 11, color: COLORS.textMuted, marginBottom: 12 }}>
+            Tap each med you've taken today. This data feeds the Pending inbox and the 14-day adherence view below — it's information, not a streak.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 8 }}>
+            {trackedMeds.map(m => {
+              const taken = !!todayLog[m];
+              return (
+                <button key={m} onClick={() => toggleMed(m)} style={{
+                  padding: "10px 12px", borderRadius: 8, border: `1px solid ${taken ? COLORS.green : COLORS.border}`,
+                  background: taken ? COLORS.greenMuted : "transparent",
+                  color: taken ? COLORS.green : COLORS.text,
+                  fontSize: 12, fontWeight: 600, cursor: "pointer", textAlign: "left",
+                  display: "flex", justifyContent: "space-between", alignItems: "center",
+                  fontFamily: "inherit"
+                }}>
+                  <span>{m}</span>
+                  <span style={{ fontSize: 14 }}>{taken ? "✓" : "○"}</span>
+                </button>
+              );
+            })}
+          </div>
+        </Card>
+      )}
+
+      <Card title="14-day adherence view" accent={COLORS.cyan}>
+        <div style={{ fontSize: 11, color: COLORS.textMuted, marginBottom: 12 }}>
+          Days logged in the last 14. Lower numbers reflect days you didn't log, not necessarily days you didn't take it.
+        </div>
+        {adherenceLast14.map(a => {
+          const pct = (a.taken / a.total) * 100;
+          const color = pct >= 80 ? COLORS.green : pct >= 50 ? COLORS.amber : COLORS.red;
+          return (
+            <div key={a.name} style={{ marginBottom: 8 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: COLORS.text, marginBottom: 4 }}>
+                <span>{a.name}</span>
+                <span style={{ color, fontFamily: "monospace" }}>{a.taken}/{a.total}</span>
+              </div>
+              <div style={{ height: 5, background: COLORS.border, borderRadius: 3, overflow: "hidden" }}>
+                <div style={{ width: `${pct}%`, height: "100%", background: color }}/>
+              </div>
+            </div>
+          );
+        })}
+      </Card>
+
+      <Card title="Adherence Overview (baseline note)" accent={COLORS.accent}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 }}>
           {[
             { label: "Consistent", count: medications.filter(m => m.adherence === "consistent").length, color: COLORS.green },
@@ -3048,6 +3898,279 @@ const MedsTab = () => {
           <span style={{ color: COLORS.textMuted }}>●</span> Meloset decision is intentional — monitor natural wake pattern<br />
           <span style={{ color: COLORS.purple }}>●</span> Dermarolling: get rubbing alcohol, research rolling vs. point stimulation for hairline
         </div>
+      </Card>
+    </div>
+  );
+};
+
+// ── TAB: LIVE (new) ──────────────────────────────────
+const LiveTab = ({ healthImport = {}, setHealthImport, medLog = {}, setMedLog }) => {
+  const [importText, setImportText] = useState("");
+  const [importStatus, setImportStatus] = useState("");
+  const [foodLog, setFoodLog] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get('nikhil-food-log-v1');
+        if (r?.value) setFoodLog(JSON.parse(r.value));
+      } catch {}
+    })();
+  }, []);
+
+  // ── Date helpers ──
+  const dayKeys = (n) => {
+    const out = [];
+    for (let i = n-1; i >= 0; i--) {
+      const d = new Date(); d.setDate(d.getDate() - i); d.setHours(0,0,0,0);
+      out.push(d.toISOString().slice(0,10));
+    }
+    return out;
+  };
+  const last7  = dayKeys(7);
+  const last14 = dayKeys(14);
+  const last30 = dayKeys(30);
+
+  // ── Pull metric per day from imported AH > food log fallback ──
+  const metricFor = (date, key) => {
+    return healthImport.daily?.[date]?.[key] ?? foodLog?.[date]?.health?.[key] ?? null;
+  };
+  const proteinFor = (date) => {
+    if (!foodLog?.[date]?.meals) return null;
+    return calcProtein(foodLog[date].meals);
+  };
+  const burnFor = (date) => {
+    const a = metricFor(date,'active_kcal');
+    const b = metricFor(date,'basal_kcal');
+    if (a !== null && b !== null) return Math.round(a + b);
+    return null;
+  };
+
+  // ── 7-day rolling averages ──
+  const avg = (vals) => {
+    const f = vals.filter(v => v !== null && !isNaN(v));
+    if (f.length === 0) return null;
+    return f.reduce((a,b)=>a+b,0) / f.length;
+  };
+  const avg7 = (key) => avg(last7.map(d => metricFor(d, key)));
+  const stepsAvg = avg7('steps');
+  const rhrAvg   = avg7('rhr');
+  const sleepAvg = avg7('sleep_hours');
+  const hrvAvg   = avg7('hrv');
+
+  // ── Protein vs burn correlation last 14d ──
+  const correl = (() => {
+    const points = last14.map(d => ({ p: proteinFor(d), b: burnFor(d) || metricFor(d,'active_kcal'), s: metricFor(d,'steps') }))
+                         .filter(p => p.p !== null && (p.b !== null || p.s !== null));
+    if (points.length < 3) return null;
+    // simple correl between protein and (active+basal burn) or steps
+    const xs = points.map(p => p.p);
+    const ys = points.map(p => p.b !== null ? p.b : p.s);
+    const mx = xs.reduce((a,b)=>a+b,0)/xs.length;
+    const my = ys.reduce((a,b)=>a+b,0)/ys.length;
+    let num=0, dx=0, dy=0;
+    xs.forEach((x,i)=>{ num+=(x-mx)*(ys[i]-my); dx+=(x-mx)**2; dy+=(ys[i]-my)**2; });
+    const r = num / Math.sqrt(dx*dy);
+    return { r, n: points.length };
+  })();
+
+  // ── Sleep window viz: bedtime/wake/duration last 14d ──
+  // We parse from food log health.sleep_note when available (e.g. "11:40 PM → 7:20 AM AKDT")
+  const sleepWindow = last14.map(d => {
+    const note = foodLog?.[d]?.health?.sleep_note;
+    const hours = metricFor(d,'sleep_hours');
+    if (!note && hours === null) return { date: d, hours: null };
+    let start = null, end = null;
+    if (note) {
+      const m = note.match(/(\d{1,2}:\d{2})\s*(AM|PM)?.*?(\d{1,2}:\d{2})\s*(AM|PM)?/i);
+      if (m) {
+        const parseT = (t, ap) => {
+          let [h,mn] = t.split(':').map(Number);
+          if (ap?.toUpperCase()==='PM' && h<12) h+=12;
+          if (ap?.toUpperCase()==='AM' && h===12) h=0;
+          return h + mn/60;
+        };
+        start = parseT(m[1], m[2]);
+        end = parseT(m[3], m[4]);
+      }
+    }
+    return { date: d, start, end, hours };
+  });
+
+  // ── Fat-bike rides (cycling workouts) ──
+  const cyclingWorkouts = (healthImport.workouts || [])
+    .filter(w => /cycl|bike/i.test(w.type || ''))
+    .sort((a,b) => (b.date||'').localeCompare(a.date||''))
+    .slice(0, 10);
+
+  // ── Recent workouts (any type) ──
+  const recentImported = (healthImport.workouts || [])
+    .sort((a,b) => (b.date||'').localeCompare(a.date||''))
+    .slice(0, 10);
+
+  // ── Import handler ──
+  const tryImport = () => {
+    setImportStatus("");
+    try {
+      const parsed = JSON.parse(importText);
+      const next = { ...healthImport };
+      // accept either flat schema OR Health Auto Export style
+      if (parsed.daily) Object.assign(next.daily = next.daily || {}, parsed.daily);
+      if (parsed.workouts) next.workouts = [...(next.workouts || []), ...parsed.workouts];
+      // auto-detect HAE schema
+      if (Array.isArray(parsed.data?.metrics)) {
+        next.daily = next.daily || {};
+        parsed.data.metrics.forEach(metric => {
+          (metric.data || []).forEach(d => {
+            const day = (d.date || d.startDate || '').slice(0,10);
+            if (!day) return;
+            next.daily[day] = next.daily[day] || {};
+            const key = ({
+              'step_count': 'steps', 'steps':'steps',
+              'resting_heart_rate':'rhr','heart_rate_variability':'hrv',
+              'sleep_analysis':'sleep_hours','active_energy':'active_kcal',
+              'basal_energy_burned':'basal_kcal'
+            })[metric.name] || metric.name;
+            next.daily[day][key] = d.qty ?? d.value ?? d.duration;
+          });
+        });
+      }
+      if (Array.isArray(parsed.data?.workouts)) {
+        next.workouts = [...(next.workouts || []), ...parsed.data.workouts.map(w => ({
+          date: (w.start || w.startDate || '').slice(0,10),
+          type: w.name || w.type,
+          dur: Math.round((w.duration||0)/60),
+          cal: Math.round(w.activeEnergyBurned?.qty || w.totalEnergyBurned?.qty || 0),
+        }))];
+      }
+      next.lastImportAt = new Date().toISOString();
+      setHealthImport(next);
+      setImportText("");
+      setImportStatus("✅ Imported. Numbers updated.");
+      setTimeout(()=>setImportStatus(""), 4000);
+    } catch (e) {
+      setImportStatus("❌ Couldn't parse — make sure it's valid JSON. " + e.message);
+    }
+  };
+
+  const fmt = (v, d=0) => v === null || v === undefined ? "—" : (d ? v.toFixed(d) : Math.round(v).toLocaleString());
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Rolling averages cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12 }}>
+        {[
+          { label: "Steps · 7d avg", value: stepsAvg, color: COLORS.accent, sub: stepsAvg ? `today: ${fmt(metricFor(last7[6],'steps'))}` : "no data" },
+          { label: "RHR · 7d avg",   value: rhrAvg,   color: COLORS.amber, sub: rhrAvg ? `today: ${fmt(metricFor(last7[6],'rhr'))} bpm` : "no data", suffix: "bpm" },
+          { label: "Sleep · 7d avg", value: sleepAvg, color: COLORS.cyan,  sub: sleepAvg ? `today: ${fmt(metricFor(last7[6],'sleep_hours'),1)}h` : "no data", suffix: "h", decimals: 1 },
+          { label: "HRV · 7d avg",   value: hrvAvg,   color: COLORS.purple,sub: hrvAvg ? `today: ${fmt(metricFor(last7[6],'hrv'))} ms` : "no data", suffix: "ms" },
+        ].map((m, i) => (
+          <div key={i} style={{ background: COLORS.card, borderRadius: 10, padding: 14, border: `1px solid ${COLORS.border}` }}>
+            <div style={{ fontSize: 10, color: COLORS.textMuted, marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>{m.label}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: m.color }}>{fmt(m.value, m.decimals || 0)}{m.suffix && m.value !== null ? <span style={{ fontSize: 12, color: COLORS.textMuted, marginLeft: 4 }}>{m.suffix}</span> : ''}</div>
+            <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 4 }}>{m.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Protein vs Burn correlation */}
+      <Card title="Protein × active burn — does fueling match output?" accent={COLORS.green}>
+        {correl ? (
+          <div style={{ fontSize: 13, color: COLORS.textMuted, lineHeight: 1.7 }}>
+            Pearson r = <strong style={{ color: Math.abs(correl.r) > 0.4 ? COLORS.accent : COLORS.textMuted }}>{correl.r.toFixed(2)}</strong> across <strong>{correl.n}</strong> days (last 14).<br/>
+            {correl.r > 0.4
+              ? "Positive — high-protein days line up with high-burn days. Body is using the fuel."
+              : correl.r < -0.4
+                ? "Negative — high-protein days are low-movement days. Could be eating-then-resting pattern; not necessarily a problem."
+                : "No strong relationship right now. Could mean both are independent, or that you don't have enough variation in either yet."}
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: COLORS.textMuted, fontStyle: "italic" }}>
+            Need at least 3 days with both protein logged and active burn data. Keep logging — this card lights up when there's signal.
+          </div>
+        )}
+      </Card>
+
+      {/* Sleep window viz */}
+      <Card title="Sleep window — last 14 days" accent={COLORS.cyan}>
+        <div style={{ fontSize: 11, color: COLORS.textMuted, marginBottom: 10 }}>
+          Each row is one night. Bar shows sleep window (left = bedtime, right = wake). Empty rows = no sleep_note recorded.
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {sleepWindow.map((s, i) => {
+            // map 8 PM (20:00) → 11 AM (35:00) on a 0-100 scale (15-hour window)
+            const toPct = (h) => {
+              const adj = h < 12 ? h + 24 : h; // shift PM hours
+              return Math.max(0, Math.min(100, ((adj - 20) / 15) * 100));
+            };
+            const startPct = s.start !== null && s.start !== undefined ? toPct(s.start) : null;
+            const endPct = s.end !== null && s.end !== undefined ? toPct(s.end) : null;
+            const dt = new Date(s.date+"T12:00:00");
+            return (
+              <div key={s.date} style={{ display: "grid", gridTemplateColumns: "60px 1fr 50px", alignItems: "center", gap: 8, fontSize: 11 }}>
+                <span style={{ color: COLORS.textMuted, fontFamily: "monospace" }}>{dt.toLocaleDateString("en-US",{weekday:"short",day:"numeric"})}</span>
+                <div style={{ height: 14, background: COLORS.border, borderRadius: 3, position: "relative" }}>
+                  {startPct !== null && endPct !== null && (
+                    <div style={{
+                      position: "absolute", left: `${startPct}%`, width: `${Math.max(2, endPct - startPct)}%`,
+                      top: 0, height: "100%", background: COLORS.cyan, borderRadius: 3
+                    }}/>
+                  )}
+                </div>
+                <span style={{ color: s.hours ? COLORS.text : COLORS.textMuted, fontFamily: "monospace", textAlign: "right" }}>
+                  {s.hours ? `${s.hours.toFixed(1)}h` : "—"}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: COLORS.textMuted, marginTop: 8, paddingLeft: 68, paddingRight: 58 }}>
+          <span>8 PM</span><span>12 AM</span><span>4 AM</span><span>8 AM</span><span>11 AM</span>
+        </div>
+      </Card>
+
+      {/* Fat bike / cycling */}
+      <Card title="Fat bike & cycling rides (auto-pulled from imported workouts)" accent={COLORS.green}>
+        {cyclingWorkouts.length === 0 ? (
+          <div style={{ fontSize: 12, color: COLORS.textMuted, fontStyle: "italic" }}>
+            No cycling workouts in import yet. Once you import Apple Health data with cycling workouts, they'll auto-populate here.
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {cyclingWorkouts.map((w, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "8px 12px", background: COLORS.bg, borderRadius: 6, fontSize: 12, border: `1px solid ${COLORS.border}` }}>
+                <span style={{ color: COLORS.textMuted, minWidth: 70 }}>{w.date}</span>
+                <span style={{ color: COLORS.text, flex: 1, marginLeft: 10 }}>{w.type}</span>
+                <span style={{ color: COLORS.amber, marginLeft: 8 }}>{w.dur}min</span>
+                <span style={{ color: COLORS.red, marginLeft: 8 }}>{w.cal}kcal</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/* Apple Health import */}
+      <Card title="Import Apple Health JSON" accent={COLORS.purple}>
+        <div style={{ fontSize: 12, color: COLORS.textMuted, lineHeight: 1.6, marginBottom: 10 }}>
+          Web apps can't directly read Apple Health, but the <strong>Health Auto Export</strong> iOS app can dump JSON you paste here.
+          Or use the simpler schema: <code style={{ background: COLORS.bg, padding: "1px 6px", borderRadius: 3 }}>{`{ "daily": { "2026-05-08": { "steps": 12000, "rhr": 53, "hrv": 100, "sleep_hours": 7.2, "active_kcal": 600, "basal_kcal": 1500 } }, "workouts": [{ "date": "2026-05-08", "type": "Cycling", "dur": 45, "cal": 300 }] }`}</code>.
+          Imports merge with what's already there.
+        </div>
+        <textarea value={importText} onChange={e=>setImportText(e.target.value)} placeholder="Paste JSON from Health Auto Export, or the simpler schema above..."
+          style={{ width: "100%", minHeight: 100, padding: 10, background: COLORS.bg, color: COLORS.text, border: `1px solid ${COLORS.border}`, borderRadius: 6, fontFamily: "monospace", fontSize: 11, boxSizing: "border-box", marginBottom: 8 }}/>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button onClick={tryImport} disabled={!importText.trim()} style={{
+            padding: "8px 16px", background: importText.trim() ? COLORS.purple : COLORS.border,
+            color: importText.trim() ? "#fff" : COLORS.textMuted, border: "none", borderRadius: 6,
+            fontWeight: 600, fontSize: 12, cursor: importText.trim() ? "pointer" : "default", fontFamily: "inherit"
+          }}>Import</button>
+          {healthImport.lastImportAt && (
+            <span style={{ fontSize: 11, color: COLORS.textMuted }}>
+              Last import: {new Date(healthImport.lastImportAt).toLocaleString()}
+            </span>
+          )}
+        </div>
+        {importStatus && <div style={{ marginTop: 10, fontSize: 12, color: importStatus.startsWith("✅") ? COLORS.green : COLORS.red }}>{importStatus}</div>}
       </Card>
     </div>
   );
@@ -3457,81 +4580,101 @@ Brighton ~April. Need something NOW. Seven Centers ($5K/6mo) considered. Alterna
         }}>
           {contextBlock}
         </pre>
-      </div>
-      <button
-        onClick={() => { navigator.clipboard.writeText(contextBlock); }}
-        style={{
-          padding: "12px 24px", borderRadius: 8, border: "none", cursor: "pointer",
-          background: COLORS.accent, color: COLORS.bg, fontSize: 14, fontWeight: 600,
-          width: "100%",
-        }}
-      >
-        Copy Context Block to Clipboard
-      </button>
-    </div>
-  );
+
+```
+  </div>
+  <button
+    onClick={() => { navigator.clipboard.writeText(contextBlock); }}
+    style={{
+      padding: "12px 24px", borderRadius: 8, border: "none", cursor: "pointer",
+      background: COLORS.accent, color: COLORS.bg, fontSize: 14, fontWeight: 600,
+      width: "100%",
+    }}
+  >
+    Copy Context Block to Clipboard
+  </button>
+</div>
+```
+
+);
 };
 
 // ── MAIN ──────────────────────────────────────────
 function HealthDashboard() {
-  const [tab, setTab] = useState("vitals");
-  const tabs = [
-    { id: "vitals", label: "Vitals & Data" },
-    { id: "meds", label: "Medications" },
-    { id: "habits", label: "Habits & Routines" },
-    { id: "support", label: "Support & Therapy" },
-    { id: "timeline", label: "Timeline & Coursework" },
-    { id: "context", label: "Context Transfer" },
-  ];
+const [tab, setTab] = useState(“live”);
+const [healthImport, setHealthImport, healthStatus] = window.useDebouncedPersist(‘apple-health-import’, { daily: {}, workouts: [], lastImportAt: null });
+const [medLog, setMedLog, medStatus] = window.useDebouncedPersist(‘med-log-daily’, {});
+const glance = window.useGlanceData();
 
-  return (
+const tabs = [
+{ id: “live”,     label: “Live” },
+{ id: “vitals”,   label: “Vitals & Data” },
+{ id: “meds”,     label: “Medications” },
+{ id: “habits”,   label: “Habits” },
+{ id: “support”,  label: “Support” },
+{ id: “timeline”, label: “Timeline” },
+{ id: “context”,  label: “Context” },
+];
+
+return (
+<div style={{
+minHeight: “100vh”, background: COLORS.bg, color: COLORS.text,
+fontFamily: “‘DM Sans’, -apple-system, sans-serif”,
+}}>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<window.TodayStrip data={glance} theme=“dark” onPendingClick={() => window.dispatchEvent(new CustomEvent(‘open-pending’))}/>
+<div style={{ padding: “20px 20px 40px” }}>
+<div style={{ maxWidth: 900, margin: “0 auto” }}>
+{/* Header */}
+<div style={{ marginBottom: 18, display:‘flex’, justifyContent:‘space-between’, alignItems:‘flex-start’, gap:12, flexWrap:‘wrap’ }}>
+<div>
+<h1 style={{ fontSize: 22, fontWeight: 700, margin: “0 0 4px”, color: COLORS.text, letterSpacing: -0.5 }}>
+Nikhil — Health & Wellness Dashboard
+</h1>
+<div style={{ fontSize: 12, color: COLORS.textMuted }}>
+Live: pulls from your Food Log + imported Apple Health data + medication log. Vitals and below: historic baseline (preserved).
+</div>
+</div>
+<div style={{ display:‘flex’, gap:6 }}>
+<window.SaveStatusPill state={healthStatus === ‘idle’ ? medStatus : healthStatus}/>
+</div>
+</div>
+
+```
+    {/* Tabs */}
     <div style={{
-      minHeight: "100vh", background: COLORS.bg, color: COLORS.text,
-      fontFamily: "'DM Sans', -apple-system, sans-serif", padding: "24px 20px",
+      display: "flex", gap: 4, marginBottom: 24, padding: 4, borderRadius: 10,
+      background: COLORS.card, border: `1px solid ${COLORS.border}`, flexWrap: "wrap",
     }}>
-      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-
-      <div style={{ maxWidth: 900, margin: "0 auto" }}>
-        {/* Header */}
-        <div style={{ marginBottom: 28 }}>
-          <h1 style={{ fontSize: 22, fontWeight: 700, margin: "0 0 4px", color: COLORS.text, letterSpacing: -0.5 }}>
-            Nikhil — Health & Wellness Dashboard
-          </h1>
-          <div style={{ fontSize: 13, color: COLORS.textMuted }}>
-            V3 · March 14, 2026 · Apple Health (2020-present) + Google Drive + Gmail + Habit Tracker + Therapy Transcripts
-          </div>
-        </div>
-
-        {/* Tabs */}
-        <div style={{
-          display: "flex", gap: 4, marginBottom: 24, padding: 4, borderRadius: 10,
-          background: COLORS.card, border: `1px solid ${COLORS.border}`, flexWrap: "wrap",
-        }}>
-          {tabs.map(t => (
-            <TabButton key={t.id} active={tab === t.id} onClick={() => setTab(t.id)}>
-              {t.label}
-            </TabButton>
-          ))}
-        </div>
-
-        {/* Content */}
-        {tab === "vitals" && <VitalsTab />}
-        {tab === "meds" && <MedsTab />}
-        {tab === "habits" && <HabitsTab />}
-        {tab === "support" && <SupportTab />}
-        {tab === "timeline" && <TimelineTab />}
-        {tab === "context" && <ContextTab />}
-      </div>
+      {tabs.map(t => (
+        <TabButton key={t.id} active={tab === t.id} onClick={() => setTab(t.id)}>
+          {t.label}
+        </TabButton>
+      ))}
     </div>
-  );
-}
 
+    {/* Content */}
+    {tab === "live"     && <LiveTab healthImport={healthImport} setHealthImport={setHealthImport} medLog={medLog} setMedLog={setMedLog}/>}
+    {tab === "vitals"   && <VitalsTab healthImport={healthImport}/>}
+    {tab === "meds"     && <MedsTab medLog={medLog} setMedLog={setMedLog}/>}
+    {tab === "habits"   && <HabitsTab />}
+    {tab === "support"  && <SupportTab />}
+    {tab === "timeline" && <TimelineTab />}
+    {tab === "context"  && <ContextTab />}
+  </div>
+  </div>
+</div>
+```
+
+);
+}
 
 window.HealthDashboard = HealthDashboard;
 
   </script>
 
   <!-- CreativeRoulette -->
+
   <script type="text/babel">
 const { useState, useEffect, useRef, useCallback } = React;
 
@@ -3789,6 +4932,18 @@ function CreativeRoulette() {
   const [gatekeeperName, setGatekeeperName] = useState("Greg");
   const [huhInput, setHuhInput] = useState("");
   const [emergencyMode, setEmergencyMode] = useState(false);
+  const [saveStatus, setSaveStatus] = useState('booting');
+  const [catchEntries, setCatchEntries] = useState([]);
+  const [catchInput, setCatchInput] = useState("");
+  const [catchType, setCatchType] = useState("text"); // 'text' | 'voice' | 'image'
+  const [catchFileLink, setCatchFileLink] = useState("");
+  const [recording, setRecording] = useState(false);
+  const [recordedBlob, setRecordedBlob] = useState(null);
+  const [recordError, setRecordError] = useState("");
+  const mediaRecorderRef = useRef(null);
+  const recordStreamRef = useRef(null);
+  const recordChunksRef = useRef([]);
+  const glance = window.useGlanceData();
 
   // Seed entries — recovered from chat after storage loss
   const SEED_ENTRIES = [
@@ -3988,14 +5143,33 @@ function CreativeRoulette() {
         const g = await window.storage.get("gatekeeper-name");
         if (g?.value) setGatekeeperName(g.value);
       } catch(e) {}
+      try {
+        const c = await window.storage.get("creative-catch");
+        if (c?.value) setCatchEntries(JSON.parse(c.value));
+      } catch(e) {}
+      setSaveStatus('idle');
     })();
   }, []);
 
   const saveLog = useCallback(async (newLog) => {
     setLog(newLog);
+    setSaveStatus('saving');
     const data = JSON.stringify(newLog);
-    try { await window.storage.set("creative-log-v2", data); } catch(e) {}
-    try { await window.storage.set("creative-log", data); } catch(e) {}
+    let ok1 = false, ok2 = false;
+    try { ok1 = await window.storage.set("creative-log-v2", data); } catch(e) {}
+    try { ok2 = await window.storage.set("creative-log", data); } catch(e) {}
+    setSaveStatus(ok1 || ok2 ? 'saved' : 'error');
+    setTimeout(() => setSaveStatus('idle'), 1500);
+  }, []);
+
+  const saveCatchEntries = useCallback(async (newEntries) => {
+    setCatchEntries(newEntries);
+    setSaveStatus('saving');
+    try {
+      const ok = await window.storage.set("creative-catch", JSON.stringify(newEntries));
+      setSaveStatus(ok ? 'saved' : 'error');
+    } catch { setSaveStatus('error'); }
+    setTimeout(() => setSaveStatus('idle'), 1500);
   }, []);
 
   const today = new Date();
@@ -4068,6 +5242,60 @@ function CreativeRoulette() {
     return `90 seconds. 5 worst possible ${thing} for ${ctx}. Voice memo. Don't listen back. The point isn't the ideas — it's proving to ${gatekeeperName} you can.`;
   };
 
+  // ── Catch inbox: spontaneous creative work, not generated ──
+  const addCatch = (kind, text, fileLink, blob) => {
+    if (!text?.trim() && !fileLink && !blob) return;
+    const entry = {
+      id: 'c_' + Math.random().toString(36).slice(2,9),
+      date: new Date().toISOString(),
+      kind, // 'text' | 'voice' | 'image' | 'song' | 'movement'
+      text: text?.trim() || '',
+      fileLink: fileLink || '',
+      blobURL: blob ? URL.createObjectURL(blob) : '',
+      hasAudio: !!blob,
+    };
+    saveCatchEntries([entry, ...catchEntries]);
+    setCatchInput("");
+    setCatchFileLink("");
+    setRecordedBlob(null);
+  };
+  const updateCatch = (id, patch) => {
+    saveCatchEntries(catchEntries.map(c => c.id === id ? { ...c, ...patch } : c));
+  };
+  const removeCatch = (id) => {
+    if (!confirm('Delete this catch?')) return;
+    saveCatchEntries(catchEntries.filter(c => c.id !== id));
+  };
+
+  // ── Voice memo recording ──
+  const startRecording = async () => {
+    setRecordError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordStreamRef.current = stream;
+      recordChunksRef.current = [];
+      const mr = new MediaRecorder(stream);
+      mediaRecorderRef.current = mr;
+      mr.ondataavailable = (e) => { if (e.data.size > 0) recordChunksRef.current.push(e.data); };
+      mr.onstop = () => {
+        const blob = new Blob(recordChunksRef.current, { type: 'audio/webm' });
+        setRecordedBlob(blob);
+        stream.getTracks().forEach(t => t.stop());
+      };
+      mr.start();
+      setRecording(true);
+    } catch (e) {
+      setRecordError("Mic blocked or unavailable. Try uploading a recording link instead.");
+      setRecording(false);
+    }
+  };
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    setRecording(false);
+  };
+
   const categories = ["all", "body", "voice", "inventor", "writer", "feeling", "garbage", "yes-and", "mutate", "third-person", "mad-libs", "absurd"];
   const cc = { body: "#FF6B6B", voice: "#4ECDC4", inventor: "#FFE66D", writer: "#95E1D3", feeling: "#DDA0DD", garbage: "#888", sense: "#4ECDC4", build: "#FFE66D", "yes-and": "#A78BFA", mutate: "#FB923C", "third-person": "#34D399", "mad-libs": "#F472B6", absurd: "#FBBF24", huh: "#60A5FA" };
 
@@ -4084,14 +5312,28 @@ function CreativeRoulette() {
     <div style={{ minHeight: "100vh", background: "#0f0f0f", color: "#eee", fontFamily: "'Space Mono', 'Courier New', monospace", padding: 0, margin: 0 }}>
       <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
 
-      <div style={{ padding: "24px 20px 16px", borderBottom: "1px solid #333", background: "linear-gradient(180deg, #1a1a1a 0%, #0f0f0f 100%)" }}>
-        <div style={{ fontSize: 11, letterSpacing: 4, color: "#FF6B6B", textTransform: "uppercase", marginBottom: 4 }}>Nikhil's Inner World Lab</div>
-        <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2 }}>Creative Roulette</div>
-        <div style={{ fontSize: 11, color: "#666", marginTop: 4 }}>streak: {streak} · {log.length} entries · {notesCount} captured</div>
+      <window.TodayStrip data={glance} theme="dark" onPendingClick={() => window.dispatchEvent(new CustomEvent('open-pending'))}/>
+
+      <div style={{ padding: "20px 20px 14px", borderBottom: "1px solid #333", background: "linear-gradient(180deg, #1a1a1a 0%, #0f0f0f 100%)" }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:12 }}>
+          <div>
+            <div style={{ fontSize: 11, letterSpacing: 4, color: "#FF6B6B", textTransform: "uppercase", marginBottom: 4 }}>Nikhil's Inner World Lab</div>
+            <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2 }}>Creative Roulette</div>
+            <div style={{ fontSize: 11, color: "#666", marginTop: 4 }}>{log.length} entries · {notesCount} captured · {catchEntries.length} caught</div>
+          </div>
+          <window.SaveStatusPill state={saveStatus}/>
+        </div>
       </div>
 
       <div style={{ display: "flex", gap: 0, borderBottom: "1px solid #333", overflow: "auto", WebkitOverflowScrolling: "touch" }}>
-        {[{ id: "home", label: "Today" }, { id: "sense", label: `Sense ${senseToday.icon}` }, { id: "roulette", label: "Roulette" }, { id: "build", label: "Build" }, { id: "log", label: `Log (${log.length})` }].map(tab => (
+        {[
+          { id: "home",     label: "Today" },
+          { id: "sense",    label: `Sense ${senseToday.icon}` },
+          { id: "roulette", label: "Roulette" },
+          { id: "catch",    label: `Catch (${catchEntries.length})` },
+          { id: "build",    label: "Build" },
+          { id: "log",      label: `Log (${log.length})` },
+        ].map(tab => (
           <button key={tab.id} onClick={() => setView(tab.id)} style={{
             flex: "1 0 auto", padding: "12px 14px", border: "none",
             background: view === tab.id ? "#FF6B6B" : "transparent",
@@ -4187,6 +5429,14 @@ function CreativeRoulette() {
             <div style={{ fontSize: 13, color: "#888", marginBottom: 4 }}>Creative Roulette</div>
             <div style={{ fontSize: 16, fontWeight: 700 }}>Spin for a prompt</div>
             <div style={{ fontSize: 12, color: "#666", marginTop: 8 }}>10 min · timer included · garbage welcome</div>
+          </div>
+
+          <div style={{ background: "#1a1a1a", border: "1px solid #4ECDC4", borderRadius: 12, padding: 20, marginBottom: 16, cursor: "pointer" }}
+            onClick={() => setView("catch")}>
+            <div style={{ fontSize: 32, marginBottom: 8 }}>🪤</div>
+            <div style={{ fontSize: 13, color: "#888", marginBottom: 4 }}>Catch Inbox</div>
+            <div style={{ fontSize: 16, fontWeight: 700 }}>What just surfaced?</div>
+            <div style={{ fontSize: 12, color: "#666", marginTop: 8 }}>{catchEntries.length} caught · text · voice · image · song · movement</div>
           </div>
 
           <div style={{ background: "#1a1a1a", border: "1px solid #95E1D3", borderRadius: 12, padding: 20, marginBottom: 16, cursor: "pointer" }}
@@ -4327,6 +5577,178 @@ function CreativeRoulette() {
               border: "1px solid #333", borderRadius: 8, fontSize: 12, fontFamily: "inherit", cursor: "pointer", letterSpacing: 1
             }}>skip (still counts as showing up)</button>
           </>)}
+        </div>)}
+
+        {view === "catch" && (<div>
+          <div style={{ background: "#1a1a1a", border: "1px solid #4ECDC4", borderRadius: 12, padding: 18, marginBottom: 16 }}>
+            <div style={{ fontSize: 11, color: "#4ECDC4", letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>The Catch Inbox</div>
+            <div style={{ fontSize: 13, color: "#aaa", lineHeight: 1.7, marginBottom: 12 }}>
+              Different from prompts and the "huh" file. This is where finished-or-half-finished creative work goes when it surfaces during emotional processing — the lyrics that came out while crying about something else, the willow poem during the Brighton session, the chord progression hummed in the shower. <strong style={{ color: "#4ECDC4" }}>You don't generate it; you catch it.</strong>
+            </div>
+            <div style={{ fontSize: 12, color: "#666", fontStyle: "italic", lineHeight: 1.6 }}>
+              Phase 2 of Creative Roulette = "Catch and Release" voice practice. This is the container.
+            </div>
+          </div>
+
+          {/* New catch entry */}
+          <div style={{ background: "#1a1a1a", border: "1px solid #333", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+            <div style={{ fontSize: 11, color: "#888", letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>Catch something</div>
+
+            <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+              {[
+                { id: "text",  label: "📝 text" },
+                { id: "voice", label: "🎙️ voice" },
+                { id: "image", label: "📷 image" },
+                { id: "song",  label: "🎵 song" },
+                { id: "movement", label: "💃 movement" },
+              ].map(t => (
+                <button key={t.id} onClick={() => setCatchType(t.id)} style={{
+                  padding: "5px 12px", borderRadius: 99, border: "1px solid #4ECDC4",
+                  background: catchType === t.id ? "#4ECDC4" : "transparent",
+                  color: catchType === t.id ? "#0f0f0f" : "#4ECDC4",
+                  fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "inherit"
+                }}>{t.label}</button>
+              ))}
+            </div>
+
+            <textarea
+              placeholder={
+                catchType === "voice" ? "What's the voice memo about? (e.g., 'lyric idea — bridge', 'chord progression hummed')"
+                : catchType === "image" ? "What's the image? (Describe or just paste a Google Photos / Drive link below)"
+                : catchType === "song" ? "Lyric, melody description, song reference, whatever surfaced..."
+                : catchType === "movement" ? "Movement that came up — describe the shape, the feeling, the moment..."
+                : "What surfaced? Don't polish it. Just catch it."
+              }
+              value={catchInput}
+              onChange={e => setCatchInput(e.target.value)}
+              style={{
+                width: "100%", boxSizing: "border-box", minHeight: 90, padding: 12,
+                background: "#0f0f0f", border: "1px solid #333", borderRadius: 8,
+                color: "#ddd", fontFamily: "'Space Mono', monospace", fontSize: 13,
+                lineHeight: 1.6, resize: "vertical", marginBottom: 10
+              }}
+            />
+
+            {catchType === "voice" && (
+              <div style={{ background: "#0f0f0f", borderRadius: 8, padding: 12, marginBottom: 10, border: "1px dashed #4ECDC4" }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  {!recording && !recordedBlob && (
+                    <button onClick={startRecording} style={{
+                      padding: "8px 14px", background: "#4ECDC4", color: "#0f0f0f",
+                      border: "none", borderRadius: 6, fontWeight: 700, fontSize: 12,
+                      cursor: "pointer", fontFamily: "inherit"
+                    }}>● record</button>
+                  )}
+                  {recording && (
+                    <button onClick={stopRecording} style={{
+                      padding: "8px 14px", background: "#ef4444", color: "#fff",
+                      border: "none", borderRadius: 6, fontWeight: 700, fontSize: 12,
+                      cursor: "pointer", fontFamily: "inherit",
+                      animation: "pulse 1s ease-in-out infinite"
+                    }}>■ stop</button>
+                  )}
+                  {recordedBlob && (
+                    <>
+                      <audio controls src={URL.createObjectURL(recordedBlob)} style={{ height: 30, maxWidth: 220 }}/>
+                      <button onClick={() => setRecordedBlob(null)} style={{
+                        padding: "6px 10px", background: "transparent", color: "#888",
+                        border: "1px solid #444", borderRadius: 6, fontSize: 11,
+                        cursor: "pointer", fontFamily: "inherit"
+                      }}>discard</button>
+                    </>
+                  )}
+                  <span style={{ fontSize: 11, color: "#666", flex: 1 }}>
+                    {recordedBlob ? "Recording stays in this session. For permanence, also paste a Drive/iCloud link below."
+                     : recording ? "Recording... talk freely."
+                     : "Tap record. Or upload via link."}
+                  </span>
+                </div>
+                {recordError && <div style={{ marginTop: 8, fontSize: 11, color: "#ef4444" }}>{recordError}</div>}
+              </div>
+            )}
+
+            <input
+              type="text"
+              placeholder="📎 External link (Google Drive / Photos / iCloud — keeps app small)"
+              value={catchFileLink}
+              onChange={e => setCatchFileLink(e.target.value)}
+              style={{
+                width: "100%", boxSizing: "border-box", padding: 10, marginBottom: 10,
+                background: "#0f0f0f", border: "1px solid #333", borderRadius: 6,
+                color: "#aaa", fontFamily: "inherit", fontSize: 11
+              }}
+            />
+
+            <button
+              onClick={() => addCatch(catchType, catchInput, catchFileLink, recordedBlob)}
+              disabled={!catchInput.trim() && !catchFileLink && !recordedBlob}
+              style={{
+                width: "100%", padding: 14,
+                background: (catchInput.trim() || catchFileLink || recordedBlob) ? "#4ECDC4" : "#333",
+                color: (catchInput.trim() || catchFileLink || recordedBlob) ? "#0f0f0f" : "#666",
+                border: "none", borderRadius: 8, fontWeight: 700, fontSize: 13,
+                fontFamily: "inherit", cursor: (catchInput.trim() || catchFileLink || recordedBlob) ? "pointer" : "default",
+                letterSpacing: 1
+              }}
+            >CATCH IT</button>
+          </div>
+
+          {/* Existing catches */}
+          {catchEntries.length === 0 ? (
+            <div style={{ color: "#444", textAlign: "center", padding: 30, fontSize: 13 }}>
+              Nothing caught yet. The first catch is the hardest one to trust as real.
+            </div>
+          ) : (
+            catchEntries.map(c => {
+              const kindIcon = { text: "📝", voice: "🎙️", image: "📷", song: "🎵", movement: "💃" }[c.kind] || "✨";
+              return (
+                <div key={c.id} style={{ background: "#1a1a1a", borderRadius: 8, padding: 14, marginBottom: 8, borderLeft: "3px solid #4ECDC4" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                    <span style={{ fontSize: 11, color: "#4ECDC4", textTransform: "uppercase", letterSpacing: 1 }}>
+                      {kindIcon} {c.kind}
+                    </span>
+                    <span style={{ fontSize: 10, color: "#555" }}>
+                      {new Date(c.date).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                    </span>
+                  </div>
+                  {c.text && (
+                    <div style={{
+                      fontSize: 13, color: "#ddd", lineHeight: 1.6, whiteSpace: "pre-wrap",
+                      padding: "8px 10px", background: "#0f0f0f", borderRadius: 6, marginBottom: 8
+                    }}>{c.text}</div>
+                  )}
+                  {c.blobURL && (
+                    <audio controls src={c.blobURL} style={{ width: "100%", marginBottom: 8, height: 32 }}/>
+                  )}
+                  {c.fileLink && (
+                    <a href={c.fileLink} target="_blank" rel="noopener" style={{
+                      display: "inline-block", fontSize: 11, color: "#4ECDC4", textDecoration: "underline", marginBottom: 8
+                    }}>📎 {c.fileLink.length > 50 ? c.fileLink.slice(0, 50) + "…" : c.fileLink}</a>
+                  )}
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button onClick={() => {
+                      const t = prompt("Edit catch text:", c.text);
+                      if (t !== null) updateCatch(c.id, { text: t });
+                    }} style={{
+                      padding: "4px 10px", background: "transparent", border: "1px solid #444",
+                      borderRadius: 4, color: "#888", fontSize: 10, cursor: "pointer", fontFamily: "inherit"
+                    }}>edit</button>
+                    <button onClick={() => {
+                      const l = prompt("Edit link:", c.fileLink || "");
+                      if (l !== null) updateCatch(c.id, { fileLink: l });
+                    }} style={{
+                      padding: "4px 10px", background: "transparent", border: "1px solid #444",
+                      borderRadius: 4, color: "#888", fontSize: 10, cursor: "pointer", fontFamily: "inherit"
+                    }}>link</button>
+                    <button onClick={() => removeCatch(c.id)} style={{
+                      padding: "4px 10px", background: "transparent", border: "1px solid #7f1d1d",
+                      borderRadius: 4, color: "#ef4444", fontSize: 10, cursor: "pointer", fontFamily: "inherit"
+                    }}>delete</button>
+                  </div>
+                </div>
+              );
+            })
+          )}
         </div>)}
 
         {view === "build" && (<div>
@@ -4521,8 +5943,9 @@ window.CreativeRoulette = CreativeRoulette;
   </script>
 
   <!-- App Shell -->
+
   <script type="text/babel">
-const { useState, useRef } = React;
+const { useState, useEffect, useRef } = React;
 const _LRApp = window.LucideReact || {};
 const LayoutGrid = _LRApp.LayoutGrid || (() => null);
 const Utensils   = _LRApp.Utensils   || (() => null);
@@ -4535,23 +5958,114 @@ const FoodLog         = window.FoodLog;
 const HealthDashboard = window.HealthDashboard;
 const CreativeRoulette = window.CreativeRoulette;
 
+const _LRPend = window.LucideReact || {};
+const Inbox = _LRPend.Inbox || (() => null);
+
+function PendingView({ glance, onJump }) {
+  const items = glance.pending || [];
+  const high = items.filter(i => i.severity === 'high');
+  const med  = items.filter(i => i.severity === 'med');
+  const low  = items.filter(i => i.severity === 'low');
+
+  const Section = ({ title, list, severityColor }) => (
+    list.length === 0 ? null : (
+      <div style={{ marginBottom: 22 }}>
+        <div style={{ fontSize: 11, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: 1.5, marginBottom: 8, paddingLeft: 2 }}>
+          {title} ({list.length})
+        </div>
+        {list.map(item => {
+          const tab = item.kind === 'task' ? 'kaizen'
+                    : item.kind === 'protein' ? 'food'
+                    : item.kind === 'med' ? 'health'
+                    : null;
+          const icon = item.kind === 'task' ? '📋'
+                     : item.kind === 'protein' ? '💪'
+                     : item.kind === 'med' ? '💊'
+                     : '•';
+          return (
+            <div key={item.id} onClick={() => tab && onJump(tab)} style={{
+              display: 'flex', alignItems: 'flex-start', gap: 10,
+              background: '#1a1d27', border: `1px solid ${severityColor}33`,
+              borderLeft: `3px solid ${severityColor}`,
+              borderRadius: 8, padding: '12px 14px', marginBottom: 6,
+              cursor: tab ? 'pointer' : 'default'
+            }}>
+              <span style={{ fontSize: 16, flexShrink: 0 }}>{icon}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, color: '#e4e4e7', lineHeight: 1.4 }}>{item.label}</div>
+                {item.sub && <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>{item.sub}</div>}
+              </div>
+              {tab && <span style={{ fontSize: 11, color: severityColor, flexShrink: 0 }}>open →</span>}
+            </div>
+          );
+        })}
+      </div>
+    )
+  );
+
+  return (
+    <div style={{ background: '#0f1117', minHeight: '100%', padding: '20px 18px 60px', fontFamily: "'DM Sans', system-ui, sans-serif" }}>
+      <div style={{ maxWidth: 720, margin: '0 auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 18, flexWrap: 'wrap', gap: 8 }}>
+          <div>
+            <div style={{ fontSize: 11, color: '#60a5fa', letterSpacing: 2, textTransform: 'uppercase', marginBottom: 4 }}>One place · what's behind</div>
+            <h1 style={{ fontSize: 26, fontWeight: 700, color: '#e4e4e7', margin: 0, letterSpacing: -0.5 }}>Pending</h1>
+            <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 4 }}>
+              Aggregated from Kaizen tasks (overdue/today), Food Log (low-protein days last 7), and Med Log (missed core meds last 7).
+            </div>
+          </div>
+          {!glance.loaded && <span style={{ fontSize: 11, color: '#9ca3af' }}>Loading…</span>}
+        </div>
+
+        {glance.loaded && items.length === 0 && (
+          <div style={{ background: '#1a1d27', border: '1px dashed #2a2e3d', borderRadius: 12, padding: 30, textAlign: 'center' }}>
+            <div style={{ fontSize: 28, marginBottom: 10 }}>🌤️</div>
+            <div style={{ fontSize: 14, color: '#e4e4e7', marginBottom: 4 }}>Nothing flagged.</div>
+            <div style={{ fontSize: 12, color: '#9ca3af', lineHeight: 1.6 }}>
+              That doesn't mean nothing matters — it means nothing's overdue, low on protein, or missed in your med log right now. Permission to be where you are.
+            </div>
+          </div>
+        )}
+
+        <Section title="High priority" list={high} severityColor="#ef4444"/>
+        <Section title="Worth a look" list={med} severityColor="#f59e0b"/>
+        <Section title="Background"  list={low} severityColor="#6b7280"/>
+
+        <div style={{ marginTop: 30, padding: '14px 16px', background: '#1a1d27', border: '1px solid #2a2e3d', borderRadius: 10, fontSize: 12, color: '#9ca3af', lineHeight: 1.7 }}>
+          <strong style={{ color: '#e4e4e7' }}>How this works:</strong> Items appear automatically as data flows in. Past-due Kaizen tasks come from the auto-deadline chain. Low-protein days require you to have logged food. Missed-med days come from the daily check-in on the Health → Medications tab. Tap any item to jump to where it lives.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState('roulette');
   const [backupStatus, setBackupStatus] = useState('');
   const fileRef = useRef(null);
+  const glance = window.useGlanceData();
+
+  // Listen for "open-pending" custom events emitted by TodayStrip clicks anywhere
+  useEffect(() => {
+    const onOpen = () => setActiveTab('pending');
+    window.addEventListener('open-pending', onOpen);
+    return () => window.removeEventListener('open-pending', onOpen);
+  }, []);
 
   const navItems = [
-    { id: 'roulette', label: 'Play',   Icon: Dices      },
-    { id: 'kaizen',   label: 'Kaizen', Icon: LayoutGrid  },
-    { id: 'food',     label: 'Fuel',   Icon: Utensils   },
-    { id: 'health',   label: 'Vitals', Icon: Activity   },
-    { id: 'system',   label: 'System', Icon: Database   },
+    { id: 'roulette', label: 'Play',    Icon: Dices       },
+    { id: 'kaizen',   label: 'Kaizen',  Icon: LayoutGrid  },
+    { id: 'food',     label: 'Fuel',    Icon: Utensils    },
+    { id: 'health',   label: 'Vitals',  Icon: Activity    },
+    { id: 'pending',  label: 'Pending', Icon: Inbox       },
+    { id: 'system',   label: 'System',  Icon: Database    },
   ];
 
   const STORAGE_KEYS = [
     'kaizen3:projects','kaizen3:tasks','kaizen3:logs','kaizen3:ping',
     'nikhil-food-log-v1',
-    'creative-log-v2','creative-log','creative-streak','gatekeeper-name'
+    'creative-log-v2','creative-log','creative-streak','gatekeeper-name','creative-catch',
+    'apple-health-import','med-log-daily',
   ];
 
   // ── GOOGLE DRIVE OAUTH CLIENT ID ──────────────────────────────
@@ -4683,6 +6197,10 @@ function App() {
       <div style={paneStyle('food')}><FoodLog /></div>
       <div style={paneStyle('health')}><HealthDashboard /></div>
 
+      <div style={paneStyle('pending')}>
+        <PendingView glance={glance} onJump={(tab) => setActiveTab(tab)}/>
+      </div>
+
       <div style={{ ...paneStyle('system'), display: activeTab === 'system' ? 'flex' : 'none', flexDirection: 'column', padding: 24, color: '#eee', fontFamily: "'Space Mono', monospace" }}>
         <h2 style={{ fontSize: 22, color: '#FF6B6B', marginBottom: 16 }}>System Maintenance</h2>
         <p style={{ fontSize: 13, color: '#888', marginBottom: 24, lineHeight: 1.6 }}>
@@ -4739,5 +6257,6 @@ function App() {
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(<App />);
   </script>
+
 </body>
 </html>
