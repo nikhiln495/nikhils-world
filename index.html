@@ -879,7 +879,7 @@ function KaizenApp() {
   };
 
   return (
-    <div style={{minHeight:'100vh',background:'linear-gradient(180deg,#faf7f2 0%,#f4ede0 100%)',fontFamily:'"DM Sans",system-ui,sans-serif',color:'#1a1814'}}>
+    <div style={{height:'100%', display:'flex', flexDirection:'column', background:'linear-gradient(180deg,#faf7f2 0%,#f4ede0 100%)',fontFamily:'"DM Sans",system-ui,sans-serif',color:'#1a1814'}}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,600&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
         .fd{font-family:'Fraunces',Georgia,serif}
@@ -894,7 +894,8 @@ function KaizenApp() {
 
       <window.TodayStrip data={glance} theme="light" onPendingClick={() => window.dispatchEvent(new CustomEvent('open-pending'))}/>
 
-      <div style={{maxWidth:720,margin:'0 auto',padding:'20px 16px 120px'}}>
+      <div style={{flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch'}}>
+        <div style={{maxWidth:720,margin:'0 auto',padding:'20px 16px 40px'}}>
 
         {/* HEADER */}
         <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:20}}>
@@ -934,12 +935,12 @@ function KaizenApp() {
         {/* MAIN VIEW */}
         {VIEWS[view]}
       </div>
+    </div>
 
-      {/* BOTTOM NAV */}
+            {/* BOTTOM NAV */}
       <nav style={{
-        position:'fixed',bottom:'calc(72px + env(safe-area-inset-bottom))',left:0,right:0,
         background:'#fffdf9',borderTop:'1px solid #e8e0d0',
-        zIndex: 9000
+        flexShrink: 0
       }}>
         <div style={{maxWidth:720,margin:'0 auto',display:'flex'}}>
           {[
