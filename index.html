@@ -464,10 +464,10 @@ function TodayStrip({ data, onPendingClick, theme = 'dark' }) {
     </div>
   );
 
-  if (!data.loaded) {
+  if (!data.loaded || !t) {
     return (
       <div style={{ background: colors.bg, borderBottom: `1px solid ${colors.border}`, padding: '6px 10px', fontSize: 11, color: colors.muted, textAlign: 'center' }}>
-        Loading today…
+        {!data.loaded ? 'Loading today…' : 'Data unavailable'}
       </div>
     );
   }
@@ -715,7 +715,8 @@ function KaizenApp() {
   const [notice,    setNotice]    = useState(null);
   const fileRef   = useRef(null);
   const saveTimers = useRef({});
-
+  const glance = window.useGlanceData();
+  
   // ── Boot ────────────────────────────────
   useEffect(() => {
     (async () => {
@@ -876,8 +877,6 @@ function KaizenApp() {
     templates: <TemplatesView/>,
     reflect:   <ReflectView  logs={logs} setLogs={setLogs} tasks={enriched} allTasks={tasks} setTasks={setTasks} projects={projects}/>,
   };
-
-  const glance = window.useGlanceData();
 
   return (
     <div style={{minHeight:'100vh',background:'linear-gradient(180deg,#faf7f2 0%,#f4ede0 100%)',fontFamily:'"DM Sans",system-ui,sans-serif',color:'#1a1814'}}>
@@ -6211,8 +6210,29 @@ function App() {
   );
 }
 
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  render() {
+    if (this.state.hasError) {
+      return <div style={{color: '#ef4444', padding: '20px', fontFamily: 'monospace'}}>Something went wrong: {this.state.error.message}</div>;
+    }
+    return this.props.children; 
+  }
+}
+
 const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<App />);
+root.render(
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>
+);
+
   </script>
 </body>
 </html>
