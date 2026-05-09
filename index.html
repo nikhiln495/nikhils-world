@@ -937,9 +937,9 @@ function KaizenApp() {
 
       {/* BOTTOM NAV */}
       <nav style={{
-        position:'fixed',bottom:0,left:0,right:0,
+        position:'fixed',bottom:'calc(72px + env(safe-area-inset-bottom))',left:0,right:0,
         background:'#fffdf9',borderTop:'1px solid #e8e0d0',
-        paddingBottom:'env(safe-area-inset-bottom)'
+        zIndex: 9000
       }}>
         <div style={{maxWidth:720,margin:'0 auto',display:'flex'}}>
           {[
