@@ -6009,6 +6009,22 @@ function App() {
     return () => window.removeEventListener('open-pending', onOpen);
   }, []);
 
+  // ── SILENT SYNC ─────────────────────────────────────────────────
+  // Auto-sync to Drive every 5 minutes, but ONLY if a valid OAuth token
+  // is cached (i.e. user has tapped "Sync to Drive" at least once this hour).
+  // Never prompts the OAuth popup in the background.
+  useEffect(() => {
+    const SILENT_INTERVAL_MS = 5 * 60 * 1000;
+    const iv = setInterval(() => {
+      if (getCachedToken()) {
+        // Best-effort; errors swallowed inside syncToDrive
+        syncToDrive({ silent: true });
+      }
+    }, SILENT_INTERVAL_MS);
+    return () => clearInterval(iv);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const navItems = [
     { id: 'roulette', label: 'Play',    Icon: Dices       },
     { id: 'kaizen',   label: 'Kaizen',  Icon: LayoutGrid  },
@@ -6031,6 +6047,32 @@ function App() {
   const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
   const DRIVE_FOLDER_NAME = "Nikhil's World Backups";
 
+  // ── TOKEN PERSISTENCE ─────────────────────────────────────────
+  // Caches the Drive OAuth access token in localStorage so the iPad PWA
+  // doesn't prompt for Google auth on every sync. Token lifetime is ~1hr.
+  const TOKEN_KEY = 'gdrive_token_v1';
+  const getCachedToken = () => {
+    try {
+      const raw = localStorage.getItem(TOKEN_KEY);
+      if (!raw) return null;
+      const { token, expiresAt } = JSON.parse(raw);
+      // 60s safety margin so we don't try to use a token about to expire
+      if (Date.now() < expiresAt - 60_000) return token;
+      return null;
+    } catch { return null; }
+  };
+  const cacheToken = (token, expiresInSec) => {
+    try {
+      localStorage.setItem(TOKEN_KEY, JSON.stringify({
+        token,
+        expiresAt: Date.now() + ((expiresInSec || 3600) * 1000)
+      }));
+    } catch {}
+  };
+  const clearCachedToken = () => {
+    try { localStorage.removeItem(TOKEN_KEY); } catch {}
+  };
+
   const exportSystem = async () => {
     setBackupStatus('Gathering data...');
     const backup = { timestamp: new Date().toISOString(), data: {} };
@@ -6047,15 +6089,108 @@ function App() {
     return backup;
   };
 
-  const syncToDrive = async () => {
+  const syncToDrive = async (opts = {}) => {
+    const silent = !!opts.silent;
+    const setStatus = silent ? () => {} : setBackupStatus;
+    const finish = () => { if (!silent) setTimeout(() => setBackupStatus(''), 6000); };
+
     if (DRIVE_CLIENT_ID === 'PLACEHOLDER') {
-      setBackupStatus('⚠️ Drive sync not configured yet — use Download Backup for now.');
-      setTimeout(() => setBackupStatus(''), 5000);
+      setStatus('⚠️ Drive sync not configured yet — use Download Backup for now.');
+      finish();
       return;
     }
-    setBackupStatus('Connecting to Google Drive...');
+
+    // doSync: the actual upload. Used by both the cached-token fast path
+    // and the OAuth-popup slow path.
+    const doSync = async (token) => {
+      try {
+        setStatus('Gathering data...');
+
+        // Build backup JSON
+        const backup = { timestamp: new Date().toISOString(), data: {} };
+        for (const key of STORAGE_KEYS) {
+          try { const r = await window.storage.get(key); if (r?.value) backup.data[key] = r.value; } catch(e) {}
+        }
+        const content = JSON.stringify(backup, null, 2);
+        const filename = "nikhil-world-backup-" + new Date().toISOString().slice(0,10) + ".json";
+
+        setStatus('Finding/creating folder in Drive...');
+
+        // Find or create folder.
+        // Bug fix: the apostrophe in "Nikhil's World Backups" was closing the
+        // Drive API q= string early, so every search returned empty and a NEW
+        // folder was created on every sync. Escape the apostrophe + URL-encode +
+        // orderBy=createdTime so we always converge on the OLDEST existing folder.
+        let folderId = null;
+        const safeName = DRIVE_FOLDER_NAME.replace(/'/g, "\\'");
+        const folderQ = `name='${safeName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+        const folderSearch = await fetch(
+          `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(folderQ)}&orderBy=createdTime&fields=files(id,name,createdTime)`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        ).then(r => r.json());
+
+        // Token might be expired — surface 401 cleanly.
+        if (folderSearch.error?.code === 401) {
+          clearCachedToken();
+          throw new Error('TOKEN_EXPIRED');
+        }
+
+        if (folderSearch.files?.length > 0) {
+          folderId = folderSearch.files[0].id;
+        } else {
+          const newFolder = await fetch('https://www.googleapis.com/drive/v3/files', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: DRIVE_FOLDER_NAME, mimeType: 'application/vnd.google-apps.folder' })
+          }).then(r => r.json());
+          folderId = newFolder.id;
+        }
+
+        setStatus('Uploading to Drive...');
+
+        // Upload file
+        const meta = { name: filename, parents: [folderId] };
+        const form = new FormData();
+        form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
+        form.append('file', new Blob([content], { type: 'application/json' }));
+
+        const upload = await fetch(
+          'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
+          { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form }
+        ).then(r => r.json());
+
+        if (upload.id) {
+          setStatus(`✅ Synced to Drive → "${DRIVE_FOLDER_NAME}/${filename}"`);
+        } else {
+          setStatus('❌ Upload failed — try Download Backup instead.');
+        }
+        finish();
+        return true;
+      } catch (e) {
+        if (e.message === 'TOKEN_EXPIRED') throw e;
+        setStatus('❌ Drive sync failed: ' + e);
+        finish();
+        return false;
+      }
+    };
+
+    // Fast path: use cached token if still valid.
+    const cached = getCachedToken();
+    if (cached) {
+      try {
+        return await doSync(cached);
+      } catch (e) {
+        // Token expired mid-flight — fall through to OAuth popup,
+        // but only if this is a foreground sync (silent sync just bails).
+        if (silent) return;
+      }
+    }
+
+    // Silent sync should NEVER show the OAuth popup — just bail.
+    if (silent) return;
+
+    setStatus('Connecting to Google Drive...');
     try {
-      // Get token via Google Identity Services
       await new Promise((resolve, reject) => {
         const client = google.accounts.oauth2.initTokenClient({
           client_id: DRIVE_CLIENT_ID,
@@ -6063,63 +6198,16 @@ function App() {
           callback: async (tokenResponse) => {
             if (tokenResponse.error) { reject(tokenResponse.error); return; }
             const token = tokenResponse.access_token;
-            setBackupStatus('Gathering data...');
-
-            // Build backup JSON
-            const backup = { timestamp: new Date().toISOString(), data: {} };
-            for (const key of STORAGE_KEYS) {
-              try { const r = await window.storage.get(key); if (r?.value) backup.data[key] = r.value; } catch(e) {}
-            }
-            const content = JSON.stringify(backup, null, 2);
-            const filename = "nikhil-world-backup-" + new Date().toISOString().slice(0,10) + ".json";
-
-            setBackupStatus('Finding/creating folder in Drive...');
-
-            // Find or create folder
-            let folderId = null;
-            const folderSearch = await fetch(
-              `https://www.googleapis.com/drive/v3/files?q=name='${DRIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
-              { headers: { Authorization: `Bearer ${token}` } }
-            ).then(r => r.json());
-
-            if (folderSearch.files?.length > 0) {
-              folderId = folderSearch.files[0].id;
-            } else {
-              const newFolder = await fetch('https://www.googleapis.com/drive/v3/files', {
-                method: 'POST',
-                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: DRIVE_FOLDER_NAME, mimeType: 'application/vnd.google-apps.folder' })
-              }).then(r => r.json());
-              folderId = newFolder.id;
-            }
-
-            setBackupStatus('Uploading to Drive...');
-
-            // Upload file
-            const meta = { name: filename, parents: [folderId] };
-            const form = new FormData();
-            form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
-            form.append('file', new Blob([content], { type: 'application/json' }));
-
-            const upload = await fetch(
-              'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
-              { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form }
-            ).then(r => r.json());
-
-            if (upload.id) {
-              setBackupStatus(`✅ Synced to Drive → "${DRIVE_FOLDER_NAME}/${filename}"`);
-            } else {
-              setBackupStatus('❌ Upload failed — try Download Backup instead.');
-            }
-            setTimeout(() => setBackupStatus(''), 6000);
+            cacheToken(token, tokenResponse.expires_in);
+            await doSync(token);
             resolve();
           },
         });
         client.requestAccessToken();
       });
     } catch(e) {
-      setBackupStatus('❌ Drive sync failed: ' + e);
-      setTimeout(() => setBackupStatus(''), 5000);
+      setStatus('❌ Drive sync failed: ' + e);
+      finish();
     }
   };
 
