@@ -6290,7 +6290,14 @@ function App() {
         client.requestAccessToken();
       });
     } catch(e) {
-      setStatus('❌ Drive sync failed: ' + e);
+      const msg = String(e);
+      if (!msg || msg === 'undefined' || msg.includes('popup_closed') || msg.includes('access_denied')) {
+        setStatus('❌ OAuth blocked — GitHub Pages origin not authorized in GCP Console. Tap "Sync via Netlify" below, or add https://nikhiln495.github.io to GCP → APIs & Services → Credentials → OAuth client → Authorized JS origins.');
+      } else if (msg.includes('google is not defined') || msg.includes('Cannot read')) {
+        setStatus('❌ Google Identity script failed to load — check your connection and try again.');
+      } else {
+        setStatus('❌ Drive sync failed: ' + msg);
+      }
       finish();
     }
   };
@@ -6344,8 +6351,13 @@ function App() {
           <button onClick={syncToDrive} style={{
             width: "100%", padding: 16, background: "#4285F4", color: "#fff", border: "none",
             borderRadius: 8, fontWeight: 700, fontSize: 14, fontFamily: "inherit", cursor: "pointer",
-            letterSpacing: 1, marginBottom: 12
+            letterSpacing: 1, marginBottom: 8
           }}>☁️ SYNC TO GOOGLE DRIVE</button>
+          <button onClick={() => window.open('https://nikhils-world.netlify.app', '_blank')} style={{
+            width: "100%", padding: 12, background: "transparent", color: "#4285F4",
+            border: "1px solid #4285F4", borderRadius: 8, fontWeight: 600, fontSize: 12,
+            fontFamily: "inherit", cursor: "pointer", letterSpacing: 0.5, marginBottom: 12
+          }}>↗ SYNC VIA NETLIFY (if Drive fails here)</button>
           <input type="file" accept=".json" ref={fileRef} onChange={importSystem} style={{ display: 'none' }} />
           <button onClick={() => fileRef.current?.click()} style={{
             width: '100%', padding: 16, background: 'transparent', color: '#ccc',
