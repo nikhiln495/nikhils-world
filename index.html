@@ -414,11 +414,22 @@ function useGlanceData() {
         }
       }
 
+      // ── Sodium today ──
+      let sodiumMg = 0;
+      todayMeals.forEach(m => m.items?.forEach(i => {
+        if (typeof i.sodium === 'number') sodiumMg += i.sodium;
+        else if (i.notes) {
+          const sx = i.notes.match(/~?(\d+(?:\.\d+)?)\s*mg\s*sodium/i);
+          if (sx) sodiumMg += parseFloat(sx[1]);
+        }
+      }));
+
       const today = {
         date: todayKey,
         proteinG: Math.round(proteinG),
         proteinPct: Math.round((proteinG/130)*100),
         kcalIn: Math.round(kcalIn),
+        sodiumMg: Math.round(sodiumMg),
         burn,
         deficit,
         rhr, hrv, sleep, steps,
@@ -492,6 +503,13 @@ function TodayStrip({ data, onPendingClick, theme = 'dark' }) {
       />
       <Pill label="RHR" value={t.rhr ? `${t.rhr}` : '—'} color={t.rhr ? colors.text : colors.muted}/>
       <Pill label="Sleep" value={t.sleep ? `${t.sleep}h` : '—'} color={t.sleep ? colors.text : colors.muted}/>
+      {t.sodiumMg > 0 && (
+        <Pill
+          label="Sodium"
+          value={`${(t.sodiumMg/1000).toFixed(1)}g`}
+          color={t.sodiumMg > 2300 ? '#f87171' : t.sodiumMg > 1800 ? '#fb923c' : colors.text}
+        />
+      )}
       <Pill
         label="Top task"
         value={t.topUrgent ? t.topUrgent.name : '—'}
@@ -776,7 +794,15 @@ function KaizenApp() {
           try { await window.storage.set('kaizen3:seeded', 'true'); } catch {}
         } else {
           if (p) setProjectsRaw(p);
-          if (t) setTasksRaw(t);
+          if (t) {
+            // Migration: old seed tasks had no status field → mark them done silently
+            const migrated = t.map(task =>
+              task.status === undefined ? { ...task, status: 'done' } : task
+            );
+            const needsMigration = migrated.some((m, i) => m.status !== t[i].status);
+            setTasksRaw(migrated);
+            if (needsMigration) await storageSet(SK.tasks, migrated);
+          }
         }
         if (l) setLogsRaw(l);
       }
@@ -4132,6 +4158,39 @@ const LiveTab = ({ healthImport = {}, setHealthImport, medLog = {}, setMedLog })
 
       {/* Apple Health import */}
       <Card title="Import Apple Health JSON" accent={COLORS.purple}>
+        <div style={{ marginBottom: 12 }}>
+          <button onClick={() => {
+            const today = new Date().toISOString().slice(0,10);
+            const request = JSON.stringify({
+              _instruction: "Fill this JSON with today's Apple Health data and paste into the Import field below",
+              daily: {
+                [today]: {
+                  steps: null,
+                  rhr: null,
+                  hrv: null,
+                  sleep_hours: null,
+                  active_kcal: null,
+                  basal_kcal: null
+                }
+              },
+              workouts: []
+            }, null, 2);
+            navigator.clipboard.writeText(
+              `Here is my Apple Health JSON template for today (${today}). Please fill in the null values with my actual health data from Apple Health and return the completed JSON:\n\n\`\`\`json\n${request}\n\`\`\``
+            ).then(() => {
+              const btn = document.querySelector('#health-request-btn');
+              if (btn) { btn.textContent = '✓ Copied to clipboard!'; setTimeout(() => { btn.textContent = '🤖 Ask Claude to fill health data'; }, 3000); }
+            });
+          }} id="health-request-btn" style={{
+            width: '100%', padding: '10px 14px', background: 'transparent',
+            border: \`1px solid ${COLORS.purple}\`, borderRadius: 8, color: COLORS.purple,
+            fontSize: 12, fontFamily: 'inherit', cursor: 'pointer', fontWeight: 600,
+            marginBottom: 8
+          }}>🤖 Ask Claude to fill health data</button>
+          <div style={{ fontSize: 10, color: COLORS.textMuted, lineHeight: 1.5 }}>
+            Tap to copy a prompt → paste in Claude chat → Claude pulls your Apple Health data → paste the JSON below
+          </div>
+        </div>
         <div style={{ fontSize: 12, color: COLORS.textMuted, lineHeight: 1.6, marginBottom: 10 }}>
           Web apps can't directly read Apple Health, but the <strong>Health Auto Export</strong> iOS app can dump JSON you paste here.
           Or use the simpler schema: <code style={{ background: COLORS.bg, padding: "1px 6px", borderRadius: 3 }}>{`{ "daily": { "2026-05-08": { "steps": 12000, "rhr": 53, "hrv": 100, "sleep_hours": 7.2, "active_kcal": 600, "basal_kcal": 1500 } }, "workouts": [{ "date": "2026-05-08", "type": "Cycling", "dur": 45, "cal": 300 }] }`}</code>.
