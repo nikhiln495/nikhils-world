@@ -297,7 +297,9 @@ function useGlanceData() {
       let proteinG = 0, kcalIn = 0;
       todayMeals.forEach(m => m.items?.forEach(i => {
         if (i.kcal) kcalIn += i.kcal;
-        if (i.notes) {
+        if (typeof i.protein === 'number') {
+          proteinG += i.protein;
+        } else if (i.notes) {
           const px = i.notes.match(/~?(\d+(?:\.\d+)?)\s*g\s*protein/i);
           if (px) proteinG += parseFloat(px[1]);
         }
@@ -2558,7 +2560,7 @@ function calcTotal(meals) {
 function calcProtein(meals) {
   let t = 0;
   meals.forEach(m => m.items.forEach(i => {
-    if (i.notes) { const x = i.notes.match(/~?(\d+(?:\.\d+)?)g protein/); if (x) t += parseFloat(x[1]); }
+    if (typeof i.protein === 'number') { t += i.protein; } else if (i.notes) { const x = i.notes.match(/~?(\d+(?:\.\d+)?)g protein/); if (x) t += parseFloat(x[1]); }
   }));
   return Math.round(t);
 }
@@ -3105,7 +3107,19 @@ function FoodLog() {
           <div>
             <div style={{ fontSize:10, letterSpacing:3, color:"#bbb", textTransform:"uppercase", marginBottom:2 }}>Nikhil · Personal Health</div>
             <h1 style={{ fontSize:23, fontWeight:800, margin:0, color:"#0f1f35", letterSpacing:-0.5 }}>Food & Activity Log</h1>
-            <div style={{ marginTop:6 }}><window.SaveStatusPill state={status}/></div>
+            <div style={{ marginTop:6, display:'flex', alignItems:'center', gap:8 }}>
+              <window.SaveStatusPill state={status}/>
+              <button title="Copy food log JSON to clipboard (for merging into main app)" onClick={() => {
+                navigator.clipboard.writeText(JSON.stringify(log, null, 2)).then(() => {
+                  // quick visual feedback on the button
+                  const btn = document.querySelector('#fuel-copy-btn');
+                  if (btn) { btn.textContent = '✓ Copied!'; setTimeout(() => { btn.textContent = '⎘ Copy JSON'; }, 2000); }
+                }).catch(e => alert('Copy failed: ' + e.message));
+              }} id="fuel-copy-btn" style={{
+                fontSize:10, padding:'3px 8px', background:'transparent', border:'1px solid #ccc',
+                borderRadius:4, color:'#888', cursor:'pointer', letterSpacing:0.5, fontFamily:'inherit'
+              }}>⎘ Copy JSON</button>
+            </div>
           </div>
         </div>
 
@@ -3220,7 +3234,9 @@ function calcProtein(meals) {
   if (!meals) return 0;
   let t = 0;
   meals.forEach(m => m.items?.forEach(i => {
-    if (i.notes) {
+    if (typeof i.protein === 'number') {
+      t += i.protein;
+    } else if (i.notes) {
       const x = i.notes.match(/~?(\d+(?:\.\d+)?)\s*g\s*protein/i);
       if (x) t += parseFloat(x[1]);
     }
@@ -6137,6 +6153,15 @@ function App() {
 
         if (folderSearch.files?.length > 0) {
           folderId = folderSearch.files[0].id;
+          // Silently delete duplicate folders (artifact of old "folder explosion" bug)
+          if (folderSearch.files.length > 1) {
+            const extras = folderSearch.files.slice(1);
+            for (const f of extras) {
+              fetch(`https://www.googleapis.com/drive/v3/files/${f.id}`,
+                { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
+              ).catch(() => {}); // Best-effort; never block the upload
+            }
+          }
         } else {
           const newFolder = await fetch('https://www.googleapis.com/drive/v3/files', {
             method: 'POST',
@@ -6268,6 +6293,35 @@ function App() {
             border: '1px solid #555', borderRadius: 8, fontWeight: 700, fontSize: 14,
             fontFamily: 'inherit', cursor: 'pointer', letterSpacing: 1
           }}>RESTORE FROM BACKUP</button>
+          <div style={{ marginTop: 16, borderTop: '1px solid #333', paddingTop: 16 }}>
+            <div style={{ color: '#aaa', fontSize: 11, letterSpacing: 1, marginBottom: 8 }}>MERGE FOOD LOG (paste JSON)</div>
+            <textarea id="foodlog-paste-area" rows={4} placeholder='Paste nikhil-food-log-v1 JSON here — merges by date, new entries win' style={{
+              width: '100%', background: '#0a0a0a', color: '#eee', border: '1px solid #444',
+              borderRadius: 6, padding: 8, fontFamily: 'monospace', fontSize: 11, boxSizing: 'border-box', resize: 'vertical'
+            }} />
+            <button onClick={() => {
+              const raw = document.getElementById('foodlog-paste-area').value.trim();
+              if (!raw) { setBackupStatus('Nothing to merge.'); return; }
+              try {
+                let paste = JSON.parse(raw);
+                // Support both bare {date: day} and wrapped {data: {"nikhil-food-log-v1": ...}}
+                if (paste.data && paste.data['nikhil-food-log-v1']) paste = JSON.parse(paste.data['nikhil-food-log-v1']);
+                else if (paste['nikhil-food-log-v1']) paste = paste['nikhil-food-log-v1'];
+                window.storage.get('nikhil-food-log-v1').then(existing => {
+                  const base = existing?.value ? JSON.parse(existing.value) : {};
+                  const merged = { ...base, ...paste }; // paste date-keys overwrite base (newer data wins)
+                  window.storage.set('nikhil-food-log-v1', JSON.stringify(merged)).then(() => {
+                    document.getElementById('foodlog-paste-area').value = '';
+                    setBackupStatus(`✅ Merged ${Object.keys(paste).length} date(s) into food log. Refresh Fuel tab.`);
+                    setTimeout(() => setBackupStatus(''), 5000);
+                  });
+                });
+              } catch(e) { setBackupStatus('❌ Parse error: ' + e.message); }
+            }} style={{
+              marginTop: 8, width: '100%', padding: 12, background: '#3d5a3d', color: '#fff', border: 'none',
+              borderRadius: 6, fontWeight: 700, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer', letterSpacing: 0.5
+            }}>⤵️ MERGE INTO FUEL TAB</button>
+          </div>
         </div>
         {backupStatus && (
           <div style={{ padding: 12, background: '#0f0f0f', border: '1px solid #4ECDC4', color: '#4ECDC4', borderRadius: 6, fontSize: 12 }}>
