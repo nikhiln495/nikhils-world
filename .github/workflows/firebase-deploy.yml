@@ -12,13 +12,38 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_NIKHILS_WORLD }}
+      - name: Fix and write service account JSON
+        env:
+          SA_RAW: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_NIKHILS_WORLD }}
+        run: |
+          python3 << 'PYEOF'
+          import os, re, json
+
+          raw = os.environ['SA_RAW']
+
+          try:
+              data = json.loads(raw)
+          except json.JSONDecodeError:
+              # iPad copy-paste turns \n inside the private_key string value
+              # into actual newlines, breaking the JSON. Fix: collapse those
+              # internal newlines back into \n escape sequences.
+              fixed = re.sub(
+                  r'"private_key"\s*:\s*"(.*?)"(\s*[,}])',
+                  lambda m: '"private_key": "' + m.group(1).replace('\n', '\\n') + '"' + m.group(2),
+                  raw,
+                  flags=re.DOTALL
+              )
+              data = json.loads(fixed)
+
+          with open('/tmp/sa.json', 'w') as f:
+              json.dump(data, f)
+          print("Service account written OK")
+          PYEOF
 
       - name: Install Firebase CLI
         run: npm install -g firebase-tools
 
       - name: Deploy to Firebase Hosting
         run: firebase deploy --only hosting --project nikhils-world
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/sa.json
