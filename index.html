@@ -6236,21 +6236,36 @@ function App() {
 
         setStatus('Uploading to Drive...');
 
-        // Upload file
+        // Upload file — manually construct multipart body to avoid Safari's
+        // broken FormData+Blob+fetch behavior (silently mangles the boundary).
         const meta = { name: filename, parents: [folderId] };
-        const form = new FormData();
-        form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
-        form.append('file', new Blob([content], { type: 'application/json' }));
+        const boundary = 'nw_backup_boundary_' + Date.now();
+        const multipartBody =
+          '--' + boundary + '\r\n' +
+          'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+          JSON.stringify(meta) + '\r\n' +
+          '--' + boundary + '\r\n' +
+          'Content-Type: application/json\r\n\r\n' +
+          content + '\r\n' +
+          '--' + boundary + '--';
 
         const upload = await fetch(
           'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
-          { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form }
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': `multipart/related; boundary="${boundary}"`
+            },
+            body: multipartBody
+          }
         ).then(r => r.json());
 
         if (upload.id) {
           setStatus(`✅ Synced to Drive → "${DRIVE_FOLDER_NAME}/${filename}"`);
         } else {
-          setStatus('❌ Upload failed — try Download Backup instead.');
+          const errDetail = upload.error?.message || upload.error?.status || JSON.stringify(upload);
+          setStatus('❌ Upload failed: ' + errDetail);
         }
         finish();
         return true;
