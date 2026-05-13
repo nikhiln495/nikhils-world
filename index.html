@@ -6296,7 +6296,7 @@ function App() {
     } catch(e) {
       const msg = String(e);
       if (!msg || msg === 'undefined' || msg.includes('popup_closed') || msg.includes('access_denied')) {
-        setStatus('❌ OAuth blocked — GitHub Pages origin not authorized in GCP Console. Tap "Sync via Netlify" below, or add https://nikhiln495.github.io to GCP → APIs & Services → Credentials → OAuth client → Authorized JS origins.');
+        setStatus('❌ OAuth blocked — this origin is not authorized in GCP Console. Go to GCP → APIs & Services → Credentials → OAuth client → Authorized JS origins and add the current domain.');
       } else if (msg.includes('google is not defined') || msg.includes('Cannot read')) {
         setStatus('❌ Google Identity script failed to load — check your connection and try again.');
       } else {
