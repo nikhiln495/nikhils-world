@@ -6393,16 +6393,41 @@ function App() {
               const raw = document.getElementById('foodlog-paste-area').value.trim();
               if (!raw) { setBackupStatus('Nothing to merge.'); return; }
               try {
-                let paste = JSON.parse(raw);
-                // Support both bare {date: day} and wrapped {data: {"nikhil-food-log-v1": ...}}
+                // ── Extract usable JSON from whatever was pasted ──────────────
+                // Handles: raw JSON, backup wrapper, JSX file with initialLog = {...}
+                const extractJSON = (src) => {
+                  // 1. Try direct parse first
+                  try { return JSON.parse(src); } catch(_) {}
+                  // 2. Look for initialLog = { or similar JS assignment
+                  const logMarker = src.search(/\binitialLog\s*=/);
+                  const startIdx = logMarker !== -1 ? src.indexOf('{', logMarker) : src.search(/^\s*\{/m);
+                  if (startIdx === -1) throw new Error('No JSON object found in pasted content');
+                  // Walk forward counting balanced braces (respects strings)
+                  let depth = 0, inStr = false, strCh = '', esc = false, end = -1;
+                  for (let i = startIdx; i < src.length; i++) {
+                    const c = src[i];
+                    if (esc) { esc = false; continue; }
+                    if (c === '\\' && inStr) { esc = true; continue; }
+                    if (!inStr && (c === '"' || c === "'")) { inStr = true; strCh = c; continue; }
+                    if (inStr && c === strCh) { inStr = false; continue; }
+                    if (!inStr) { if (c === '{') depth++; else if (c === '}') { depth--; if (depth === 0) { end = i; break; } } }
+                  }
+                  if (end === -1) throw new Error('Could not find closing brace — paste may be incomplete');
+                  return JSON.parse(src.slice(startIdx, end + 1));
+                };
+                let paste = extractJSON(raw);
+                // Support backup wrapper formats
                 if (paste.data && paste.data['nikhil-food-log-v1']) paste = JSON.parse(paste.data['nikhil-food-log-v1']);
                 else if (paste['nikhil-food-log-v1']) paste = paste['nikhil-food-log-v1'];
+                // Validate: should have date keys like "2026-..."
+                const dateKeys = Object.keys(paste).filter(k => /^\d{4}-\d{2}-\d{2}$/.test(k));
+                if (dateKeys.length === 0) throw new Error('No date entries found (expected keys like "2026-04-27")');
                 window.storage.get('nikhil-food-log-v1').then(existing => {
                   const base = existing?.value ? JSON.parse(existing.value) : {};
                   const merged = { ...base, ...paste }; // paste date-keys overwrite base (newer data wins)
                   window.storage.set('nikhil-food-log-v1', JSON.stringify(merged)).then(() => {
                     document.getElementById('foodlog-paste-area').value = '';
-                    setBackupStatus(`✅ Merged ${Object.keys(paste).length} date(s) into food log. Refresh Fuel tab.`);
+                    setBackupStatus(`✅ Merged ${dateKeys.length} date(s) into food log. Refresh Fuel tab.`);
                     setTimeout(() => setBackupStatus(''), 5000);
                   });
                 });
