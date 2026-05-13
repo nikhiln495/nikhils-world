@@ -73,8 +73,12 @@
           if (typeof firebase === 'undefined') return false;
           if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
           db = firebase.firestore();
+          // Force long-polling — WebChannel streaming is unreliable on GitHub Pages
+          // and certain mobile network configs (iPad). Long-polling is slightly
+          // slower to establish but rock-solid once connected.
+          try { db.settings({ experimentalForceLongPolling: true, merge: true }); } catch(_) {}
           window.__dbAvailable = true;
-          console.log("✅ Nikhil's World — Firebase connected");
+          console.log("✅ Nikhil's World — Firebase connected (long-poll)");
           return true;
         } catch (e) {
           return false;
