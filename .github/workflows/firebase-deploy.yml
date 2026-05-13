@@ -12,10 +12,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fix and write service account JSON
+      - name: Decode service account JSON
         env:
-          SA_RAW: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_NIKHILS_WORLD }}
-        run: python3 scripts/fix_sa.py
+          SA_B64: ${{ secrets.FIREBASE_SA_B64 }}
+        run: echo "$SA_B64" | base64 -d > /tmp/sa.json
 
       - name: Install Firebase CLI
         run: npm install -g firebase-tools
