@@ -3225,49 +3225,59 @@ const HUNGER_TAGS = {
 
 // ── Calorie/macro lookup — your 35 most-logged items ───────────────
 // Format: { kcal, protein (g), sodium (mg) }
+// FOOD_LOOKUP: each entry is per 1 unit. unit = the measurement for qty=1.
+// Auto-fills kcal/protein/sodium when suggestion chip is tapped, scaled by qty.
 const FOOD_LOOKUP = {
   // UAF / campus
-  'UAF veggie calzone': { kcal: 690, protein: 30, sodium: 1200 },
-  'UAF veggie calzone ×2': { kcal: 1380, protein: 60, sodium: 2400 },
-  'UAF pizza slice': { kcal: 400, protein: 16, sodium: 800 },
+  'UAF veggie calzone':        { kcal: 690, protein: 30, sodium: 1200, unit: 'calzone' },
+  'UAF pizza slice':           { kcal: 400, protein: 16, sodium: 800,  unit: 'slice'   },
   // Costco
-  'Costco pizza slice': { kcal: 730, protein: 34, sodium: 1300 },
-  'Costco Greek yogurt (5-6 tbsp)': { kcal: 95, protein: 9, sodium: 40 },
-  'Costco mixed nuts (2-3 dozen)': { kcal: 230, protein: 6, sodium: 90 },
-  'Costco Kirkland protein bar': { kcal: 190, protein: 21, sodium: 180 },
-  'Costco rotisserie chicken breast': { kcal: 250, protein: 45, sodium: 610 },
+  'Costco pizza slice':        { kcal: 730, protein: 34, sodium: 1300, unit: 'slice'   },
+  'Costco Greek yogurt':       { kcal: 170, protein: 17, sodium: 65,   unit: 'cup'     },
+  'Costco mixed nuts':         { kcal: 170, protein: 5,  sodium: 65,   unit: 'handful' },
+  'Costco Kirkland protein bar':{ kcal: 190, protein: 21, sodium: 180, unit: 'bar'     },
+  'Costco rotisserie chicken breast':{ kcal: 250, protein: 45, sodium: 610, unit: 'breast'},
+  'Costco double choc cookie': { kcal: 750, protein: 7,  sodium: 350,  unit: 'cookie'  },
   // Proteins
-  'Smart Dog (1)': { kcal: 50, protein: 9, sodium: 480 },
-  'Smart Dogs ×2': { kcal: 100, protein: 18, sodium: 960 },
-  'Chorizo (2 oz)': { kcal: 200, protein: 9, sodium: 510 },
-  'Eggs scrambled (2)': { kcal: 180, protein: 12, sodium: 180 },
-  'Greek yogurt (1 cup)': { kcal: 170, protein: 20, sodium: 95 },
-  'Paneer (100g)': { kcal: 265, protein: 18, sodium: 470 },
-  'Tofu firm (100g)': { kcal: 144, protein: 17, sodium: 9 },
-  'Simply Protein chips': { kcal: 110, protein: 15, sodium: 180 },
-  'Protein shake (1 scoop)': { kcal: 120, protein: 25, sodium: 150 },
+  'Smart Dog':                 { kcal: 50,  protein: 9,  sodium: 480,  unit: 'dog'     },
+  'Chorizo':                   { kcal: 100, protein: 4,  sodium: 255,  unit: 'oz'      },
+  'Eggs scrambled':            { kcal: 90,  protein: 6,  sodium: 90,   unit: 'egg'     },
+  'Greek yogurt (Kirkland)':   { kcal: 170, protein: 20, sodium: 95,   unit: 'cup'     },
+  'Paneer':                    { kcal: 265, protein: 18, sodium: 470,  unit: '100g'    },
+  'Tofu firm':                 { kcal: 144, protein: 17, sodium: 9,    unit: '100g'    },
+  'Simply Protein chips':      { kcal: 110, protein: 15, sodium: 180,  unit: 'bag'     },
+  'Orgain protein powder':     { kcal: 150, protein: 21, sodium: 130,  unit: 'scoop'   },
+  'Halloumi (fried)':          { kcal: 90,  protein: 6,  sodium: 400,  unit: 'oz'      },
+  'Kodiak pancake':            { kcal: 110, protein: 9,  sodium: 190,  unit: 'pancake' },
   // Carbs / staples
-  'Oats cooked (1 cup)': { kcal: 165, protein: 6, sodium: 0 },
-  'Sourdough bread (1 slice)': { kcal: 110, protein: 4, sodium: 230 },
-  'Brown rice (1 cup cooked)': { kcal: 215, protein: 5, sodium: 10 },
-  'Banana': { kcal: 105, protein: 1, sodium: 1 },
+  'Oats cooked':               { kcal: 165, protein: 6,  sodium: 0,    unit: 'cup'     },
+  'Sourdough bread':           { kcal: 110, protein: 4,  sodium: 230,  unit: 'slice'   },
+  'Brown rice':                { kcal: 215, protein: 5,  sodium: 10,   unit: 'cup'     },
+  'Banana':                    { kcal: 105, protein: 1,  sodium: 1,    unit: 'banana'  },
+  'Mini pita':                 { kcal: 20,  protein: 0,  sodium: 50,   unit: 'pita'    },
+  'Dosa (plain large)':        { kcal: 165, protein: 4,  sodium: 250,  unit: 'dosa'    },
+  'Idli':                      { kcal: 58,  protein: 2,  sodium: 130,  unit: 'idli'    },
+  'Homemade pizza slice':      { kcal: 280, protein: 11, sodium: 420,  unit: 'slice'   },
   // Spreads / sauces
-  'Peanut butter (1 tbsp)': { kcal: 95, protein: 4, sodium: 75 },
-  'Peanut butter (2 tbsp)': { kcal: 190, protein: 8, sodium: 150 },
-  'Hummus (4 oz)': { kcal: 195, protein: 9, sodium: 580 },
-  'Butter (1 tbsp)': { kcal: 100, protein: 0, sodium: 90 },
-  // Dosa / South Indian
-  'Dosa (plain, 1 large)': { kcal: 165, protein: 4, sodium: 250 },
-  'Sambar (1 cup)': { kcal: 75, protein: 4, sodium: 680 },
-  'Coconut chutney (3 tbsp)': { kcal: 90, protein: 1, sodium: 150 },
+  'Peanut butter':             { kcal: 95,  protein: 4,  sodium: 75,   unit: 'tbsp'    },
+  'Almond butter':             { kcal: 98,  protein: 3,  sodium: 50,   unit: 'tbsp'    },
+  'Hummus':                    { kcal: 50,  protein: 2,  sodium: 145,  unit: 'tbsp'    },
+  'Butter':                    { kcal: 100, protein: 0,  sodium: 90,   unit: 'tbsp'    },
+  'Tapenade hummus':           { kcal: 50,  protein: 2,  sodium: 145,  unit: 'tsp'     },
+  'Avial':                     { kcal: 180, protein: 4,  sodium: 320,  unit: 'cup'     },
+  'Sambar':                    { kcal: 75,  protein: 4,  sodium: 680,  unit: 'cup'     },
+  'Coconut chutney':           { kcal: 30,  protein: 0,  sodium: 50,   unit: 'tbsp'    },
+  'Doritos Nacho Cheese':      { kcal: 140, protein: 2,  sodium: 190,  unit: 'serving' },
   // Drinks / extras
-  'Chai with oat milk (1 mug)': { kcal: 120, protein: 3, sodium: 70 },
-  'Oat milk (1 cup)': { kcal: 120, protein: 3, sodium: 100 },
-  'Coffee black': { kcal: 5, protein: 0, sodium: 5 },
-  'Homemade cookie (~2"×2")': { kcal: 185, protein: 2, sodium: 90 },
-  'Subway 6-inch veggie': { kcal: 280, protein: 9, sodium: 520 },
-  'Subway footlong veggie half': { kcal: 280, protein: 9, sodium: 520 },
-  'Avial (1 cup)': { kcal: 180, protein: 4, sodium: 320 },
+  'Chai with oat milk':        { kcal: 120, protein: 3,  sodium: 70,   unit: 'mug'     },
+  'Oat milk (Kirkland)':       { kcal: 120, protein: 3,  sodium: 100,  unit: 'cup'     },
+  'Coffee black':              { kcal: 5,   protein: 0,  sodium: 5,    unit: 'cup'     },
+  'Honey':                     { kcal: 21,  protein: 0,  sodium: 0,    unit: 'tsp'     },
+  'Wine (table)':              { kcal: 125, protein: 0,  sodium: 5,    unit: 'glass'   },
+  'Homemade oat cookie':       { kcal: 185, protein: 2,  sodium: 90,   unit: 'cookie'  },
+  'Subway 6-inch veggie':      { kcal: 280, protein: 9,  sodium: 520,  unit: 'sandwich'},
+  'Brownie (homemade)':        { kcal: 200, protein: 2,  sodium: 80,   unit: 'brownie' },
+  'Almond croissant (half)':   { kcal: 200, protein: 5,  sodium: 210,  unit: 'half'    },
 };
 
 // Helper: find suggestions from lookup by prefix match
@@ -3275,6 +3285,18 @@ function foodSuggestions(query) {
   if (!query || query.length < 2) return [];
   const q = query.toLowerCase();
   return Object.keys(FOOD_LOOKUP).filter(k => k.toLowerCase().includes(q)).slice(0, 6);
+}
+
+// Apply lookup with quantity multiplier
+function applyFoodLookup(key, qty) {
+  const base = FOOD_LOOKUP[key];
+  if (!base) return null;
+  const q = parseFloat(qty) || 1;
+  return {
+    name: q === 1 ? key : `${key} ×${q}`,
+    kcal: Math.round(base.kcal * q),
+    notes: `~${Math.round(base.protein * q)}g protein${base.sodium * q > 400 ? ` · ⚠️${Math.round(base.sodium * q)}mg Na` : ''}`,
+  };
 }
 
 const SODIUM_TRIGGERS = ['smart dog','chorizo','calzone','costco pizza','dominos','pizza','grilled cheese','soy sauce'];
@@ -3632,19 +3654,50 @@ function MealEditor({ meal, onSave, onCancel, onDelete }) {
           </div>
           {suggestions[i]?.length > 0 && (
             <div style={{ display:'flex', gap:4, flexWrap:'wrap', paddingLeft:2 }}>
-              {suggestions[i].map(s => (
-                <button key={s} onClick={() => {
-                  const match = FOOD_LOOKUP[s];
-                  setItems(items.map((it2,j) => j===i ? {...it2, name:s, kcal:match.kcal, notes:`~${match.protein}g protein${match.sodium > 400 ? ` · ⚠️${match.sodium}mg Na` : ''}`} : it2));
-                  setSuggestions(sv=>({...sv,[i]:[]}));
-                }} style={{
-                  fontSize:10, padding:'3px 8px', borderRadius:99,
-                  background:'#f0fdf4', border:'1px solid #86efac', color:'#166534',
-                  cursor:'pointer'
-                }}>
-                  {s} <span style={{color:'#6b6660'}}>({FOOD_LOOKUP[s].kcal} kcal)</span>
-                </button>
-              ))}
+              {suggestions[i].map(s => {
+                const base = FOOD_LOOKUP[s];
+                return (
+                  <div key={s} style={{ display:'flex', alignItems:'center', gap:3 }}>
+                    <button onClick={() => {
+                      const applied = applyFoodLookup(s, 1);
+                      setItems(items.map((it2,j) => j===i ? {...it2, ...applied} : it2));
+                      setSuggestions(sv=>({...sv,[i]:[]}));
+                    }} style={{
+                      fontSize:10, padding:'3px 8px', borderRadius:'99px 0 0 99px',
+                      background:'#f0fdf4', border:'1px solid #86efac', borderRight:'none', color:'#166534', cursor:'pointer'
+                    }}>
+                      {s} <span style={{color:'#6b6660'}}>({base?.kcal} kcal/{base?.unit})</span>
+                    </button>
+                    <input
+                      type="number"
+                      min="0.25" step="0.25"
+                      defaultValue="1"
+                      title={`Qty in ${base?.unit || 'units'}`}
+                      onBlur={e => {
+                        const applied = applyFoodLookup(s, e.target.value);
+                        if (applied) {
+                          setItems(items.map((it2,j) => j===i ? {...it2, ...applied} : it2));
+                          setSuggestions(sv=>({...sv,[i]:[]}));
+                        }
+                      }}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          const applied = applyFoodLookup(s, e.target.value);
+                          if (applied) {
+                            setItems(items.map((it2,j) => j===i ? {...it2, ...applied} : it2));
+                            setSuggestions(sv=>({...sv,[i]:[]}));
+                          }
+                        }
+                      }}
+                      style={{
+                        width:42, padding:'3px 4px', fontSize:10, fontFamily:'monospace',
+                        border:'1px solid #86efac', borderRadius:'0 99px 99px 0',
+                        background:'#f0fdf4', color:'#166534', textAlign:'center'
+                      }}
+                    />
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
