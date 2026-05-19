@@ -1023,6 +1023,7 @@ function KaizenApp() {
     projects:  <ProjectsView projects={projects} tasks={tasks} setProjects={setProjects} setTasks={setTasks}/>,
     templates: <TemplatesView/>,
     reflect:   <ReflectView  logs={logs} setLogs={setLogs} tasks={enriched} allTasks={tasks} setTasks={setTasks} projects={projects}/>,
+    trajectory:<TrajectoryView logs={logs} setLogs={setLogs} tasks={enriched}/>,
   };
 
   return (
@@ -1094,8 +1095,8 @@ function KaizenApp() {
             {id:'today',     label:'Today',    I:Sun},
             {id:'tasks',     label:'Tasks',    I:CheckCircle2},
             {id:'projects',  label:'Projects', I:Layers},
-            {id:'templates', label:'Specs',    I:BookOpen},
             {id:'reflect',   label:'Reflect',  I:RotateCcw},
+            {id:'trajectory',label:'Arc',      I:TrendingUp},
           ].map(({id,label,I})=>{
             const active = view===id;
             return (
@@ -1142,6 +1143,7 @@ function Pill({icon,label,color}) {
 
 function TodayView({ log, updateLog, tasks, allTasks, setTasks, projects }) {
   const [doneInput,    setDoneInput]    = useState('');
+  const [doneDomain,   setDoneDomain]   = useState('');
   const [brainOpen,    setBrainOpen]    = useState(false);
   const [reflectOpen,  setReflectOpen]  = useState(false);
   const [editingDoneId,setEditingDoneId]= useState(null);
@@ -1151,8 +1153,9 @@ function TodayView({ log, updateLog, tasks, allTasks, setTasks, projects }) {
   const addDone = () => {
     const text = doneInput.trim();
     if (!text) return;
-    updateLog({ done: [...(log.done||[]), {id:uid(),text,at:new Date().toISOString()}] });
+    updateLog({ done: [...(log.done||[]), {id:uid(),text,at:new Date().toISOString(),domain:doneDomain||undefined}] });
     setDoneInput('');
+    setDoneDomain('');
   };
 
   const removeDone = id => updateLog({ done:(log.done||[]).filter(d=>d.id!==id) });
@@ -1233,7 +1236,7 @@ function TodayView({ log, updateLog, tasks, allTasks, setTasks, projects }) {
           <div style={sectionLabel}>Ta-da list</div>
           <span className="fm" style={{fontSize:11,color:'#6b6660'}}>{(log.done||[]).length} wins</span>
         </div>
-        <div style={{display:'flex',gap:8,marginBottom:12}}>
+        <div style={{display:'flex',gap:8,marginBottom:6}}>
           <input
             value={doneInput}
             onChange={e=>setDoneInput(e.target.value)}
@@ -1245,13 +1248,25 @@ function TodayView({ log, updateLog, tasks, allTasks, setTasks, projects }) {
             <Plus size={16}/>
           </button>
         </div>
+        <div style={{display:'flex',gap:5,marginBottom:12,flexWrap:'wrap'}}>
+          {DOMAINS.map(d=>(
+            <button key={d.id} onClick={()=>setDoneDomain(doneDomain===d.id?'':d.id)} style={{
+              padding:'3px 9px',borderRadius:99,fontSize:10,cursor:'pointer',fontWeight:600,
+              border:`1px solid ${doneDomain===d.id?d.color:'#e8e0d0'}`,
+              background:doneDomain===d.id?d.color+'22':'transparent',
+              color:doneDomain===d.id?d.color:'#9ca3af'
+            }}>{d.icon} {d.label}</button>
+          ))}
+        </div>
         <ul style={{listStyle:'none',padding:0,margin:0,display:'flex',flexDirection:'column',gap:6}}>
           {(log.done||[]).length===0 && (
             <li style={{fontSize:13,color:'#6b6660',fontStyle:'italic'}}>
               Nothing yet — but you've already done more than you think.
             </li>
           )}
-          {(log.done||[]).slice().reverse().map(d=>(
+          {(log.done||[]).slice().reverse().map(d=>{
+            const dom = DOMAINS.find(x=>x.id===d.domain);
+            return (
             <li key={d.id} style={{display:'flex',alignItems:'flex-start',gap:8}}>
               <CheckCircle2 size={15} style={{color:'#3d5a3d',flexShrink:0,marginTop:2}}/>
               {editingDoneId===d.id ? (
@@ -1272,11 +1287,13 @@ function TodayView({ log, updateLog, tasks, allTasks, setTasks, projects }) {
                   style={{flex:1,fontSize:13,lineHeight:1.4,cursor:'text'}}
                 >{d.text}</span>
               )}
+              {dom && <span title={dom.label} style={{fontSize:12,flexShrink:0,marginTop:1}}>{dom.icon}</span>}
               <button onClick={()=>removeDone(d.id)} style={{background:'none',border:'none',cursor:'pointer',color:'#6b6660',padding:0}}>
                 <X size={13}/>
               </button>
             </li>
-          ))}
+            );
+          })}
         </ul>
       </div>
 
@@ -2021,6 +2038,333 @@ function TemplatesView() {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────
+// SHARED: DOMAINS (used by TodayView + TrajectoryView)
+// ─────────────────────────────────────────────────────
+
+const DOMAINS = [
+  { id:'physical',     label:'Physical',     icon:'🏃', color:'#22c55e' },
+  { id:'creative',     label:'Creative',     icon:'🎨', color:'#f472b6' },
+  { id:'professional', label:'Work',         icon:'💼', color:'#60a5fa' },
+  { id:'relational',   label:'Relational',   icon:'🤝', color:'#fbbf24' },
+  { id:'mental',       label:'Mind & Body',  icon:'🧠', color:'#a78bfa' },
+  { id:'learning',     label:'Learning',     icon:'📚', color:'#34d399' },
+];
+
+// ─────────────────────────────────────────────────────
+// TRAJECTORY VIEW
+// ─────────────────────────────────────────────────────
+
+function TrajectoryView({ logs, setLogs, tasks }) {
+  const [bigPicture,   setBigPicture]   = useState('');
+  const [catchEntries, setCatchEntries] = useState([]);
+  const [tagTarget,    setTagTarget]    = useState(null); // {date, id}
+  const [bpSaved,      setBpSaved]      = useState(false);
+  const [tClip,        setTClip]        = useState('idle');
+
+  // ── Load big-picture text + catch entries ──────────
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get('trajectory-bigpicture');
+        if (r?.value) setBigPicture(r.value);
+      } catch(e) {}
+      try {
+        const c = await window.storage.get('creative-catch');
+        if (c?.value) setCatchEntries(JSON.parse(c.value));
+      } catch(e) {}
+    })();
+  }, []);
+
+  const saveBigPicture = async (val) => {
+    setBigPicture(val);
+    try { await window.storage.set('trajectory-bigpicture', val); } catch(e) {}
+    setBpSaved(true);
+    setTimeout(() => setBpSaved(false), 1500);
+  };
+
+  // ── Build win data across all logged days ──────────
+  const allDays = Object.keys(logs).sort().reverse();
+  const todayStr = new Date().toISOString().slice(0,10);
+
+  // All wins flat [{text, domain, at, date}]
+  const allWins = [];
+  allDays.forEach(date => {
+    (logs[date]?.done || []).forEach(w => {
+      allWins.push({ ...w, date });
+    });
+  });
+
+  // Week key: YYYY-WNN
+  const weekKey = (dateStr) => {
+    const d = new Date(dateStr + 'T12:00:00');
+    const jan1 = new Date(d.getFullYear(), 0, 1);
+    const wk = Math.ceil(((d - jan1) / 86400000 + jan1.getDay() + 1) / 7);
+    return `${d.getFullYear()}-W${String(wk).padStart(2,'0')}`;
+  };
+
+  const thisWeekKey = weekKey(todayStr);
+
+  // Per-domain counts
+  const domainCounts = {};
+  DOMAINS.forEach(d => { domainCounts[d.id] = { week: 0, total: 0 }; });
+  allWins.forEach(w => {
+    if (!w.domain || !domainCounts[w.domain]) return;
+    domainCounts[w.domain].total++;
+    if (weekKey(w.date) === thisWeekKey) domainCounts[w.domain].week++;
+  });
+  const untaggedWins = allWins.filter(w => !w.domain);
+
+  // ── Last 4 weeks wins by domain (sparkline data) ───
+  const last4Weeks = [];
+  for (let i = 3; i >= 0; i--) {
+    const d = new Date(); d.setDate(d.getDate() - i*7);
+    last4Weeks.push(weekKey(d.toISOString().slice(0,10)));
+  }
+
+  // ── Session catches (Shobha / Brighton) ────────────
+  const sessionCatches = catchEntries
+    .filter(c => c.kind === 'session')
+    .sort((a,b) => new Date(b.date) - new Date(a.date))
+    .slice(0, 5);
+
+  // ── Recent brain dump / reflection snippets ────────
+  const recentReflections = allDays.slice(0,14)
+    .filter(d => logs[d]?.reflection?.trim() || logs[d]?.brainDump?.trim())
+    .slice(0,4);
+
+  // ── Tag a win with a domain ────────────────────────
+  const tagWin = (date, id, domainId) => {
+    const newLog = { ...logs };
+    newLog[date] = {
+      ...newLog[date],
+      done: (newLog[date].done || []).map(w => w.id === id ? { ...w, domain: domainId || undefined } : w)
+    };
+    setLogs(newLog);
+    setTagTarget(null);
+  };
+
+  // ── Stacked task completions from Kaizen ──────────
+  const completedTasks = tasks.filter(t => t.status === 'done').slice(0, 20);
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:18 }}>
+
+      {/* Big picture */}
+      <div className="card" style={{ padding:20 }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+          <div style={{ ...sectionLabel, fontSize:11 }}>What am I building toward?</div>
+          {bpSaved && <span style={{ fontSize:10, color:'#3d5a3d' }}>✓ saved</span>}
+        </div>
+        <textarea
+          value={bigPicture}
+          onChange={e => setBigPicture(e.target.value)}
+          onBlur={e => saveBigPicture(e.target.value)}
+          placeholder="Not goals. Direction. What kind of person are you becoming? What are you moving toward — in your body, your work, your creative life, your relationships?"
+          rows={4}
+          style={{ ...textArea, fontSize:14, fontFamily:'Fraunces,Georgia,serif', lineHeight:1.7 }}
+        />
+      </div>
+
+      {/* Domain grid */}
+      <div>
+        <div style={{ ...sectionLabel, paddingLeft:4, marginBottom:10 }}>Progress by domain — this week</div>
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:10 }}>
+          {DOMAINS.map(d => {
+            const c = domainCounts[d.id];
+            const pct = c.total > 0 ? Math.min(c.week / Math.max(...Object.values(domainCounts).map(x=>x.week||1)), 1) : 0;
+            return (
+              <div key={d.id} className="card" style={{ padding:'14px 12px', position:'relative', overflow:'hidden' }}>
+                <div style={{ position:'absolute', bottom:0, left:0, height:3, width:`${pct*100}%`, background:d.color, borderRadius:'0 2px 0 0', transition:'width 0.4s' }}/>
+                <div style={{ fontSize:18, marginBottom:4 }}>{d.icon}</div>
+                <div style={{ fontSize:10, color:'#6b6660', marginBottom:6, fontWeight:600 }}>{d.label}</div>
+                <div style={{ display:'flex', alignItems:'baseline', gap:6 }}>
+                  <span style={{ fontSize:22, fontWeight:700, color:c.week > 0 ? d.color : '#d1d5db' }}>{c.week}</span>
+                  <span style={{ fontSize:10, color:'#9ca3af' }}>this wk</span>
+                </div>
+                <div style={{ fontSize:10, color:'#9ca3af', marginTop:2 }}>{c.total} all time</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Untagged wins — prompt to tag */}
+      {untaggedWins.length > 0 && (
+        <div className="card" style={{ padding:16, border:'1px dashed #e8e0d0', background:'#fffdf9' }}>
+          <div style={{ ...sectionLabel, marginBottom:10, display:'flex', justifyContent:'space-between' }}>
+            <span>Untagged wins ({untaggedWins.length})</span>
+            <span style={{ fontSize:10, color:'#9ca3af', fontWeight:400 }}>tap a win to assign a domain</span>
+          </div>
+          <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+            {untaggedWins.slice(0,8).map(w => (
+              <div key={w.id}>
+                <div
+                  onClick={() => setTagTarget(tagTarget?.id === w.id ? null : { date: w.date, id: w.id })}
+                  style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', borderRadius:8,
+                    background: tagTarget?.id === w.id ? '#f0fdf4' : '#faf7f2', cursor:'pointer' }}
+                >
+                  <span style={{ fontSize:12, color:'#6b6660', flex:1, lineHeight:1.4 }}>{w.text}</span>
+                  <span style={{ fontSize:10, color:'#9ca3af' }}>{w.date?.slice(5)}</span>
+                </div>
+                {tagTarget?.id === w.id && (
+                  <div style={{ display:'flex', gap:5, flexWrap:'wrap', padding:'6px 8px', background:'#f9fafb', borderRadius:'0 0 8px 8px', marginTop:-2 }}>
+                    {DOMAINS.map(d => (
+                      <button key={d.id} onClick={() => tagWin(w.date, w.id, d.id)} style={{
+                        padding:'3px 10px', borderRadius:99, fontSize:10, cursor:'pointer',
+                        border:`1px solid ${d.color}`, background:'transparent', color:d.color, fontWeight:600
+                      }}>{d.icon} {d.label}</button>
+                    ))}
+                    <button onClick={() => setTagTarget(null)} style={{
+                      padding:'3px 8px', borderRadius:99, fontSize:10, cursor:'pointer',
+                      border:'1px solid #e8e0d0', background:'transparent', color:'#9ca3af'
+                    }}>skip</button>
+                  </div>
+                )}
+              </div>
+            ))}
+            {untaggedWins.length > 8 && (
+              <div style={{ fontSize:11, color:'#9ca3af', textAlign:'center', marginTop:4 }}>
+                +{untaggedWins.length - 8} more — tag them in the Today view as you log wins
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Session direction — Shobha + Brighton */}
+      {sessionCatches.length > 0 && (
+        <div>
+          <div style={{ ...sectionLabel, paddingLeft:4, marginBottom:10 }}>Session direction</div>
+          {sessionCatches.map(c => {
+            let meta = {};
+            try { if (typeof c.fileLink === 'string' && c.fileLink.startsWith('{')) meta = JSON.parse(c.fileLink); } catch(e) {}
+            const sessionType = meta._sessionType || 'Session';
+            const assignment  = meta._assignment;
+            const emotion     = meta._oneWordEmotion;
+            const txLink      = meta._transcriptLink;
+            return (
+              <div key={c.id} className="card" style={{ padding:14, marginBottom:8, borderLeft:'3px solid #a78bfa' }}>
+                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:6 }}>
+                  <span style={{ fontSize:11, color:'#a78bfa', fontWeight:700, textTransform:'uppercase', letterSpacing:1 }}>
+                    🧘 {sessionType}
+                  </span>
+                  <span style={{ fontSize:10, color:'#9ca3af' }}>
+                    {new Date(c.date).toLocaleDateString('en-US',{month:'short',day:'numeric'})}
+                  </span>
+                </div>
+                {emotion && (
+                  <div style={{ display:'inline-block', fontSize:10, padding:'2px 8px', borderRadius:99, background:'#f3e8ff', color:'#7c3aed', marginBottom:6 }}>
+                    {emotion}
+                  </div>
+                )}
+                {c.text && (
+                  <div style={{ fontSize:12, color:'#4b5563', lineHeight:1.6, marginBottom:6, fontStyle:'italic' }}>
+                    "{c.text.length > 160 ? c.text.slice(0,160)+'…' : c.text}"
+                  </div>
+                )}
+                {assignment && (
+                  <div style={{ fontSize:12, color:'#1a1814', background:'#fef9c3', borderRadius:6, padding:'6px 10px', lineHeight:1.5 }}>
+                    📌 <strong>Assignment:</strong> {assignment}
+                  </div>
+                )}
+                {txLink && (
+                  <a href={txLink} target="_blank" rel="noopener" style={{ display:'inline-block', marginTop:6, fontSize:10, color:'#6b6660', textDecoration:'underline' }}>
+                    📎 Transcript
+                  </a>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Recent reflections stream */}
+      {recentReflections.length > 0 && (
+        <div>
+          <div style={{ ...sectionLabel, paddingLeft:4, marginBottom:10 }}>Recent reflections</div>
+          {recentReflections.map(date => {
+            const l = logs[date];
+            return (
+              <div key={date} className="card" style={{ padding:14, marginBottom:8 }}>
+                <div style={{ fontSize:10, color:'#9ca3af', marginBottom:6 }}>
+                  {new Date(date+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}
+                </div>
+                {l.reflection?.trim() && (
+                  <div style={{ fontSize:12, color:'#4b5563', lineHeight:1.6, marginBottom:l.brainDump?.trim()?8:0 }}>
+                    {l.reflection.length > 200 ? l.reflection.slice(0,200)+'…' : l.reflection}
+                  </div>
+                )}
+                {l.brainDump?.trim() && (
+                  <div style={{ fontSize:11, color:'#9ca3af', lineHeight:1.5, fontStyle:'italic' }}>
+                    Brain dump: {l.brainDump.slice(0,120)}{l.brainDump.length>120?'…':''}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Completed Kaizen tasks across projects */}
+      {completedTasks.length > 0 && (
+        <div>
+          <div style={{ ...sectionLabel, paddingLeft:4, marginBottom:10 }}>
+            Completed tasks ({completedTasks.length} recent)
+          </div>
+          <div className="card" style={{ padding:'12px 14px' }}>
+            {completedTasks.map(t => (
+              <div key={t.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'5px 0', borderBottom:'1px solid #f3f4f6' }}>
+                <CheckCircle2 size={13} style={{ color:'#3d5a3d', flexShrink:0 }}/>
+                <span style={{ fontSize:12, color:'#4b5563', flex:1 }}>{t.name}</span>
+                <span style={{ fontSize:10, color:'#9ca3af', whiteSpace:'nowrap' }}>{t.projectName}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Ask Claude: trajectory prompt */}
+      {(() => {
+        const domainSummary = DOMAINS.map(d => `${d.icon} ${d.label}: ${domainCounts[d.id].week} this week / ${domainCounts[d.id].total} total`).join('\n');
+        const sessionSummary = sessionCatches.slice(0,3).map(c => {
+          let meta = {};
+          try { if (c.fileLink?.startsWith('{')) meta = JSON.parse(c.fileLink); } catch(e) {}
+          return `${meta._sessionType||'session'} (${new Date(c.date).toLocaleDateString('en-US',{month:'short',day:'numeric'})}): ${c.text?.slice(0,100)||''}${meta._assignment?` | Assignment: ${meta._assignment}`:''}`;
+        }).join('\n');
+        const prompt = [
+          bigPicture ? `Big picture direction: ${bigPicture}` : '',
+          `\nWins by domain (this week / all time):\n${domainSummary}`,
+          sessionCatches.length ? `\nRecent session direction:\n${sessionSummary}` : '',
+          `\nUntagged wins: ${untaggedWins.length}`,
+          `\nBased on this, what patterns do you see? What domain is being neglected? What's gaining momentum? What should I reflect on or shift?`
+        ].filter(Boolean).join('\n');
+
+        return (
+          <button onClick={() => {
+            try { navigator.clipboard.writeText(prompt); setTClip('copied'); setTimeout(()=>setTClip('idle'),2000); } catch(e) {}
+          }} style={{
+            padding:'10px 16px', borderRadius:10, fontSize:11, cursor:'pointer', textAlign:'left', lineHeight:1.5,
+            background: tClip==='copied' ? '#f0fdf4' : '#faf7f2',
+            border: tClip==='copied' ? '1px solid #86efac' : '1px dashed #e8e0d0',
+            color: tClip==='copied' ? '#166534' : '#6b6660'
+          }}>
+            {tClip==='copied'
+              ? '✓ Copied! Paste into Claude to get a trajectory read →'
+              : '📋 Ask Claude: what patterns do you see in my trajectory?'}
+          </button>
+        );
+      })()}
+
+      {allWins.length === 0 && !bigPicture && (
+        <div style={{ textAlign:'center', padding:'40px 20px', color:'#9ca3af', fontSize:13, fontStyle:'italic' }}>
+          No wins logged yet. Start tagging your ta-da items with a domain in the Today view — the picture builds from there.
+        </div>
+      )}
     </div>
   );
 }
