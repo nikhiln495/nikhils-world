@@ -459,12 +459,41 @@ function useGlanceData() {
 }
 
 // ── TodayStrip — pinned at top of every view ──────────────────
+const BODY_NEED_OPTS = [
+  { id:'hungry',   icon:'🍽️', label:'hungry'   },
+  { id:'cold',     icon:'🥶', label:'cold'     },
+  { id:'tired',    icon:'😴', label:'tired'    },
+  { id:'bathroom', icon:'🚽', label:'bathroom' },
+];
+
 function TodayStrip({ data, onPendingClick, theme = 'dark' }) {
   const t = data.today;
   const isDark = theme === 'dark';
   const colors = isDark
     ? { bg:'#1a1d27', border:'#2a2e3d', text:'#e4e4e7', muted:'#9ca3af', accent:'#60a5fa' }
     : { bg:'#fffdf9', border:'#e8e0d0', text:'#1a1814', muted:'#6b6660', accent:'#3d5a3d' };
+
+  // ── Body-needs state ────────────────────────────────────────
+  const [bodyNeeds, setBodyNeeds] = __useState([]);
+  const [needsOpen, setNeedsOpen] = __useState(false);
+  __useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get('body-needs');
+        if (r?.value) setBodyNeeds(JSON.parse(r.value));
+      } catch(e) {}
+    })();
+  }, []);
+  const toggleNeed = async (id) => {
+    const next = bodyNeeds.includes(id) ? bodyNeeds.filter(n=>n!==id) : [...bodyNeeds, id];
+    setBodyNeeds(next);
+    try { await window.storage.set('body-needs', JSON.stringify(next)); } catch(e) {}
+  };
+  const clearNeeds = async () => {
+    setBodyNeeds([]);
+    try { await window.storage.set('body-needs', '[]'); } catch(e) {}
+  };
+  const hasNeeds = bodyNeeds.length > 0;
 
   const proteinColor = !t || t.proteinG === 0 ? colors.muted
     : t.proteinG >= 130 ? '#22c55e'
@@ -489,43 +518,129 @@ function TodayStrip({ data, onPendingClick, theme = 'dark' }) {
     );
   }
 
+  // ── End-of-day rollup (after 9 PM) ──────────────────────────
+  const hour = new Date().getHours();
+  const isEvening = hour >= 21;
+  const todayWins = (data.todayWins || []);
+  const stuckTask = data.pending?.find(p => p.type === 'task');
+
+  const copyEodPrompt = () => {
+    const lines = [
+      `End-of-day check-in for ${new Date().toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'})}:`,
+      `• Protein: ${t.proteinG}g (${t.proteinPct}% of 130g target)`,
+      `• Calorie deficit/surplus: ${t.deficit === null ? 'unknown' : (t.deficit >= 0 ? `−${t.deficit} kcal` : `+${Math.abs(t.deficit)} kcal surplus`)}`,
+      `• Steps: ${t.steps ? t.steps.toLocaleString() : 'unknown'}`,
+      `• Still stuck: ${stuckTask ? stuckTask.label : 'nothing flagged'}`,
+      `• Ta-da wins today: ${todayWins.length ? todayWins.join(', ') : 'not logged yet'}`,
+      `\nPlease give me a brief end-of-day summary and name one thing I can do in the next 10 minutes before bed.`
+    ];
+    try { navigator.clipboard.writeText(lines.join('\n')); } catch(e) {}
+  };
+
   return (
-    <div style={{
-      background: colors.bg, borderBottom: `1px solid ${colors.border}`,
-      display: 'flex', alignItems: 'stretch', overflowX: 'auto',
-      WebkitOverflowScrolling: 'touch'
-    }}>
-      <Pill
-        label="Protein"
-        value={t.proteinG === 0 ? '—' : `${t.proteinG}g · ${t.proteinPct}%`}
-        color={proteinColor}
-      />
-      <Pill
-        label="Deficit"
-        value={t.deficit === null ? '—' : (t.deficit >= 0 ? `−${t.deficit.toLocaleString()}` : `+${Math.abs(t.deficit).toLocaleString()}`)}
-        color={t.deficit === null ? colors.muted : (t.deficit >= 0 ? '#22c55e' : '#f87171')}
-      />
-      <Pill label="RHR" value={t.rhr ? `${t.rhr}` : '—'} color={t.rhr ? colors.text : colors.muted}/>
-      <Pill label="Sleep" value={t.sleep ? `${t.sleep}h` : '—'} color={t.sleep ? colors.text : colors.muted}/>
-      {t.sodiumMg > 0 && (
-        <Pill
-          label="Sodium"
-          value={`${(t.sodiumMg/1000).toFixed(1)}g`}
-          color={t.sodiumMg > 2300 ? '#f87171' : t.sodiumMg > 1800 ? '#fb923c' : colors.text}
-        />
-      )}
-      <Pill
-        label="Top task"
-        value={t.topUrgent ? t.topUrgent.name : '—'}
-        color={t.topUrgent ? colors.accent : colors.muted}
-      />
-      {data.pending.length > 0 && (
-        <div onClick={onPendingClick} style={{
-          flexShrink: 0, padding: '6px 12px', cursor: 'pointer',
-          background: data.pending.some(p=>p.severity==='high') ? '#7f1d1d' : '#78350f',
-          color: '#fff', display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600
+    <div style={{ background: colors.bg, borderBottom: `1px solid ${colors.border}` }}>
+      {/* Body-needs banner when active */}
+      {hasNeeds && (
+        <div style={{
+          background: isDark ? '#451a03' : '#fef3c7',
+          borderBottom: `1px solid ${isDark ? '#78350f' : '#fcd34d'}`,
+          padding: '5px 10px', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap'
         }}>
-          {data.pending.length} pending →
+          <span style={{ fontSize: 11, fontWeight: 700, color: isDark ? '#fcd34d' : '#92400e' }}>
+            ⚠️ Body need active — this wins over everything else:
+          </span>
+          {bodyNeeds.map(id => {
+            const opt = BODY_NEED_OPTS.find(o=>o.id===id);
+            return opt ? <span key={id} style={{ fontSize: 12, background: isDark ? '#78350f' : '#fde68a', color: isDark ? '#fef3c7' : '#92400e', padding: '2px 8px', borderRadius: 99 }}>{opt.icon} {opt.label}</span> : null;
+          })}
+          <button onClick={clearNeeds} style={{ marginLeft: 'auto', fontSize: 10, padding: '2px 8px', background: 'transparent', border: `1px solid ${isDark ? '#fcd34d' : '#d97706'}`, color: isDark ? '#fcd34d' : '#92400e', borderRadius: 4, cursor: 'pointer' }}>✓ Clear</button>
+        </div>
+      )}
+
+      {/* Metrics row */}
+      <div style={{ display: 'flex', alignItems: 'stretch', overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+        <Pill
+          label="Protein"
+          value={t.proteinG === 0 ? '—' : `${t.proteinG}g · ${t.proteinPct}%`}
+          color={proteinColor}
+        />
+        <Pill
+          label="Deficit"
+          value={t.deficit === null ? '—' : (t.deficit >= 0 ? `−${t.deficit.toLocaleString()}` : `+${Math.abs(t.deficit).toLocaleString()}`)}
+          color={t.deficit === null ? colors.muted : (t.deficit >= 0 ? '#22c55e' : '#f87171')}
+        />
+        <Pill label="RHR" value={t.rhr ? `${t.rhr}` : '—'} color={t.rhr ? colors.text : colors.muted}/>
+        <Pill label="Sleep" value={t.sleep ? `${t.sleep}h` : '—'} color={t.sleep ? colors.text : colors.muted}/>
+        {t.sodiumMg > 0 && (
+          <Pill
+            label="Sodium"
+            value={`${(t.sodiumMg/1000).toFixed(1)}g`}
+            color={t.sodiumMg > 2300 ? '#f87171' : t.sodiumMg > 1800 ? '#fb923c' : colors.text}
+          />
+        )}
+        <Pill
+          label="Top task"
+          value={t.topUrgent ? t.topUrgent.name : '—'}
+          color={t.topUrgent ? colors.accent : colors.muted}
+        />
+        {/* Body needs toggle button */}
+        <div onClick={() => setNeedsOpen(o=>!o)} style={{
+          flexShrink: 0, padding: '6px 10px', cursor: 'pointer',
+          borderRight: `1px solid ${colors.border}`,
+          background: hasNeeds ? (isDark ? '#78350f' : '#fef3c7') : 'transparent',
+          display: 'flex', alignItems: 'center', gap: 4
+        }}>
+          <span style={{ fontSize: 14 }}>{hasNeeds ? '⚠️' : '🫀'}</span>
+        </div>
+        {data.pending.length > 0 && (
+          <div onClick={onPendingClick} style={{
+            flexShrink: 0, padding: '6px 12px', cursor: 'pointer',
+            background: data.pending.some(p=>p.severity==='high') ? '#7f1d1d' : '#78350f',
+            color: '#fff', display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600
+          }}>
+            {data.pending.length} pending →
+          </div>
+        )}
+      </div>
+
+      {/* Body-needs picker (expands when 🫀 tapped) */}
+      {needsOpen && (
+        <div style={{
+          padding: '8px 10px', borderTop: `1px solid ${colors.border}`,
+          background: isDark ? '#12151f' : '#faf7f2',
+          display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center'
+        }}>
+          <span style={{ fontSize: 10, color: colors.muted, textTransform: 'uppercase', letterSpacing: 1, marginRight: 4 }}>Body need right now:</span>
+          {BODY_NEED_OPTS.map(o => (
+            <button key={o.id} onClick={() => toggleNeed(o.id)} style={{
+              padding: '4px 10px', borderRadius: 99, fontSize: 11, cursor: 'pointer', fontWeight: 600,
+              border: bodyNeeds.includes(o.id) ? `1px solid #f59e0b` : `1px solid ${colors.border}`,
+              background: bodyNeeds.includes(o.id) ? (isDark ? '#78350f' : '#fde68a') : 'transparent',
+              color: bodyNeeds.includes(o.id) ? (isDark ? '#fef3c7' : '#92400e') : colors.muted
+            }}>{o.icon} {o.label}</button>
+          ))}
+          <button onClick={() => setNeedsOpen(false)} style={{ marginLeft: 'auto', fontSize: 10, padding: '3px 8px', background: 'transparent', border: `1px solid ${colors.border}`, color: colors.muted, borderRadius: 4, cursor: 'pointer' }}>done</button>
+        </div>
+      )}
+
+      {/* End-of-day rollup (after 9 PM) */}
+      {isEvening && (
+        <div style={{
+          padding: '7px 12px', borderTop: `1px solid ${colors.border}`,
+          background: isDark ? '#0f1520' : '#f0f4f0',
+          display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap'
+        }}>
+          <span style={{ fontSize: 10, color: isDark ? '#4ade80' : '#3d5a3d', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1 }}>End of day</span>
+          <span style={{ fontSize: 11, color: colors.muted }}>
+            Protein: <strong style={{ color: proteinColor }}>{t.proteinG}g</strong>
+            {t.deficit !== null && <> · Deficit: <strong style={{ color: t.deficit >= 0 ? '#22c55e' : '#f87171' }}>{t.deficit >= 0 ? `−${t.deficit}` : `+${Math.abs(t.deficit)}`}</strong></>}
+            {stuckTask && <> · Stuck: <strong style={{ color: '#f87171' }}>{stuckTask.label}</strong></>}
+          </span>
+          <button onClick={copyEodPrompt} style={{
+            marginLeft: 'auto', fontSize: 10, padding: '3px 8px',
+            background: 'transparent', border: `1px solid ${isDark ? '#4ade80' : '#3d5a3d'}`,
+            color: isDark ? '#4ade80' : '#3d5a3d', borderRadius: 4, cursor: 'pointer'
+          }}>📋 Copy to Claude</button>
         </div>
       )}
     </div>
@@ -1184,6 +1299,9 @@ function TodayView({ log, updateLog, tasks, allTasks, setTasks, projects }) {
         </div>
       )}
 
+      {/* Transition timer */}
+      <TransitionTimer />
+
       {/* Brain dump */}
       <Collapsible open={brainOpen} setOpen={setBrainOpen} label="Brain dump" icon={<FileText size={12}/>}>
         <textarea
@@ -1205,6 +1323,117 @@ function TodayView({ log, updateLog, tasks, allTasks, setTasks, projects }) {
           style={{...textArea}}
         />
       </Collapsible>
+    </div>
+  );
+}
+
+// ── Transition Timer ────────────────────────────────────────
+// Tracks time lost between activities; 7-day log in storage.
+function TransitionTimer() {
+  const [phase, setPhase] = useState('idle'); // idle | running | done
+  const [from,  setFrom]  = useState('');
+  const [to,    setTo]    = useState('');
+  const [startAt, setStartAt] = useState(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [history, setHistory] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get('transition-log');
+        if (r?.value) {
+          const parsed = JSON.parse(r.value);
+          const cutoff = Date.now() - 7*24*60*60*1000;
+          setHistory(parsed.filter(e=>new Date(e.at)>=cutoff));
+        }
+      } catch(e) {}
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (phase !== 'running') return;
+    const iv = setInterval(() => setElapsed(Math.floor((Date.now()-startAt)/1000)), 1000);
+    return () => clearInterval(iv);
+  }, [phase, startAt]);
+
+  const start = () => {
+    if (!from.trim() || !to.trim()) return;
+    setStartAt(Date.now());
+    setElapsed(0);
+    setPhase('running');
+  };
+
+  const arrive = async () => {
+    const secs = Math.floor((Date.now()-startAt)/1000);
+    const entry = { from: from.trim(), to: to.trim(), secs, at: new Date().toISOString() };
+    const newHistory = [entry, ...history].slice(0,21); // 3-week max
+    setHistory(newHistory);
+    setPhase('done');
+    setElapsed(secs);
+    try { await window.storage.set('transition-log', JSON.stringify(newHistory)); } catch(e) {}
+  };
+
+  const reset = () => { setPhase('idle'); setFrom(''); setTo(''); setElapsed(0); };
+
+  const median = history.length
+    ? [...history].sort((a,b)=>a.secs-b.secs)[Math.floor(history.length/2)].secs
+    : null;
+
+  const fmt = s => s < 60 ? `${s}s` : `${Math.floor(s/60)}m ${s%60}s`;
+
+  return (
+    <div className="card" style={{padding:'14px 16px'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+        <div style={{...sectionLabel,display:'flex',alignItems:'center',gap:6}}>
+          <span>⏱</span> Transition timer
+        </div>
+        {median !== null && (
+          <span className="fm" style={{fontSize:10,color:'#6b6660'}}>7d median: {fmt(median)}</span>
+        )}
+      </div>
+      {phase === 'idle' && (
+        <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
+          <input value={from} onChange={e=>setFrom(e.target.value)} placeholder="From…"
+            style={{flex:'1 1 80px',padding:'6px 8px',fontSize:12,border:'1px solid #e8e0d0',borderRadius:8,minWidth:60}}/>
+          <span style={{color:'#6b6660',fontSize:12}}>→</span>
+          <input value={to} onChange={e=>setTo(e.target.value)} placeholder="To…"
+            style={{flex:'1 1 80px',padding:'6px 8px',fontSize:12,border:'1px solid #e8e0d0',borderRadius:8,minWidth:60}}/>
+          <button onClick={start} disabled={!from.trim()||!to.trim()} style={{...solidBtn,borderRadius:8,padding:'6px 12px',opacity:(from.trim()&&to.trim())?1:0.4}}>Go</button>
+          {history.length > 0 && (
+            <button onClick={()=>setShowHistory(!showHistory)} style={{...ghostBtn,borderRadius:8,padding:'5px 10px',fontSize:11}}>
+              {showHistory ? 'Hide' : 'History'}
+            </button>
+          )}
+        </div>
+      )}
+      {phase === 'running' && (
+        <div style={{display:'flex',gap:10,alignItems:'center'}}>
+          <span style={{fontSize:13,color:'#6b6660',flex:1}}>{from} → {to}</span>
+          <span className="fm" style={{fontSize:16,fontWeight:700,color:elapsed>300?'#f87171':'#1a1814'}}>{fmt(elapsed)}</span>
+          <button onClick={arrive} style={{...solidBtn,background:'#3d5a3d',borderRadius:8,padding:'6px 12px'}}>Arrived ✓</button>
+        </div>
+      )}
+      {phase === 'done' && (
+        <div style={{display:'flex',gap:10,alignItems:'center'}}>
+          <span style={{fontSize:13,color:'#3d5a3d',flex:1}}>✓ {from} → {to}</span>
+          <span className="fm" style={{fontSize:14,fontWeight:700}}>{fmt(elapsed)}</span>
+          {median !== null && elapsed > median * 1.5 && (
+            <span style={{fontSize:10,background:'#fef3c7',color:'#92400e',padding:'2px 6px',borderRadius:4}}>1.5× typical</span>
+          )}
+          <button onClick={reset} style={{...ghostBtn,borderRadius:8,padding:'5px 10px',fontSize:11}}>New</button>
+        </div>
+      )}
+      {showHistory && phase==='idle' && history.length > 0 && (
+        <div style={{marginTop:10,borderTop:'1px solid #e8e0d0',paddingTop:10}}>
+          {history.slice(0,7).map((e,i)=>(
+            <div key={i} style={{display:'flex',justifyContent:'space-between',fontSize:11,color:'#6b6660',marginBottom:3}}>
+              <span>{e.from} → {e.to}</span>
+              <span className="fm">{fmt(e.secs)}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1443,6 +1672,30 @@ function TaskEditor({task,projects,onSave,onCancel,onDelete}) {
   const [subs,    setSubs]    = useState(task.subtasks || []);
   const [subInput,setSubInput]= useState('');
   const [editingSubId, setEditingSubId] = useState(null);
+  const [stuckReason, setStuckReason] = useState(task.stuckReason || '');
+  const [copied, setCopied] = useState(false);
+
+  const STUCK_OPTS = [
+    { value:'', label:'— not stuck —' },
+    { value:'waiting', label:'⏳ Waiting on someone else' },
+    { value:'dont-know-how', label:'❓ Don\'t know how to start' },
+    { value:'aversive', label:'😬 Aversive / emotionally hard' },
+    { value:'no-next-step', label:'🧱 No clear next physical step' },
+    { value:'other', label:'🔘 Other' },
+  ];
+
+  const copyStuckPrompt = () => {
+    const proj = projects.find(p=>p.id===projId);
+    const text = [
+      `Task: "${name}"`,
+      proj ? `Project: ${proj.name}` : '',
+      `Why stuck: ${STUCK_OPTS.find(o=>o.value===stuckReason)?.label || stuckReason}`,
+      stuckReason === 'no-next-step' || stuckReason === 'dont-know-how'
+        ? `\nBreak this down into the smallest possible physical micro-steps. Give me the first one as a literal body action (e.g. "open the browser" not "start researching"). No more than 5 steps total.`
+        : `\nWhat's the single smallest first move I can make on this right now? Give me a literal physical action.`
+    ].filter(Boolean).join('\n');
+    try { navigator.clipboard.writeText(text); setCopied(true); setTimeout(()=>setCopied(false),2000); } catch(e) {}
+  };
 
   const addSub = () => {
     const t = subInput.trim();
@@ -1534,8 +1787,28 @@ function TaskEditor({task,projects,onSave,onCancel,onDelete}) {
         )}
       </div>
 
+      {/* Stuck reason */}
+      <div style={{borderTop:'1px solid #e8e0d0',paddingTop:12,marginBottom:12}}>
+        <label style={{fontSize:11}}>
+          <span style={{color:'#6b6660',display:'block',marginBottom:4}}>Why is this stuck? (optional)</span>
+          <select value={stuckReason} onChange={e=>setStuckReason(e.target.value)} style={{...selectStyle,width:'100%',color:stuckReason?'#1a1814':'#6b6660'}}>
+            {STUCK_OPTS.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </label>
+        {stuckReason && (
+          <button onClick={copyStuckPrompt} style={{
+            marginTop:8, width:'100%', padding:'7px 12px', borderRadius:8,
+            background: copied ? '#f0fdf4' : '#faf7f2',
+            border: copied ? '1px solid #86efac' : '1px dashed #6b6660',
+            color: copied ? '#166534' : '#6b6660', fontSize:11, cursor:'pointer', textAlign:'left'
+          }}>
+            {copied ? '✓ Copied! Paste into Claude' : '📋 Copy micro-step prompt for Claude'}
+          </button>
+        )}
+      </div>
+
       <div style={{display:'flex',gap:8}}>
-        <button onClick={()=>onSave({name,leadDays:ld,sprint,estimatedTime:est,est,actualTime:actual?+actual:null,projectId:projId,subtasks:subs})}
+        <button onClick={()=>onSave({name,leadDays:ld,sprint,estimatedTime:est,est,actualTime:actual?+actual:null,projectId:projId,subtasks:subs,stuckReason})}
           style={{...solidBtn,flex:1,justifyContent:'center',borderRadius:10,padding:'9px'}}>
           <Save size={13}/> Save
         </button>
@@ -2606,6 +2879,60 @@ const HUNGER_TAGS = {
   social: { label: '👥 social', color: '#7059bf' },
 };
 
+// ── Calorie/macro lookup — your 35 most-logged items ───────────────
+// Format: { kcal, protein (g), sodium (mg) }
+const FOOD_LOOKUP = {
+  // UAF / campus
+  'UAF veggie calzone': { kcal: 690, protein: 30, sodium: 1200 },
+  'UAF veggie calzone ×2': { kcal: 1380, protein: 60, sodium: 2400 },
+  'UAF pizza slice': { kcal: 400, protein: 16, sodium: 800 },
+  // Costco
+  'Costco pizza slice': { kcal: 730, protein: 34, sodium: 1300 },
+  'Costco Greek yogurt (5-6 tbsp)': { kcal: 95, protein: 9, sodium: 40 },
+  'Costco mixed nuts (2-3 dozen)': { kcal: 230, protein: 6, sodium: 90 },
+  'Costco Kirkland protein bar': { kcal: 190, protein: 21, sodium: 180 },
+  'Costco rotisserie chicken breast': { kcal: 250, protein: 45, sodium: 610 },
+  // Proteins
+  'Smart Dog (1)': { kcal: 50, protein: 9, sodium: 480 },
+  'Smart Dogs ×2': { kcal: 100, protein: 18, sodium: 960 },
+  'Chorizo (2 oz)': { kcal: 200, protein: 9, sodium: 510 },
+  'Eggs scrambled (2)': { kcal: 180, protein: 12, sodium: 180 },
+  'Greek yogurt (1 cup)': { kcal: 170, protein: 20, sodium: 95 },
+  'Paneer (100g)': { kcal: 265, protein: 18, sodium: 470 },
+  'Tofu firm (100g)': { kcal: 144, protein: 17, sodium: 9 },
+  'Simply Protein chips': { kcal: 110, protein: 15, sodium: 180 },
+  'Protein shake (1 scoop)': { kcal: 120, protein: 25, sodium: 150 },
+  // Carbs / staples
+  'Oats cooked (1 cup)': { kcal: 165, protein: 6, sodium: 0 },
+  'Sourdough bread (1 slice)': { kcal: 110, protein: 4, sodium: 230 },
+  'Brown rice (1 cup cooked)': { kcal: 215, protein: 5, sodium: 10 },
+  'Banana': { kcal: 105, protein: 1, sodium: 1 },
+  // Spreads / sauces
+  'Peanut butter (1 tbsp)': { kcal: 95, protein: 4, sodium: 75 },
+  'Peanut butter (2 tbsp)': { kcal: 190, protein: 8, sodium: 150 },
+  'Hummus (4 oz)': { kcal: 195, protein: 9, sodium: 580 },
+  'Butter (1 tbsp)': { kcal: 100, protein: 0, sodium: 90 },
+  // Dosa / South Indian
+  'Dosa (plain, 1 large)': { kcal: 165, protein: 4, sodium: 250 },
+  'Sambar (1 cup)': { kcal: 75, protein: 4, sodium: 680 },
+  'Coconut chutney (3 tbsp)': { kcal: 90, protein: 1, sodium: 150 },
+  // Drinks / extras
+  'Chai with oat milk (1 mug)': { kcal: 120, protein: 3, sodium: 70 },
+  'Oat milk (1 cup)': { kcal: 120, protein: 3, sodium: 100 },
+  'Coffee black': { kcal: 5, protein: 0, sodium: 5 },
+  'Homemade cookie (~2"×2")': { kcal: 185, protein: 2, sodium: 90 },
+  'Subway 6-inch veggie': { kcal: 280, protein: 9, sodium: 520 },
+  'Subway footlong veggie half': { kcal: 280, protein: 9, sodium: 520 },
+  'Avial (1 cup)': { kcal: 180, protein: 4, sodium: 320 },
+};
+
+// Helper: find suggestions from lookup by prefix match
+function foodSuggestions(query) {
+  if (!query || query.length < 2) return [];
+  const q = query.toLowerCase();
+  return Object.keys(FOOD_LOOKUP).filter(k => k.toLowerCase().includes(q)).slice(0, 6);
+}
+
 const SODIUM_TRIGGERS = ['smart dog','chorizo','calzone','costco pizza','dominos','pizza','grilled cheese','soy sauce'];
 function detectSodiumStack(meals) {
   if (!meals) return null;
@@ -2669,6 +2996,7 @@ function DayView({ date, data, editable, onUpdate, onDeleteDay }) {
   const [addingMeal, setAddingMeal] = useState(false);
   const [editingHealth, setEditingHealth] = useState(false);
   const [editingDayMeta, setEditingDayMeta] = useState(false);
+  const [clipState, setClipState] = useState('idle');
   const totalIntake = calcTotal(data.meals);
   const protein = calcProtein(data.meals);
   const totalBurn = getTotalBurn(data.health);
@@ -2764,6 +3092,24 @@ function DayView({ date, data, editable, onUpdate, onDeleteDay }) {
         </div>
         {data.health.notes && <div style={{ marginTop: 11, fontSize: 11, opacity: 0.6, lineHeight: 1.5 }}>🏃 {data.health.notes}</div>}
         {data.health.sleep_note && <div style={{ marginTop: 6, fontSize: 11, opacity: 0.5, fontStyle: "italic", lineHeight: 1.5 }}>💤 {data.health.sleep_note}</div>}
+        {/* Ask Claude: deficit prompt */}
+        <button onClick={() => {
+          const meals = data.meals.map(m => `${m.label || 'meal'}: ${m.items?.map(i=>`${i.name} (${i.kcal} kcal${i.notes?', '+i.notes:''})`).join(', ')}`).join('\n');
+          const text = [
+            `Date: ${date}`,
+            `\nFood logged today:\n${meals}`,
+            `\nCalc so far: intake ${totalIntake} kcal, burn ${totalBurn} kcal, deficit ${deficit >= 0 ? deficit : '–'+Math.abs(deficit)} kcal, protein ${protein}g`,
+            `\nPlease: (1) check my protein math from the notes fields above, (2) flag anything miscalculated, (3) suggest one food swap to boost protein if under 130g.`
+          ].join('\n');
+          try { navigator.clipboard.writeText(text); setClipState('copied'); setTimeout(()=>setClipState('idle'),2000); } catch(e) {}
+        }} style={{
+          marginTop: 12, padding: '5px 12px', borderRadius: 8, fontSize: 10, cursor: 'pointer',
+          background: clipState==='copied' ? 'rgba(129,199,132,0.2)' : 'rgba(255,255,255,0.08)',
+          border: clipState==='copied' ? '1px solid #81c784' : '1px solid rgba(255,255,255,0.2)',
+          color: clipState==='copied' ? '#81c784' : 'rgba(255,255,255,0.6)'
+        }}>
+          {clipState==='copied' ? '✓ Copied! Paste into Claude' : '📋 Ask Claude: check this day'}
+        </button>
       </div>
 
       {editingDayMeta && (
@@ -2886,9 +3232,22 @@ function MealEditor({ meal, onSave, onCancel, onDelete }) {
   const [highlight, setHighlight] = useState(meal?.protein_highlight ?? false);
   const [items, setItems] = useState(meal?.items?.length ? meal.items : [{ name:'', kcal:0, notes:'' }]);
   const [conf, setConf] = useState(false);
+  const [suggestions, setSuggestions] = useState({});
 
-  const updItem = (i, patch) => setItems(items.map((it,j) => j===i ? {...it, ...patch} : it));
-  const rmItem  = (i) => setItems(items.filter((_,j)=>j!==i));
+  const updItem = (i, patch) => {
+    const newItems = items.map((it,j) => j===i ? {...it, ...patch} : it);
+    setItems(newItems);
+    // Auto-fill kcal/protein from lookup when name is set
+    if (patch.name !== undefined) {
+      const match = FOOD_LOOKUP[patch.name];
+      if (match) {
+        setItems(newItems.map((it,j) => j===i ? {...it, name: patch.name, kcal: match.kcal, notes: `~${match.protein}g protein${match.sodium > 400 ? ` · ⚠️${match.sodium}mg sodium` : ''}`} : it));
+      }
+      // Show suggestions
+      setSuggestions(s => ({...s, [i]: foodSuggestions(patch.name)}));
+    }
+  };
+  const rmItem  = (i) => { setItems(items.filter((_,j)=>j!==i)); setSuggestions(s=>{const n={...s};delete n[i];return n;}); };
   const addItem = () => setItems([...items, { name:'', kcal:0, notes:'' }]);
 
   return (
@@ -2917,14 +3276,33 @@ function MealEditor({ meal, onSave, onCancel, onDelete }) {
         style={{ width:'100%', padding:'7px 10px', fontSize:11, border:'1px solid #e8e0d0', borderRadius:6, marginBottom:10, boxSizing:'border-box', background:'#faf7f2' }}/>
       <div style={{ fontSize:10, color:'#6b6660', textTransform:'uppercase', letterSpacing:1, marginBottom:6 }}>Items</div>
       {items.map((it,i)=>(
-        <div key={i} style={{ display:'grid', gridTemplateColumns:'2fr 70px 90px 28px', gap:6, marginBottom:6 }}>
-          <input value={it.name} onChange={e=>updItem(i,{name:e.target.value})} placeholder="What"
-            style={{ padding:'6px 8px', fontSize:12, border:'1px solid #e8e0d0', borderRadius:6 }}/>
-          <input type="number" value={it.kcal} onChange={e=>updItem(i,{kcal: +e.target.value || 0})} placeholder="kcal"
-            style={{ padding:'6px 8px', fontSize:12, border:'1px solid #e8e0d0', borderRadius:6, fontFamily:'monospace' }}/>
-          <input value={it.notes} onChange={e=>updItem(i,{notes:e.target.value})} placeholder="~Xg protein, etc"
-            style={{ padding:'6px 8px', fontSize:11, border:'1px solid #e8e0d0', borderRadius:6 }}/>
-          <button onClick={()=>rmItem(i)} style={{ background:'none', border:'1px solid #fecaca', color:'#dc2626', borderRadius:6, cursor:'pointer', fontSize:14 }}>×</button>
+        <div key={i} style={{ marginBottom: 8 }}>
+          <div style={{ display:'grid', gridTemplateColumns:'2fr 70px 90px 28px', gap:6, marginBottom: suggestions[i]?.length > 0 ? 4 : 0 }}>
+            <input value={it.name} onChange={e=>updItem(i,{name:e.target.value})} placeholder="What (type to search…)"
+              style={{ padding:'6px 8px', fontSize:12, border:'1px solid #e8e0d0', borderRadius:6 }}/>
+            <input type="number" value={it.kcal} onChange={e=>updItem(i,{kcal: +e.target.value || 0})} placeholder="kcal"
+              style={{ padding:'6px 8px', fontSize:12, border:'1px solid #e8e0d0', borderRadius:6, fontFamily:'monospace' }}/>
+            <input value={it.notes} onChange={e=>updItem(i,{notes:e.target.value})} placeholder="~Xg protein, etc"
+              style={{ padding:'6px 8px', fontSize:11, border:'1px solid #e8e0d0', borderRadius:6 }}/>
+            <button onClick={()=>rmItem(i)} style={{ background:'none', border:'1px solid #fecaca', color:'#dc2626', borderRadius:6, cursor:'pointer', fontSize:14 }}>×</button>
+          </div>
+          {suggestions[i]?.length > 0 && (
+            <div style={{ display:'flex', gap:4, flexWrap:'wrap', paddingLeft:2 }}>
+              {suggestions[i].map(s => (
+                <button key={s} onClick={() => {
+                  const match = FOOD_LOOKUP[s];
+                  setItems(items.map((it2,j) => j===i ? {...it2, name:s, kcal:match.kcal, notes:`~${match.protein}g protein${match.sodium > 400 ? ` · ⚠️${match.sodium}mg Na` : ''}`} : it2));
+                  setSuggestions(sv=>({...sv,[i]:[]}));
+                }} style={{
+                  fontSize:10, padding:'3px 8px', borderRadius:99,
+                  background:'#f0fdf4', border:'1px solid #86efac', color:'#166534',
+                  cursor:'pointer'
+                }}>
+                  {s} <span style={{color:'#6b6660'}}>({FOOD_LOOKUP[s].kcal} kcal)</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       ))}
       <button onClick={addItem} style={{ marginBottom:10, padding:'5px 10px', background:'transparent', border:'1px dashed #c8a24a', color:'#c8a24a', borderRadius:6, fontSize:11, cursor:'pointer' }}>+ item</button>
@@ -3919,6 +4297,7 @@ const LiveTab = ({ healthImport = {}, setHealthImport, medLog = {}, setMedLog })
   const [importText, setImportText] = useState("");
   const [importStatus, setImportStatus] = useState("");
   const [foodLog, setFoodLog] = useState(null);
+  const [anomalyClip, setAnomalyClip] = useState('idle');
 
   useEffect(() => {
     (async () => {
@@ -4068,6 +4447,26 @@ const LiveTab = ({ healthImport = {}, setHealthImport, medLog = {}, setMedLog })
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Ask Claude: anomaly check */}
+      <button onClick={() => {
+        const lines = [
+          `Vitals snapshot — last 7 days:`,
+          `Steps avg: ${fmt(stepsAvg)} (today: ${fmt(metricFor(last7[6],'steps'))})`,
+          `RHR avg: ${fmt(rhrAvg)} bpm (today: ${fmt(metricFor(last7[6],'rhr'))} bpm)`,
+          `Sleep avg: ${fmt(sleepAvg,1)}h (today: ${fmt(metricFor(last7[6],'sleep_hours'),1)}h)`,
+          `HRV avg: ${fmt(hrvAvg)} ms`,
+          correl ? `Protein × burn correlation (14d Pearson r): ${correl.r.toFixed(2)} over ${correl.n} days` : '',
+          `\nBased on this, what's anomalous or worth flagging? What should I pay attention to this week?`
+        ].filter(Boolean).join('\n');
+        try { navigator.clipboard.writeText(lines); setAnomalyClip('copied'); setTimeout(()=>setAnomalyClip('idle'),2000); } catch(e) {}
+      }} style={{
+        padding: '7px 14px', borderRadius: 8, fontSize: 11, cursor: 'pointer', textAlign: 'left',
+        background: anomalyClip==='copied' ? 'rgba(61,163,93,0.15)' : COLORS.card,
+        border: anomalyClip==='copied' ? `1px solid ${COLORS.green}` : `1px solid ${COLORS.border}`,
+        color: anomalyClip==='copied' ? COLORS.green : COLORS.textMuted
+      }}>
+        {anomalyClip==='copied' ? '✓ Copied! Paste into Claude →' : '📋 Ask Claude: what\'s anomalous this week?'}
+      </button>
       {/* Rolling averages cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12 }}>
         {[
@@ -5633,11 +6032,12 @@ function CreativeRoulette() {
 
             <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
               {[
-                { id: "text",  label: "📝 text" },
-                { id: "voice", label: "🎙️ voice" },
-                { id: "image", label: "📷 image" },
-                { id: "song",  label: "🎵 song" },
-                { id: "movement", label: "💃 movement" },
+                { id: "text",    label: "📝 text" },
+                { id: "voice",   label: "🎙️ voice" },
+                { id: "image",   label: "📷 image" },
+                { id: "song",    label: "🎵 song" },
+                { id: "movement",label: "💃 movement" },
+                { id: "session", label: "🧘 session" },
               ].map(t => (
                 <button key={t.id} onClick={() => setCatchType(t.id)} style={{
                   padding: "5px 12px", borderRadius: 99, border: "1px solid #4ECDC4",
@@ -5654,6 +6054,7 @@ function CreativeRoulette() {
                 : catchType === "image" ? "What's the image? (Describe or just paste a Google Photos / Drive link below)"
                 : catchType === "song" ? "Lyric, melody description, song reference, whatever surfaced..."
                 : catchType === "movement" ? "Movement that came up — describe the shape, the feeling, the moment..."
+                : catchType === "session" ? "What surfaced or shifted in this session? Body sensations, images, realizations — anything."
                 : "What surfaced? Don't polish it. Just catch it."
               }
               value={catchInput}
@@ -5665,6 +6066,47 @@ function CreativeRoulette() {
                 lineHeight: 1.6, resize: "vertical", marginBottom: 10
               }}
             />
+            {catchType === "session" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  {[
+                    { key: "_sessionType", placeholder: "Session type (Brighton / Shobha / other)" },
+                    { key: "_oneWordEmotion", placeholder: "One-word emotion (e.g. ache, unsettled)" },
+                  ].map(({ key, placeholder }) => (
+                    <input key={key} placeholder={placeholder}
+                      value={(catchFileLink.startsWith('{') ? (JSON.parse(catchFileLink)[key]||'') : '')}
+                      onChange={e => {
+                        let meta = {};
+                        try { meta = JSON.parse(catchFileLink); } catch(err) {}
+                        meta[key] = e.target.value;
+                        setCatchFileLink(JSON.stringify(meta));
+                      }}
+                      style={{ padding: "8px 10px", fontSize: 11, background: "#0f0f0f", border: "1px solid #333", borderRadius: 6, color: "#aaa", fontFamily: "inherit" }}
+                    />
+                  ))}
+                </div>
+                <input placeholder="Shobha/Brighton assignment from this session (if any)"
+                  value={(catchFileLink.startsWith('{') ? (JSON.parse(catchFileLink)['_assignment']||'') : '')}
+                  onChange={e => {
+                    let meta = {};
+                    try { meta = JSON.parse(catchFileLink); } catch(err) {}
+                    meta['_assignment'] = e.target.value;
+                    setCatchFileLink(JSON.stringify(meta));
+                  }}
+                  style={{ padding: "8px 10px", fontSize: 11, background: "#0f0f0f", border: "1px solid #333", borderRadius: 6, color: "#aaa", fontFamily: "inherit" }}
+                />
+                <input placeholder="📎 Fireflies transcript link or session recording URL"
+                  value={(catchFileLink.startsWith('{') ? (JSON.parse(catchFileLink)['_transcriptLink']||'') : '')}
+                  onChange={e => {
+                    let meta = {};
+                    try { meta = JSON.parse(catchFileLink); } catch(err) {}
+                    meta['_transcriptLink'] = e.target.value;
+                    setCatchFileLink(JSON.stringify(meta));
+                  }}
+                  style={{ padding: "8px 10px", fontSize: 11, background: "#0f0f0f", border: "1px solid #333", borderRadius: 6, color: "#aaa", fontFamily: "inherit" }}
+                />
+              </div>
+            )}
 
             {catchType === "voice" && (
               <div style={{ background: "#0f0f0f", borderRadius: 8, padding: 12, marginBottom: 10, border: "1px dashed #4ECDC4" }}>
@@ -5704,6 +6146,7 @@ function CreativeRoulette() {
               </div>
             )}
 
+            {catchType !== "session" && (
             <input
               type="text"
               placeholder="📎 External link (Google Drive / Photos / iCloud — keeps app small)"
@@ -5715,6 +6158,7 @@ function CreativeRoulette() {
                 color: "#aaa", fontFamily: "inherit", fontSize: 11
               }}
             />
+            )}
 
             <button
               onClick={() => addCatch(catchType, catchInput, catchFileLink, recordedBlob)}
