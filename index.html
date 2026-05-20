@@ -583,6 +583,25 @@ function TodayStrip({ data, onPendingClick, theme = 'dark' }) {
           value={t.topUrgent ? t.topUrgent.name : '—'}
           color={t.topUrgent ? colors.accent : colors.muted}
         />
+        {/* Morning briefing button — always available */}
+        <div onClick={() => {
+          const brief = [
+            `Morning briefing — ${new Date().toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'})}`,
+            `\nPlease pull: (1) my open Kaizen tasks + anything flagged stuck, (2) Apple Health last 7 days (steps, RHR, sleep, HRV), (3) today's calendar, (4) latest Fireflies transcript if there's a session from the last 3 days.`,
+            `\nDeliver as:`,
+            `• Today's one non-negotiable task`,
+            `• Body read from health data (1-2 sentences)`,
+            `• One-line session insight if applicable`,
+            `• One thing parked that might need a nudge today`
+          ].join('\n');
+          try { navigator.clipboard.writeText(brief); } catch(e) {}
+        }} title="Copy morning briefing prompt" style={{
+          flexShrink: 0, padding: '6px 10px', cursor: 'pointer',
+          borderRight: `1px solid ${colors.border}`,
+          display: 'flex', alignItems: 'center', gap: 4
+        }}>
+          <span style={{ fontSize: 14 }}>🌅</span>
+        </div>
         {/* Body needs toggle button */}
         <div onClick={() => setNeedsOpen(o=>!o)} style={{
           flexShrink: 0, padding: '6px 10px', cursor: 'pointer',
