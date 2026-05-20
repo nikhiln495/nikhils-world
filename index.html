@@ -641,6 +641,22 @@ function TodayStrip({ data, onPendingClick, theme = 'dark' }) {
             background: 'transparent', border: `1px solid ${isDark ? '#4ade80' : '#3d5a3d'}`,
             color: isDark ? '#4ade80' : '#3d5a3d', borderRadius: 4, cursor: 'pointer'
           }}>📋 Copy to Claude</button>
+          <button onClick={() => {
+            const brief = [
+              `Morning briefing — ${new Date().toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'})}`,
+              `\nPlease pull: (1) my open Kaizen tasks + anything flagged stuck, (2) Apple Health last 7 days (steps, RHR, sleep, HRV), (3) today's calendar, (4) latest Fireflies transcript if there's a session from the last 3 days.`,
+              `\nDeliver as:`,
+              `• Today's one non-negotiable task`,
+              `• Body read from health data (1-2 sentences)`,
+              `• One-line session insight if applicable`,
+              `• One thing parked that might need a nudge today`
+            ].join('\n');
+            try { navigator.clipboard.writeText(brief); } catch(e) {}
+          }} style={{
+            fontSize: 10, padding: '3px 8px',
+            background: 'transparent', border: `1px solid ${isDark ? '#60a5fa' : '#3b82f6'}`,
+            color: isDark ? '#60a5fa' : '#3b82f6', borderRadius: 4, cursor: 'pointer'
+          }}>🌅 Morning briefing</button>
         </div>
       )}
     </div>
@@ -6483,22 +6499,53 @@ function CreativeRoulette() {
                     />
                   ))}
                 </div>
+                {/* Brighton unrecorded: structured prompts instead of transcript link */}
+                {(() => {
+                  let meta = {};
+                  try { meta = JSON.parse(catchFileLink); } catch(e) {}
+                  const isBrighton = (meta._sessionType||'').toLowerCase().includes('brighton');
+                  if (isBrighton) return (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      <div style={{ fontSize: 10, color: "#a78bfa", textTransform: "uppercase", letterSpacing: 1, marginBottom: 2 }}>Brighton capture (unrecorded)</div>
+                      {[
+                        { key: "_b_body_start_end", placeholder: "Body: start vs end of session (sensations, shifts)" },
+                        { key: "_b_moment_shift", placeholder: "Moment of shift — what happened right before it?" },
+                        { key: "_b_brighton_named", placeholder: "What did Brighton name or reflect back?" },
+                        { key: "_b_body_wants", placeholder: "What does your body want to do with this? (move, rest, shake…)" },
+                        { key: "_assignment", placeholder: "Practice or assignment for this week" },
+                      ].map(({ key, placeholder }) => (
+                        <input key={key} placeholder={placeholder}
+                          value={meta[key]||''}
+                          onChange={e => {
+                            let m2 = {};
+                            try { m2 = JSON.parse(catchFileLink); } catch(err) {}
+                            m2[key] = e.target.value;
+                            setCatchFileLink(JSON.stringify(m2));
+                          }}
+                          style={{ padding: "8px 10px", fontSize: 11, background: "#0f0f0f", border: "1px solid #2d1f5e", borderRadius: 6, color: "#c4b5fd", fontFamily: "inherit" }}
+                        />
+                      ))}
+                    </div>
+                  );
+                  return (
+                    <input placeholder="📎 Fireflies transcript link or session recording URL"
+                      value={meta['_transcriptLink']||''}
+                      onChange={e => {
+                        let m2 = {};
+                        try { m2 = JSON.parse(catchFileLink); } catch(err) {}
+                        m2['_transcriptLink'] = e.target.value;
+                        setCatchFileLink(JSON.stringify(m2));
+                      }}
+                      style={{ padding: "8px 10px", fontSize: 11, background: "#0f0f0f", border: "1px solid #333", borderRadius: 6, color: "#aaa", fontFamily: "inherit" }}
+                    />
+                  );
+                })()}
                 <input placeholder="Shobha/Brighton assignment from this session (if any)"
-                  value={(catchFileLink.startsWith('{') ? (JSON.parse(catchFileLink)['_assignment']||'') : '')}
+                  value={(catchFileLink.startsWith('{') ? (() => { try { return JSON.parse(catchFileLink)['_assignment']||''; } catch(e) { return ''; }})() : '')}
                   onChange={e => {
                     let meta = {};
                     try { meta = JSON.parse(catchFileLink); } catch(err) {}
                     meta['_assignment'] = e.target.value;
-                    setCatchFileLink(JSON.stringify(meta));
-                  }}
-                  style={{ padding: "8px 10px", fontSize: 11, background: "#0f0f0f", border: "1px solid #333", borderRadius: 6, color: "#aaa", fontFamily: "inherit" }}
-                />
-                <input placeholder="📎 Fireflies transcript link or session recording URL"
-                  value={(catchFileLink.startsWith('{') ? (JSON.parse(catchFileLink)['_transcriptLink']||'') : '')}
-                  onChange={e => {
-                    let meta = {};
-                    try { meta = JSON.parse(catchFileLink); } catch(err) {}
-                    meta['_transcriptLink'] = e.target.value;
                     setCatchFileLink(JSON.stringify(meta));
                   }}
                   style={{ padding: "8px 10px", fontSize: 11, background: "#0f0f0f", border: "1px solid #333", borderRadius: 6, color: "#aaa", fontFamily: "inherit" }}
