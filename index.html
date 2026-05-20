@@ -6965,7 +6965,7 @@ function App() {
   // ── GOOGLE DRIVE OAUTH CLIENT ID ──────────────────────────────
   // Replace this with your OAuth 2.0 Web Client ID from GCP Console
   const DRIVE_CLIENT_ID = '55888993304-0c622stmifqg6k77goim4rn4bkhi3r1s.apps.googleusercontent.com';
-  const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+  const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
   const DRIVE_FOLDER_NAME = "Nikhil's World Backups";
 
   // ── TOKEN PERSISTENCE ─────────────────────────────────────────
@@ -7077,6 +7077,21 @@ function App() {
         }
 
         setStatus('Uploading to Drive...');
+
+        // Dedup: delete any existing file with the same name in this folder
+        // so each day keeps exactly one backup (the latest).
+        try {
+          const dupQ = `name='${filename}' and '${folderId}' in parents and trashed=false`;
+          const dupSearch = await fetch(
+            `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(dupQ)}&fields=files(id)`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          ).then(r => r.json());
+          for (const dup of (dupSearch.files || [])) {
+            await fetch(`https://www.googleapis.com/drive/v3/files/${dup.id}`,
+              { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
+            ).catch(() => {});
+          }
+        } catch(e) { /* best-effort */ }
 
         // Upload file — manually construct multipart body to avoid Safari's
         // broken FormData+Blob+fetch behavior (silently mangles the boundary).
