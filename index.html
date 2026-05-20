@@ -1388,7 +1388,7 @@ function TransitionTimer() {
   const [to,    setTo]    = useState('');
   const [startAt, setStartAt] = useState(null);
   const [elapsed, setElapsed] = useState(0);
-  const [history, setHistory] = useState([]);
+  const [allEntries, setAllEntries] = useState([]); // EVERYTHING, persisted
   const [showHistory, setShowHistory] = useState(false);
 
   useEffect(() => {
@@ -1397,8 +1397,7 @@ function TransitionTimer() {
         const r = await window.storage.get('transition-log');
         if (r?.value) {
           const parsed = JSON.parse(r.value);
-          const cutoff = Date.now() - 7*24*60*60*1000;
-          setHistory(parsed.filter(e=>new Date(e.at)>=cutoff));
+          if (Array.isArray(parsed)) setAllEntries(parsed);
         }
       } catch(e) {}
     })();
@@ -1420,17 +1419,20 @@ function TransitionTimer() {
   const arrive = async () => {
     const secs = Math.floor((Date.now()-startAt)/1000);
     const entry = { from: from.trim(), to: to.trim(), secs, at: new Date().toISOString() };
-    const newHistory = [entry, ...history].slice(0,21); // 3-week max
-    setHistory(newHistory);
+    const next = [entry, ...allEntries].slice(0, 500); // 500-entry cap (~1 year of light use)
+    setAllEntries(next);
     setPhase('done');
     setElapsed(secs);
-    try { await window.storage.set('transition-log', JSON.stringify(newHistory)); } catch(e) {}
+    try { await window.storage.set('transition-log', JSON.stringify(next)); } catch(e) {}
   };
 
   const reset = () => { setPhase('idle'); setFrom(''); setTo(''); setElapsed(0); };
 
-  const median = history.length
-    ? [...history].sort((a,b)=>a.secs-b.secs)[Math.floor(history.length/2)].secs
+  // 7-day window for median calc only — but storage keeps everything
+  const cutoff = Date.now() - 7*24*60*60*1000;
+  const recent7d = allEntries.filter(e => new Date(e.at).getTime() >= cutoff);
+  const median = recent7d.length
+    ? [...recent7d].sort((a,b)=>a.secs-b.secs)[Math.floor(recent7d.length/2)].secs
     : null;
 
   const fmt = s => s < 60 ? `${s}s` : `${Math.floor(s/60)}m ${s%60}s`;
@@ -1453,9 +1455,9 @@ function TransitionTimer() {
           <input value={to} onChange={e=>setTo(e.target.value)} placeholder="To…"
             style={{flex:'1 1 80px',padding:'6px 8px',fontSize:12,border:'1px solid #e8e0d0',borderRadius:8,minWidth:60}}/>
           <button onClick={start} disabled={!from.trim()||!to.trim()} style={{...solidBtn,borderRadius:8,padding:'6px 12px',opacity:(from.trim()&&to.trim())?1:0.4}}>Go</button>
-          {history.length > 0 && (
+          {allEntries.length > 0 && (
             <button onClick={()=>setShowHistory(!showHistory)} style={{...ghostBtn,borderRadius:8,padding:'5px 10px',fontSize:11}}>
-              {showHistory ? 'Hide' : 'History'}
+              {showHistory ? 'Hide' : `History (${allEntries.length})`}
             </button>
           )}
         </div>
@@ -1477,14 +1479,24 @@ function TransitionTimer() {
           <button onClick={reset} style={{...ghostBtn,borderRadius:8,padding:'5px 10px',fontSize:11}}>New</button>
         </div>
       )}
-      {showHistory && phase==='idle' && history.length > 0 && (
+      {showHistory && phase==='idle' && allEntries.length > 0 && (
         <div style={{marginTop:10,borderTop:'1px solid #e8e0d0',paddingTop:10}}>
-          {history.slice(0,7).map((e,i)=>(
-            <div key={i} style={{display:'flex',justifyContent:'space-between',fontSize:11,color:'#6b6660',marginBottom:3}}>
-              <span>{e.from} → {e.to}</span>
-              <span className="fm">{fmt(e.secs)}</span>
+          {allEntries.slice(0,15).map((e,i)=>{
+            const d = new Date(e.at);
+            const dateStr = d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+            return (
+              <div key={i} style={{display:'flex',justifyContent:'space-between',fontSize:11,color:'#6b6660',marginBottom:3,gap:8}}>
+                <span style={{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{e.from} → {e.to}</span>
+                <span style={{fontSize:9,color:'#9ca3af'}}>{dateStr}</span>
+                <span className="fm" style={{minWidth:45,textAlign:'right'}}>{fmt(e.secs)}</span>
+              </div>
+            );
+          })}
+          {allEntries.length > 15 && (
+            <div style={{fontSize:10,color:'#9ca3af',textAlign:'center',marginTop:6}}>
+              + {allEntries.length - 15} more (showing last 15)
             </div>
-          ))}
+          )}
         </div>
       )}
     </div>
@@ -2099,6 +2111,7 @@ function TrajectoryView({ logs, setLogs, tasks }) {
   const [bigPicture,   setBigPicture]   = useState('');
   const [catchEntries, setCatchEntries] = useState([]);
   const [tagTarget,    setTagTarget]    = useState(null); // {date, id}
+  const [focusDomain,  setFocusDomain]  = useState(null); // domain id to drill into
   const [bpSaved,      setBpSaved]      = useState(false);
   const [tClip,        setTClip]        = useState('idle');
 
@@ -2208,13 +2221,20 @@ function TrajectoryView({ logs, setLogs, tasks }) {
 
       {/* Domain grid */}
       <div>
-        <div style={{ ...sectionLabel, paddingLeft:4, marginBottom:10 }}>Progress by domain — this week</div>
+        <div style={{ ...sectionLabel, paddingLeft:4, marginBottom:10 }}>Progress by domain — this week (tap a card to drill in)</div>
         <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:10 }}>
           {DOMAINS.map(d => {
             const c = domainCounts[d.id];
             const pct = c.total > 0 ? Math.min(c.week / Math.max(...Object.values(domainCounts).map(x=>x.week||1)), 1) : 0;
+            const isFocus = focusDomain === d.id;
             return (
-              <div key={d.id} className="card" style={{ padding:'14px 12px', position:'relative', overflow:'hidden' }}>
+              <div key={d.id} className="card"
+                onClick={() => setFocusDomain(isFocus ? null : d.id)}
+                style={{
+                  padding:'14px 12px', position:'relative', overflow:'hidden', cursor:'pointer',
+                  border: isFocus ? `2px solid ${d.color}` : '1px solid #e8e0d0',
+                  background: isFocus ? d.color+'11' : '#fffdf9'
+                }}>
                 <div style={{ position:'absolute', bottom:0, left:0, height:3, width:`${pct*100}%`, background:d.color, borderRadius:'0 2px 0 0', transition:'width 0.4s' }}/>
                 <div style={{ fontSize:18, marginBottom:4 }}>{d.icon}</div>
                 <div style={{ fontSize:10, color:'#6b6660', marginBottom:6, fontWeight:600 }}>{d.label}</div>
@@ -2227,6 +2247,33 @@ function TrajectoryView({ logs, setLogs, tasks }) {
             );
           })}
         </div>
+        {/* Drill-down list */}
+        {focusDomain && (() => {
+          const d = DOMAINS.find(x => x.id === focusDomain);
+          const wins = allWins.filter(w => w.domain === focusDomain).sort((a,b) => (b.date||'').localeCompare(a.date||''));
+          return (
+            <div className="card" style={{ marginTop:10, padding:14, borderLeft:`3px solid ${d.color}` }}>
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+                <span style={{ fontSize:11, color:d.color, fontWeight:700, textTransform:'uppercase', letterSpacing:1 }}>
+                  {d.icon} {d.label} — {wins.length} wins
+                </span>
+                <button onClick={() => setFocusDomain(null)} style={{ background:'none', border:'none', cursor:'pointer', color:'#6b6660', fontSize:11 }}>close ×</button>
+              </div>
+              {wins.length === 0 && (
+                <div style={{ fontSize:12, color:'#9ca3af', fontStyle:'italic' }}>No wins tagged in this domain yet. Tag wins in Today view or below in untagged.</div>
+              )}
+              {wins.slice(0,30).map(w => (
+                <div key={w.id} style={{ display:'flex', alignItems:'flex-start', gap:8, padding:'5px 0', borderBottom:'1px solid #f3f4f6' }}>
+                  <span style={{ fontSize:12, color:'#4b5563', flex:1, lineHeight:1.4 }}>{w.text}</span>
+                  <span style={{ fontSize:10, color:'#9ca3af', whiteSpace:'nowrap' }}>{w.date?.slice(5)}</span>
+                </div>
+              ))}
+              {wins.length > 30 && (
+                <div style={{ fontSize:10, color:'#9ca3af', textAlign:'center', marginTop:6 }}>+{wins.length - 30} more</div>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Untagged wins — prompt to tag */}
