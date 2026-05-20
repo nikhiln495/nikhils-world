@@ -2107,6 +2107,317 @@ const DOMAINS = [
 // TRAJECTORY VIEW
 // ─────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────
+// SESSIONS PANEL — Fireflies sync + manual paste + foci analysis
+// ─────────────────────────────────────────────────────
+
+const SESSIONS_KEY = 'session-summaries';
+const FOCI_KEY     = 'trajectory-foci';
+
+function SessionsPanel() {
+  const [summaries,   setSummaries]   = useState([]);
+  const [foci,        setFoci]        = useState(null);
+  const [syncing,     setSyncing]     = useState(false);
+  const [analyzing,   setAnalyzing]   = useState(false);
+  const [syncStatus,  setSyncStatus]  = useState('');
+  const [pasteOpen,   setPasteOpen]   = useState(false);
+  const [pasteText,   setPasteText]   = useState('');
+  const [pasteMeta,   setPasteMeta]   = useState({ type: 'Brighton', date: new Date().toISOString().slice(0,10) });
+  const [expanded,    setExpanded]    = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const s = await window.storage.get(SESSIONS_KEY);
+        if (s?.value) setSummaries(JSON.parse(s.value));
+      } catch(e) {}
+      try {
+        const f = await window.storage.get(FOCI_KEY);
+        if (f?.value) setFoci(JSON.parse(f.value));
+      } catch(e) {}
+    })();
+  }, []);
+
+  const saveSummaries = async (next) => {
+    setSummaries(next);
+    try { await window.storage.set(SESSIONS_KEY, JSON.stringify(next)); } catch(e) {}
+  };
+
+  // ── Fireflies sync via Claude API + Fireflies MCP ──
+  const syncFireflies = async () => {
+    setSyncing(true);
+    setSyncStatus('Connecting to Fireflies…');
+    try {
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 4000,
+          system: `You are a session summarizer. Use the Fireflies MCP to fetch recent transcripts.
+Search for transcripts mentioning "Shobha", "Brighton", or "therapy" in the last 60 days.
+For each found transcript, extract and return ONLY a JSON array (no other text) with objects:
+{
+  "id": "<fireflies_transcript_id>",
+  "date": "<YYYY-MM-DD>",
+  "type": "<Shobha|Brighton|other>",
+  "title": "<meeting title or inferred>",
+  "duration_min": <number or null>,
+  "key_themes": ["<theme1>","<theme2>","<theme3>"],
+  "body_sensations": "<any noted body/somatic observations>",
+  "key_insight": "<single most important insight from session>",
+  "assignment": "<any homework or practice assigned>",
+  "notable_quotes": ["<short direct quote if present>"]
+}
+Return maximum 15 most recent sessions. Return ONLY the JSON array, nothing else.`,
+          messages: [{ role: 'user', content: 'Fetch my recent therapy and somatic session transcripts from Fireflies and summarize them.' }],
+          mcp_servers: [{ type: 'url', url: 'https://api.fireflies.ai/mcp', name: 'fireflies' }]
+        })
+      });
+      const data = await resp.json();
+      // Extract text from response
+      const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+      // Parse JSON from response
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) throw new Error('No session data returned — check Fireflies connection');
+      const fetched = JSON.parse(jsonMatch[0]);
+      // Merge with existing, deduplicate by id
+      const existingIds = new Set(summaries.map(s => s.id));
+      const newOnes = fetched.filter(s => !existingIds.has(s.id));
+      const merged = [...newOnes, ...summaries].slice(0, 50);
+      await saveSummaries(merged);
+      setSyncStatus(`✅ Synced ${newOnes.length} new session(s). ${merged.length} total stored.`);
+    } catch(e) {
+      setSyncStatus(`❌ ${e.message}`);
+    }
+    setSyncing(false);
+    setTimeout(() => setSyncStatus(''), 6000);
+  };
+
+  // ── Manual paste (unrecorded Brighton or notes) ──
+  const addManual = async () => {
+    if (!pasteText.trim()) return;
+    const entry = {
+      id: `manual-${Date.now()}`,
+      date: pasteMeta.date,
+      type: pasteMeta.type,
+      title: `${pasteMeta.type} session — ${pasteMeta.date}`,
+      key_themes: [],
+      body_sensations: '',
+      key_insight: pasteText.slice(0, 300),
+      assignment: '',
+      notable_quotes: [],
+      raw_notes: pasteText,
+      manual: true,
+    };
+    const next = [entry, ...summaries].slice(0, 50);
+    await saveSummaries(next);
+    setPasteText('');
+    setPasteOpen(false);
+    setSyncStatus('✅ Session notes saved.');
+    setTimeout(() => setSyncStatus(''), 3000);
+  };
+
+  // ── Multi-session foci analysis ──
+  const analyzeFoci = async () => {
+    if (summaries.length === 0) { setSyncStatus('No sessions stored yet — sync or add one first.'); return; }
+    setAnalyzing(true);
+    setSyncStatus('Analyzing patterns across sessions…');
+    try {
+      const sessionDump = summaries.slice(0, 20).map(s => `
+[${s.date} — ${s.type}]
+Themes: ${(s.key_themes||[]).join(', ') || 'none noted'}
+Key insight: ${s.key_insight || ''}
+Assignment: ${s.assignment || 'none'}
+Body: ${s.body_sensations || ''}
+${s.raw_notes ? 'Notes: ' + s.raw_notes.slice(0, 400) : ''}`).join('\n---\n');
+
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 1500,
+          system: `You are analyzing therapy and somatic sessions for a person named Nikhil.
+Return ONLY a JSON object (no other text):
+{
+  "foci": [
+    {
+      "theme": "<short name, max 4 words>",
+      "description": "<1-2 sentence synthesis of what's being worked on>",
+      "domain": "<physical|mental|relational|creative|professional|learning>",
+      "sessions_count": <number>,
+      "trajectory": "<emerging|active|deepening|integrating>",
+      "latest_assignment": "<most recent practice related to this theme>"
+    }
+  ],
+  "cross_pattern": "<2-3 sentences: what pattern appears across BOTH Shobha and Brighton sessions>",
+  "nervous_system_note": "<1 sentence about what the somatic data suggests>",
+  "next_edge": "<single most important thing to work toward based on session arc>",
+  "updated_at": "<today's date>"
+}
+Return 3-5 foci. Focus on what's genuinely active, not historical.`,
+          messages: [{ role: 'user', content: `Here are my recent sessions:\n\n${sessionDump}\n\nAnalyze my current foci.` }]
+        })
+      });
+      const data = await resp.json();
+      const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error('Analysis failed — no JSON returned');
+      const result = JSON.parse(jsonMatch[0]);
+      result.updated_at = new Date().toISOString().slice(0,10);
+      setFoci(result);
+      try { await window.storage.set(FOCI_KEY, JSON.stringify(result)); } catch(e) {}
+      setSyncStatus(`✅ Foci updated from ${summaries.length} sessions.`);
+    } catch(e) {
+      setSyncStatus(`❌ ${e.message}`);
+    }
+    setAnalyzing(false);
+    setTimeout(() => setSyncStatus(''), 5000);
+  };
+
+  const TRAJ_COLORS = { emerging:'#60a5fa', active:'#f59e0b', deepening:'#a78bfa', integrating:'#22c55e' };
+  const sorted = [...summaries].sort((a,b) => (b.date||'').localeCompare(a.date||''));
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+      {/* Current foci */}
+      {foci && (
+        <div>
+          <div style={{ ...sectionLabel, paddingLeft:4, marginBottom:8, display:'flex', justifyContent:'space-between' }}>
+            <span>Current foci</span>
+            <span style={{ fontSize:9, color:'#9ca3af', fontWeight:400 }}>updated {foci.updated_at}</span>
+          </div>
+          {(foci.foci||[]).map((f,i) => {
+            const dom = DOMAINS.find(d => d.id === f.domain);
+            const tColor = TRAJ_COLORS[f.trajectory] || '#9ca3af';
+            return (
+              <div key={i} className="card" style={{ padding:14, marginBottom:8, borderLeft:`3px solid ${tColor}` }}>
+                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:4 }}>
+                  <span style={{ fontSize:13, fontWeight:700, color:'#1a1814' }}>{f.theme}</span>
+                  <div style={{ display:'flex', gap:4 }}>
+                    {dom && <span title={dom.label} style={{ fontSize:12 }}>{dom.icon}</span>}
+                    <span style={{ fontSize:9, padding:'2px 6px', borderRadius:99, background:tColor+'22', color:tColor, fontWeight:700 }}>{f.trajectory}</span>
+                  </div>
+                </div>
+                <div style={{ fontSize:12, color:'#4b5563', lineHeight:1.6, marginBottom:f.latest_assignment ? 6 : 0 }}>{f.description}</div>
+                {f.latest_assignment && (
+                  <div style={{ fontSize:11, background:'#fef9c3', borderRadius:6, padding:'5px 9px', lineHeight:1.5 }}>
+                    📌 {f.latest_assignment}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {foci.cross_pattern && (
+            <div className="card" style={{ padding:12, background:'#f5f3ff', borderLeft:'3px solid #a78bfa', marginBottom:8 }}>
+              <div style={{ fontSize:10, color:'#7c3aed', fontWeight:700, marginBottom:4, textTransform:'uppercase', letterSpacing:1 }}>Cross-session pattern</div>
+              <div style={{ fontSize:12, color:'#4b5563', lineHeight:1.6 }}>{foci.cross_pattern}</div>
+            </div>
+          )}
+          {foci.next_edge && (
+            <div className="card" style={{ padding:12, background:'#fffbeb', borderLeft:'3px solid #f59e0b', marginBottom:8 }}>
+              <div style={{ fontSize:10, color:'#b45309', fontWeight:700, marginBottom:4, textTransform:'uppercase', letterSpacing:1 }}>Next edge</div>
+              <div style={{ fontSize:12, color:'#4b5563', lineHeight:1.6 }}>{foci.next_edge}</div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Action buttons */}
+      <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+        <button onClick={syncFireflies} disabled={syncing} style={{
+          ...solidBtn, padding:'8px 14px', borderRadius:8, fontSize:12, opacity: syncing ? 0.6 : 1
+        }}>
+          {syncing ? '⏳ Syncing…' : '🔄 Sync Fireflies'}
+        </button>
+        <button onClick={() => setPasteOpen(!pasteOpen)} style={{
+          ...ghostBtn, padding:'8px 14px', borderRadius:8, fontSize:12
+        }}>
+          ✏️ Add manually
+        </button>
+        <button onClick={analyzeFoci} disabled={analyzing || summaries.length === 0} style={{
+          ...solidBtn, padding:'8px 14px', borderRadius:8, fontSize:12,
+          background: '#7c3aed', opacity: (analyzing || summaries.length === 0) ? 0.5 : 1
+        }}>
+          {analyzing ? '🧠 Analyzing…' : `🧠 Update foci (${summaries.length} sessions)`}
+        </button>
+      </div>
+
+      {syncStatus && (
+        <div style={{ fontSize:11, padding:'8px 12px', borderRadius:6, background: syncStatus.startsWith('✅') ? '#f0fdf4' : syncStatus.startsWith('❌') ? '#fef2f2' : '#fefce8', color: syncStatus.startsWith('✅') ? '#166534' : syncStatus.startsWith('❌') ? '#991b1b' : '#854d0e' }}>
+          {syncStatus}
+        </div>
+      )}
+
+      {/* Manual paste form */}
+      {pasteOpen && (
+        <div className="card" style={{ padding:14 }}>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:8 }}>
+            <select value={pasteMeta.type} onChange={e => setPasteMeta(m => ({...m, type: e.target.value}))} style={{...selectStyle}}>
+              {['Brighton','Shobha','Self-reflection','Other'].map(t => <option key={t}>{t}</option>)}
+            </select>
+            <input type="date" value={pasteMeta.date} onChange={e => setPasteMeta(m => ({...m, date: e.target.value}))}
+              style={{ padding:'8px 10px', fontSize:12, border:'1px solid #e8e0d0', borderRadius:8 }}/>
+          </div>
+          <textarea
+            value={pasteText}
+            onChange={e => setPasteText(e.target.value)}
+            placeholder="Paste transcript, notes, or your own observations. Anything — structured or stream of consciousness. The analysis handles it."
+            rows={5}
+            style={{ ...textArea, marginBottom:8 }}
+          />
+          <div style={{ display:'flex', gap:8 }}>
+            <button onClick={addManual} style={{...solidBtn, padding:'7px 14px', borderRadius:8, flex:1}}>Save session</button>
+            <button onClick={() => setPasteOpen(false)} style={{...ghostBtn, padding:'7px 12px', borderRadius:8}}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Session history */}
+      {sorted.length > 0 && (
+        <div>
+          <div style={{ ...sectionLabel, paddingLeft:4, marginBottom:8 }}>
+            Stored sessions ({sorted.length})
+          </div>
+          {sorted.map(s => (
+            <div key={s.id} className="card" style={{ padding:12, marginBottom:6 }}>
+              <div onClick={() => setExpanded(expanded === s.id ? null : s.id)}
+                style={{ display:'flex', justifyContent:'space-between', alignItems:'center', cursor:'pointer' }}>
+                <div>
+                  <span style={{ fontSize:12, fontWeight:600, color: s.type==='Brighton' ? '#7c3aed' : s.type==='Shobha' ? '#2563eb' : '#1a1814' }}>
+                    {s.type==='Brighton' ? '🧘' : s.type==='Shobha' ? '💬' : '📝'} {s.title || s.type}
+                  </span>
+                  {s.manual && <span style={{ fontSize:9, color:'#9ca3af', marginLeft:6 }}>manual</span>}
+                </div>
+                <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+                  <span style={{ fontSize:10, color:'#9ca3af' }}>{s.date}</span>
+                  <span style={{ fontSize:10, color:'#9ca3af' }}>{expanded===s.id ? '▲' : '▼'}</span>
+                </div>
+              </div>
+              {expanded === s.id && (
+                <div style={{ marginTop:10, paddingTop:10, borderTop:'1px solid #f3f4f6' }}>
+                  {s.key_insight && <div style={{ fontSize:12, color:'#4b5563', marginBottom:6, lineHeight:1.6 }}><strong>Insight:</strong> {s.key_insight}</div>}
+                  {s.key_themes?.length > 0 && <div style={{ fontSize:11, color:'#6b6660', marginBottom:4 }}><strong>Themes:</strong> {s.key_themes.join(' · ')}</div>}
+                  {s.body_sensations && <div style={{ fontSize:11, color:'#6b6660', marginBottom:4 }}><strong>Body:</strong> {s.body_sensations}</div>}
+                  {s.assignment && <div style={{ fontSize:11, background:'#fef9c3', padding:'5px 9px', borderRadius:6, marginBottom:4 }}>📌 {s.assignment}</div>}
+                  {s.raw_notes && <div style={{ fontSize:11, color:'#9ca3af', fontStyle:'italic', marginTop:6, lineHeight:1.5 }}>{s.raw_notes.slice(0,400)}{s.raw_notes.length>400?'…':''}</div>}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {summaries.length === 0 && !foci && (
+        <div style={{ textAlign:'center', padding:'30px 20px', color:'#9ca3af', fontSize:12, fontStyle:'italic' }}>
+          No sessions stored yet. Hit "Sync Fireflies" to pull your Shobha and Brighton sessions automatically, or paste notes manually for unrecorded Brighton sessions.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TrajectoryView({ logs, setLogs, tasks }) {
   const [bigPicture,   setBigPicture]   = useState('');
   const [catchEntries, setCatchEntries] = useState([]);
@@ -2114,6 +2425,7 @@ function TrajectoryView({ logs, setLogs, tasks }) {
   const [focusDomain,  setFocusDomain]  = useState(null); // domain id to drill into
   const [bpSaved,      setBpSaved]      = useState(false);
   const [tClip,        setTClip]        = useState('idle');
+  const [arcTab,       setArcTab]       = useState('wins'); // wins | sessions
 
   // ── Load big-picture text + catch entries ──────────
   useEffect(() => {
@@ -2202,6 +2514,21 @@ function TrajectoryView({ logs, setLogs, tasks }) {
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:18 }}>
+
+      {/* Sub-tab switcher */}
+      <div style={{ display:'flex', gap:0, border:'1px solid #e8e0d0', borderRadius:10, overflow:'hidden', flexShrink:0 }}>
+        {[['wins','🏅 Wins & Direction'],['sessions','🧘 Sessions & Foci']].map(([id,label])=>(
+          <button key={id} onClick={()=>setArcTab(id)} style={{
+            flex:1, padding:'9px 0', fontSize:12, fontWeight:600, cursor:'pointer', border:'none',
+            background: arcTab===id ? '#3d5a3d' : 'transparent',
+            color: arcTab===id ? '#fff' : '#6b6660'
+          }}>{label}</button>
+        ))}
+      </div>
+
+      {arcTab === 'sessions' && <SessionsPanel />}
+
+      {arcTab === 'wins' && <>
 
       {/* Big picture */}
       <div className="card" style={{ padding:20 }}>
@@ -2448,6 +2775,7 @@ function TrajectoryView({ logs, setLogs, tasks }) {
           No wins logged yet. Start tagging your ta-da items with a domain in the Today view — the picture builds from there.
         </div>
       )}
+      </>}
     </div>
   );
 }
