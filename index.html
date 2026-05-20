@@ -7260,7 +7260,10 @@ function App() {
                 let paste = extractJSON(raw);
                 // Support backup wrapper formats
                 if (paste.data && paste.data['nikhil-food-log-v1']) paste = JSON.parse(paste.data['nikhil-food-log-v1']);
-                else if (paste['nikhil-food-log-v1']) paste = paste['nikhil-food-log-v1'];
+                else if (paste['nikhil-food-log-v1']) {
+                  const v = paste['nikhil-food-log-v1'];
+                  paste = typeof v === 'string' ? JSON.parse(v) : v;
+                }
                 // Validate: should have date keys like "2026-..."
                 const dateKeys = Object.keys(paste).filter(k => /^\d{4}-\d{2}-\d{2}$/.test(k));
                 if (dateKeys.length === 0) throw new Error('No date entries found (expected keys like "2026-04-27")');
