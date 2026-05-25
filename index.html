@@ -9903,7 +9903,7 @@ Rules:
       const res = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
-          'x-api-key': (window.ANTHROPIC_KEY || ''),
+          'x-api-key': (window.__cfg && window.__cfg.anthropicKey) || '',
           'anthropic-version': '2023-06-01',
           'anthropic-dangerous-direct-browser-access': 'true',
           'content-type': 'application/json',
