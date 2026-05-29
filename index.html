@@ -7,7 +7,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=JetBrains+Mono:wght@400;700&family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,600&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; overflow: hidden; background: #0f0f0f; }
+    html, body { height: 100%; overflow: hidden; background: #0a0a0a; }
     #root { height: 100%; }
 
     :root { --accent: #a78bfa; }
@@ -513,7 +513,7 @@ function TodayStrip({ data, onPendingClick, theme = 'dark' }) {
   const t = data.today;
   const isDark = theme === 'dark';
   const colors = isDark
-    ? { bg:'#1a1d27', border:'#2a2e3d', text:'#e4e4e7', muted:'#9ca3af', accent:'#60a5fa' }
+    ? { bg:'#0a0a0a', border:'#1f1f1f', text:'#fafafa', muted:'rgba(255,255,255,0.5)', accent:'#a78bfa' }
     : { bg:'#fffdf9', border:'#e8e0d0', text:'#1a1814', muted:'#6b6660', accent:'#3d5a3d' };
 
   // ── Body-needs state ────────────────────────────────────────
@@ -1161,12 +1161,12 @@ function KaizenApp() {
             proteinTarget: 130,
             steps: glance?.today?.steps || 0,
             hrv: glance?.today?.hrv || 0,
-            hrvHistory: glance?.today?.hrv ? [glance.today.hrv] : [0, 0],
+            hrvHistory: glance?.today?.hrv ? [glance.today.hrv, glance.today.hrv] : [0, 0],
           }} />
         )}
         {window.ProjectStrip && (() => {
-          const mapped = projects.filter(p => p.status === 'active').slice(0, 4).map(p => {
-            const pt = tasks.filter(t => t.projectId === p.id);
+          const mapped = (projects || []).filter(p => p.status === 'active').slice(0, 4).map(p => {
+            const pt = (tasks || []).filter(t => t.projectId === p.id);
             const done = pt.filter(t => t.status === 'done').length;
             const pct = pt.length ? Math.round(done/pt.length*100) : 0;
             const next = pt.find(t => t.status !== 'done');
@@ -1176,7 +1176,7 @@ function KaizenApp() {
         })()}
         {window.TaskList && (
           <window.TaskList
-            tasks={tasks.filter(t => t.status !== 'done').slice(0, 7).map(t => ({
+            tasks={(tasks || []).filter(t => t.status !== 'done').slice(0, 7).map(t => ({
               id: t.id, title: t.name, sprint: t.sprint || 'S3', estimatedMin: t.estimatedTime || t.est || 15, done: false
             }))}
             onToggle={(id) => {
@@ -7595,7 +7595,7 @@ function ReductionSheet({ open, onClose, reduction }) {
         <div style={{ fontFamily: '"Space Mono", monospace', fontSize: 10, letterSpacing: 2.4,
           color: 'rgba(255,255,255,0.42)', marginBottom: 4 }}>KAIZEN REDUCTION · {reduction.date}</div>
         <div style={{ fontFamily: '"Space Mono", monospace', fontSize: 16, color: '#fafafa',
-          lineHeight: 1.4, marginBottom: 18 }}>{reduction.morningSeed}</div>
+          lineHeight: 1.4, marginBottom: 18 }}>{reduction?.morningSeed}</div>
         <div style={{ fontFamily: '"Space Mono", monospace', fontSize: 10, letterSpacing: 1.5,
           color: 'rgba(255,255,255,0.42)', marginBottom: 8, textTransform: 'uppercase' }}>Arc note</div>
         <div style={{ fontFamily: '"Space Mono", monospace', fontSize: 12.5, color: 'rgba(255,255,255,0.78)',
@@ -7848,13 +7848,15 @@ function HRVCard({ value, history }) {
 }
 
 function StatsCockpit({ stats }) {
+  const s = stats || {};
+  const hrvHistory = (Array.isArray(s.hrvHistory) && s.hrvHistory.length >= 2) ? s.hrvHistory : [0, 0];
   return (
     <div style={{
       padding: '8px 16px 4px', display: 'flex', gap: 8,
     }}>
-      <ProteinCard value={stats.protein} target={stats.proteinTarget} />
-      <StepsCard value={stats.steps} />
-      <HRVCard value={stats.hrv} history={stats.hrvHistory} />
+      <ProteinCard value={s.protein ?? 0} target={s.proteinTarget ?? 130} />
+      <StepsCard value={s.steps ?? 0} />
+      <HRVCard value={s.hrv ?? 0} history={hrvHistory} />
     </div>
   );
 }
@@ -7947,6 +7949,7 @@ function ProjectCard({ project, index }) {
 }
 
 function ProjectStrip({ projects }) {
+  const list = projects || [];
   return (
     <div style={{ marginTop: 8 }}>
       <div style={{
@@ -7957,20 +7960,31 @@ function ProjectStrip({ projects }) {
           fontFamily: '"Space Mono", monospace', fontSize: 10,
           letterSpacing: 1.8, color: 'rgba(255,255,255,0.42)',
         }}>
-          ACTIVE PROJECTS · {projects.length}
+          ACTIVE PROJECTS · {list.length}
         </div>
+        {list.length > 0 && (
+          <div style={{
+            fontFamily: '"Space Mono", monospace', fontSize: 10,
+            color: 'rgba(255,255,255,0.32)',
+          }}>swipe →</div>
+        )}
+      </div>
+      {list.length === 0 ? (
         <div style={{
-          fontFamily: '"Space Mono", monospace', fontSize: 10,
-          color: 'rgba(255,255,255,0.32)',
-        }}>swipe →</div>
-      </div>
-      <div style={{
-        display: 'flex', gap: 10, overflowX: 'auto',
-        padding: '2px 16px 4px', scrollSnapType: 'x mandatory',
-        scrollbarWidth: 'none',
-      }} className="hidescroll">
-        {projects.map((p, i) => <ProjectCard key={p.id} project={p} index={i} />)}
-      </div>
+          margin: '0 16px', padding: '18px 16px',
+          background: '#111111', border: '1px dashed #1f1f1f', borderRadius: 14,
+          fontFamily: '"Space Mono", monospace', fontSize: 11.5,
+          color: 'rgba(255,255,255,0.4)', textAlign: 'center', lineHeight: 1.5,
+        }}>No active projects yet.<br/>Add one in the Kaizen tab.</div>
+      ) : (
+        <div style={{
+          display: 'flex', gap: 10, overflowX: 'auto',
+          padding: '2px 16px 4px', scrollSnapType: 'x mandatory',
+          scrollbarWidth: 'none',
+        }} className="hidescroll">
+          {list.map((p, i) => <ProjectCard key={p.id} project={p} index={i} />)}
+        </div>
+      )}
     </div>
   );
 }
@@ -8066,9 +8080,9 @@ function TaskRow({ task, onToggle }) {
 }
 
 function TaskList({ tasks, onToggle }) {
-  const open = tasks.filter(t => !t.done);
-  const done = tasks.filter(t => t.done);
-  const totalMin = open.reduce((s, t) => s + t.estimatedMin, 0);
+  const list = tasks || [];
+  const open = list.filter(t => !t.done);
+  const totalMin = open.reduce((s, t) => s + (t.estimatedMin || 0), 0);
 
   return (
     <div style={{ padding: '14px 16px 12px' }}>
@@ -8084,9 +8098,18 @@ function TaskList({ tasks, onToggle }) {
           color: 'rgba(255,255,255,0.32)',
         }}>~{totalMin}min</div>
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {tasks.map(t => <TaskRow key={t.id} task={t} onToggle={onToggle} />)}
-      </div>
+      {list.length === 0 ? (
+        <div style={{
+          padding: '18px 16px',
+          background: '#111111', border: '1px dashed #1f1f1f', borderRadius: 12,
+          fontFamily: '"Space Mono", monospace', fontSize: 11.5,
+          color: 'rgba(255,255,255,0.4)', textAlign: 'center', lineHeight: 1.5,
+        }}>Nothing queued for today.<br/>Add tasks in the Kaizen tab.</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {list.map(t => <TaskRow key={t.id} task={t} onToggle={onToggle} />)}
+        </div>
+      )}
     </div>
   );
 }
@@ -10249,7 +10272,7 @@ function RouletteTab() {
   const [mode, setMode] = React.useState('synthesized'); // 'synthesized' | 'random'
   const [idx, setIdx] = React.useState(0);
   const [spinning, setSpinning] = React.useState(false);
-  const [streak] = React.useState(11);
+  const [streak, setStreak] = React.useState(11);
   const [recent, setRecent] = React.useState([0]);
 
   const pool = mode === 'synthesized' ? PROMPTS : RANDOM_PROMPTS;
@@ -10259,6 +10282,19 @@ function RouletteTab() {
 
   // Reset index when switching modes
   React.useEffect(() => { setIdx(0); }, [mode]);
+
+  // Hydrate streak from existing storage (stored as a stringified integer like "11")
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get('creative-streak');
+        if (r?.value) {
+          const n = parseInt(r.value, 10);
+          if (!isNaN(n)) setStreak(n);
+        }
+      } catch (e) {}
+    })();
+  }, []);
 
   const spin = () => {
     if (spinning) return;
@@ -10276,7 +10312,31 @@ function RouletteTab() {
     }, 90);
   };
 
-  const handleCaught = () => {
+  const handleCaught = async () => {
+    if (spinning) return;
+    const caughtPrompt = current?.prompt || '';
+    // Append to creative-catch (newest first), matching the existing array format
+    try {
+      const c = await window.storage.get('creative-catch');
+      const parsed = c?.value ? JSON.parse(c.value) : [];
+      const existing = Array.isArray(parsed) ? parsed : [];
+      const entry = {
+        id: 'c_' + Math.random().toString(36).slice(2, 9),
+        date: new Date().toISOString(),
+        kind: 'text',
+        text: caughtPrompt,
+        fileLink: '',
+        blobURL: '',
+        hasAudio: false,
+      };
+      await window.storage.set('creative-catch', JSON.stringify([entry, ...existing]));
+    } catch (e) {}
+    // Increment streak and persist (stored as a stringified integer)
+    setStreak(s => {
+      const n = s + 1;
+      try { window.storage.set('creative-streak', n.toString()); } catch (e) {}
+      return n;
+    });
     spin();
   };
 
@@ -10604,6 +10664,7 @@ function MoreDrawer({ open, onClose, onSelect }) {
     { id: 'food',    label: '🍎 Fuel Log' },
     { id: 'health',  label: '💓 Vitals' },
     { id: 'pending', label: '📥 Pending' },
+    { id: 'catch',   label: '📮 Catch' },
     { id: 'system',  label: '⚙ System' },
     { id: 'reflect', label: '🪞 Reflect' },
   ];
@@ -10914,7 +10975,7 @@ function App() {
   });
 
   return (
-    <div style={{ background: '#0f0f0f', height: '100vh', width: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ background: '#0a0a0a', height: '100vh', width: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
 
       <div style={paneStyle('roulette')}>
         {window.RouletteTab ? <window.RouletteTab /> : <CreativeRoulette />}
@@ -11018,6 +11079,13 @@ function App() {
           </div>
         )}
       </div>
+
+      {activeTab === 'catch' && (
+        <div style={{ padding: 32, textAlign: 'center', color: 'rgba(255,255,255,0.4)',
+          fontFamily: '"Space Mono", monospace', fontSize: 12 }}>
+          Catch tab coming soon.<br/>Your creative-catch storage key is already active.
+        </div>
+      )}
 
       <MoreDrawer open={moreOpen} onClose={() => setMoreOpen(false)} onSelect={(id) => { setActiveTab(id); }} />
 
