@@ -1382,120 +1382,338 @@ function TodayView({ log, updateLog, tasks, allTasks, setTasks, projects }) {
 
 // ── Transition Timer ────────────────────────────────────────
 // Tracks time lost between activities; 7-day log in storage.
+// ── Witness Mode ────────────────────────────────────────
+// Transition support: witness levels, body-need gate, stuck menu, partial-credit close.
+// Drop-in upgrade of TransitionTimer. Same name, same mount, same 'transition-log' key (additive fields).
 function TransitionTimer() {
-  const [phase, setPhase] = useState('idle'); // idle | running | done
-  const [from,  setFrom]  = useState('');
-  const [to,    setTo]    = useState('');
+  const LEVELS = {
+    copilot: { label: 'Co-pilot', blurb: 'I hold the clock, your steps are on screen, I stay present the whole gap.' },
+    spotter: { label: 'Spotter',  blurb: 'You name the one next step. I just hold time and check in once.' },
+    solo:    { label: 'Solo',     blurb: 'You start it and log it yourself. I only record. This is the goal.' },
+  };
+  const SUPPORT_URL = 'https://claude.ai/project/019c9369-3475-7481-a442-1f47bc5a196e';
+
+  const [phase, setPhase]   = useState('idle');   // idle | prep | running | stuck | done
+  const [from, setFrom]     = useState('');
+  const [to, setTo]         = useState('');
+  const [level, setLevel]   = useState('copilot');
+  const [bodyNeed, setBodyNeed] = useState(null);
+  const [steps, setSteps]   = useState([{text:'',done:false},{text:'',done:false},{text:'',done:false}]);
+  const [whatMoved, setWhatMoved] = useState('');
   const [startAt, setStartAt] = useState(null);
   const [elapsed, setElapsed] = useState(0);
-  const [allEntries, setAllEntries] = useState([]); // EVERYTHING, persisted
+  const [paused, setPaused]   = useState(false);
+  const [saved, setSaved]     = useState(false);
+  const [allEntries, setAllEntries] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [stuckTool, setStuckTool] = useState(null); // null | 'A' | 'B' | 'C'
+  const [voo, setVoo]         = useState(0);
+  const [smallMove, setSmallMove] = useState('');
+  const [nudgeOff, setNudgeOff] = useState(false);
 
+  // ── load history + suggest a starting level from past reps ──
   useEffect(() => {
     (async () => {
       try {
         const r = await window.storage.get('transition-log');
         if (r?.value) {
           const parsed = JSON.parse(r.value);
-          if (Array.isArray(parsed)) setAllEntries(parsed);
+          if (Array.isArray(parsed)) { setAllEntries(parsed); setLevel(suggestLevel(parsed)); }
         }
       } catch(e) {}
     })();
   }, []);
 
+  // ── tick ──
   useEffect(() => {
     if (phase !== 'running') return;
     const iv = setInterval(() => setElapsed(Math.floor((Date.now()-startAt)/1000)), 1000);
     return () => clearInterval(iv);
   }, [phase, startAt]);
 
-  const start = () => {
-    if (!from.trim() || !to.trim()) return;
-    setStartAt(Date.now());
-    setElapsed(0);
-    setPhase('running');
-  };
+  function levelCounts(entries){
+    const c = {copilot:0,spotter:0,solo:0};
+    entries.forEach(e => { if (e.level && c[e.level]!=null) c[e.level]++; });
+    return c;
+  }
+  function suggestLevel(entries){
+    const c = levelCounts(entries);
+    if (c.copilot >= 5 && c.spotter < 3) return 'spotter';
+    if (c.spotter >= 4 && c.solo   < 2) return 'solo';
+    return entries[0]?.level || 'copilot';
+  }
 
-  const arrive = async () => {
-    const secs = Math.floor((Date.now()-startAt)/1000);
-    const entry = { from: from.trim(), to: to.trim(), secs, at: new Date().toISOString() };
-    const next = [entry, ...allEntries].slice(0, 500); // 500-entry cap (~1 year of light use)
-    setAllEntries(next);
-    setPhase('done');
-    setElapsed(secs);
-    try { await window.storage.set('transition-log', JSON.stringify(next)); } catch(e) {}
-  };
+  const counts = levelCounts(allEntries);
+  let nudge = null;
+  if (!nudgeOff && phase==='idle') {
+    if (level==='copilot' && counts.copilot>=5 && counts.spotter<3)
+      nudge = `You've run Co-pilot ${counts.copilot}× — those are real reps, logged. When you want: try Spotter. You name the step, I just hold the clock.`;
+    else if (level==='spotter' && counts.spotter>=4 && counts.solo<2)
+      nudge = `Spotter ${counts.spotter}× done. Solo is the exact same move with you as your own witness. The ladder is working.`;
+  }
 
-  const reset = () => { setPhase('idle'); setFrom(''); setTo(''); setElapsed(0); };
-
-  // 7-day window for median calc only — but storage keeps everything
+  const fmt = s => s < 60 ? `${s}s` : `${Math.floor(s/60)}m ${s%60}s`;
   const cutoff = Date.now() - 7*24*60*60*1000;
   const recent7d = allEntries.filter(e => new Date(e.at).getTime() >= cutoff);
   const median = recent7d.length
     ? [...recent7d].sort((a,b)=>a.secs-b.secs)[Math.floor(recent7d.length/2)].secs
     : null;
 
-  const fmt = s => s < 60 ? `${s}s` : `${Math.floor(s/60)}m ${s%60}s`;
+  const begin  = () => { setStartAt(Date.now()); setElapsed(0); setPaused(false); setPhase('running'); };
+  const arrive = () => { setElapsed(startAt ? Math.floor((Date.now()-startAt)/1000) : 0); setPhase('done'); };
+  const setStep    = (i,val) => setSteps(s => s.map((x,j)=> j===i ? {...x,text:val} : x));
+  const toggleStep = (i)     => setSteps(s => s.map((x,j)=> j===i ? {...x,done:!x.done} : x));
+
+  const save = async (extra={}) => {
+    const secs = startAt ? Math.floor((Date.now()-startAt)/1000) : elapsed;
+    const entry = {
+      from: from.trim() || '(gap)', to: to.trim() || '(next)', secs, at: new Date().toISOString(),
+      level,
+      bodyNeed: bodyNeed || null,
+      steps: steps.filter(s=>s.text.trim()).map(s=>({text:s.text.trim(),done:s.done})),
+      whatMoved: (extra.whatMoved ?? whatMoved).trim() || null,
+      paused: extra.paused || paused || false,
+    };
+    const next = [entry, ...allEntries].slice(0, 500);
+    setAllEntries(next); setElapsed(secs); setSaved(true); setPhase('done');
+    try { await window.storage.set('transition-log', JSON.stringify(next)); } catch(e) {}
+  };
+
+  const reset = () => {
+    setPhase('idle'); setFrom(''); setTo(''); setBodyNeed(null);
+    setSteps([{text:'',done:false},{text:'',done:false},{text:'',done:false}]);
+    setWhatMoved(''); setElapsed(0); setStartAt(null); setPaused(false);
+    setSaved(false); setStuckTool(null); setVoo(0); setSmallMove('');
+  };
+
+  // small shared styles
+  const inputS = {flex:'1 1 80px',padding:'6px 8px',fontSize:12,border:'1px solid #e8e0d0',borderRadius:8,minWidth:60};
+  const chip = (on) => ({fontSize:11,padding:'5px 10px',borderRadius:99,cursor:'pointer',
+    border:'1px solid '+(on?'#3d5a3d':'#e8e0d0'),background:on?'#3d5a3d':'#fffdf9',color:on?'#faf7f2':'#6b6660'});
+  const lvlPill = (id) => ({...chip(level===id),flex:1,textAlign:'center'});
+  const needs = [['food','🍚 Food'],['bathroom','🚽 Bathroom'],['warmth','🔥 Warmth'],['sleep','😴 Sleep']];
 
   return (
     <div className="card" style={{padding:'14px 16px'}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
         <div style={{...sectionLabel,display:'flex',alignItems:'center',gap:6}}>
-          <span>⏱</span> Transition timer
+          <span>👁</span> Witness <span style={{textTransform:'none',letterSpacing:0,color:'#9ca3af',fontSize:9}}>· the gap between things</span>
         </div>
-        {median !== null && (
-          <span className="fm" style={{fontSize:10,color:'#6b6660'}}>7d median: {fmt(median)}</span>
-        )}
+        {median !== null && <span className="fm" style={{fontSize:10,color:'#6b6660'}}>7d median: {fmt(median)}</span>}
       </div>
-      {phase === 'idle' && (
-        <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
-          <input value={from} onChange={e=>setFrom(e.target.value)} placeholder="From…"
-            style={{flex:'1 1 80px',padding:'6px 8px',fontSize:12,border:'1px solid #e8e0d0',borderRadius:8,minWidth:60}}/>
-          <span style={{color:'#6b6660',fontSize:12}}>→</span>
-          <input value={to} onChange={e=>setTo(e.target.value)} placeholder="To…"
-            style={{flex:'1 1 80px',padding:'6px 8px',fontSize:12,border:'1px solid #e8e0d0',borderRadius:8,minWidth:60}}/>
-          <button onClick={start} disabled={!from.trim()||!to.trim()} style={{...solidBtn,borderRadius:8,padding:'6px 12px',opacity:(from.trim()&&to.trim())?1:0.4}}>Go</button>
-          {allEntries.length > 0 && (
-            <button onClick={()=>setShowHistory(!showHistory)} style={{...ghostBtn,borderRadius:8,padding:'5px 10px',fontSize:11}}>
-              {showHistory ? 'Hide' : `History (${allEntries.length})`}
+
+      {/* ─────────── IDLE: name the gap + pick witness level ─────────── */}
+      {phase==='idle' && (
+        <div>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
+            <input value={from} onChange={e=>setFrom(e.target.value)} placeholder="Just finished…" style={inputS}/>
+            <span style={{color:'#6b6660',fontSize:12}}>→</span>
+            <input value={to} onChange={e=>setTo(e.target.value)} placeholder="Next…" style={inputS}/>
+            <button onClick={()=>setPhase('prep')} disabled={!from.trim()||!to.trim()}
+              style={{...solidBtn,borderRadius:8,padding:'6px 12px',opacity:(from.trim()&&to.trim())?1:0.4}}>Start</button>
+          </div>
+
+          <div style={{marginTop:10}}>
+            <div style={{display:'flex',gap:6}}>
+              {Object.keys(LEVELS).map(id =>
+                <button key={id} onClick={()=>setLevel(id)} style={lvlPill(id)}>{LEVELS[id].label}</button>
+              )}
+            </div>
+            <div style={{fontSize:11,color:'#6b6660',marginTop:6,lineHeight:1.4}}>{LEVELS[level].blurb}</div>
+            <div style={{fontSize:9,color:'#9ca3af',marginTop:3}}>the ladder goes external → self-witness. you're not meant to stay on Co-pilot.</div>
+          </div>
+
+          {nudge && (
+            <div style={{marginTop:10,background:'#fef3c7',border:'1px solid #fde68a',borderRadius:8,padding:'8px 10px',display:'flex',gap:8,alignItems:'flex-start'}}>
+              <span style={{fontSize:12,color:'#92400e',flex:1,lineHeight:1.4}}>{nudge}</span>
+              <button onClick={()=>setNudgeOff(true)} style={{background:'none',border:'none',color:'#92400e',cursor:'pointer',fontSize:14,lineHeight:1}}>×</button>
+            </div>
+          )}
+
+          {allEntries.length>0 && (
+            <button onClick={()=>setShowHistory(!showHistory)} style={{...ghostBtn,borderRadius:8,padding:'5px 10px',fontSize:11,marginTop:10}}>
+              {showHistory ? 'Hide history' : `History (${allEntries.length})`}
             </button>
           )}
         </div>
       )}
-      {phase === 'running' && (
-        <div style={{display:'flex',gap:10,alignItems:'center'}}>
-          <span style={{fontSize:13,color:'#6b6660',flex:1}}>{from} → {to}</span>
-          <span className="fm" style={{fontSize:16,fontWeight:700,color:elapsed>300?'#f87171':'#1a1814'}}>{fmt(elapsed)}</span>
-          <button onClick={arrive} style={{...solidBtn,background:'#3d5a3d',borderRadius:8,padding:'6px 12px'}}>Arrived ✓</button>
-        </div>
-      )}
-      {phase === 'done' && (
-        <div style={{display:'flex',gap:10,alignItems:'center'}}>
-          <span style={{fontSize:13,color:'#3d5a3d',flex:1}}>✓ {from} → {to}</span>
-          <span className="fm" style={{fontSize:14,fontWeight:700}}>{fmt(elapsed)}</span>
-          {median !== null && elapsed > median * 1.5 && (
-            <span style={{fontSize:10,background:'#fef3c7',color:'#92400e',padding:'2px 6px',borderRadius:4}}>1.5× typical</span>
+
+      {/* ─────────── PREP: body-need check, then (co-pilot) steps ─────────── */}
+      {phase==='prep' && (
+        <div>
+          <div style={{fontSize:12,color:'#1a1814',marginBottom:6}}>Before the clock — does your body need anything first?</div>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+            {needs.map(([id,lbl]) =>
+              <button key={id} onClick={()=>setBodyNeed(bodyNeed===id?null:id)} style={chip(bodyNeed===id)}>{lbl}</button>
+            )}
+            <button onClick={()=>setBodyNeed('good')} style={chip(bodyNeed==='good')}>I'm good</button>
+          </div>
+
+          {bodyNeed && bodyNeed!=='good' && (
+            <div style={{marginTop:10,background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:8,padding:'10px'}}>
+              <div style={{fontSize:12,color:'#9a3412',lineHeight:1.45}}>
+                That wins. Go handle <b>{bodyNeed}</b> first — no debate. The gap will still be here when you're back.
+              </div>
+              <div style={{display:'flex',gap:6,marginTop:8}}>
+                <button onClick={()=>setBodyNeed('good')} style={{...solidBtn,borderRadius:8,padding:'5px 10px',fontSize:11}}>Handled — continue</button>
+                <button onClick={()=>save({paused:true,whatMoved:'paused for '+bodyNeed})} style={{...ghostBtn,borderRadius:8,padding:'5px 10px',fontSize:11}}>Pause &amp; log this</button>
+              </div>
+            </div>
           )}
-          <button onClick={reset} style={{...ghostBtn,borderRadius:8,padding:'5px 10px',fontSize:11}}>New</button>
+
+          {(bodyNeed==='good' || bodyNeed===null) && (
+            <div style={{marginTop:12}}>
+              {level==='copilot' && (
+                <div>
+                  <div style={{fontSize:12,color:'#1a1814',marginBottom:6}}>Name the first 1–3 physical things. Literal — "shoes on", not "get ready".</div>
+                  {steps.map((s,i)=>
+                    <input key={i} value={s.text} onChange={e=>setStep(i,e.target.value)} placeholder={`Step ${i+1}…`}
+                      style={{...inputS,width:'100%',display:'block',marginBottom:6}}/>
+                  )}
+                </div>
+              )}
+              {level==='spotter' && (
+                <div style={{fontSize:12,color:'#6b6660',marginBottom:10,lineHeight:1.4}}>
+                  Say your one next step out loud. I'll hold the clock and check in once. That's it.
+                </div>
+              )}
+              {level==='solo' && (
+                <div style={{fontSize:12,color:'#6b6660',marginBottom:10,lineHeight:1.4}}>
+                  You've got this one. Start the clock, do the thing, log it after. I'm just the record.
+                </div>
+              )}
+              <div style={{display:'flex',gap:6}}>
+                <button onClick={begin} style={{...solidBtn,borderRadius:8,padding:'7px 14px'}}>Begin →</button>
+                <button onClick={()=>setPhase('idle')} style={{...ghostBtn,borderRadius:8,padding:'7px 12px',fontSize:11}}>Back</button>
+              </div>
+            </div>
+          )}
         </div>
       )}
-      {showHistory && phase==='idle' && allEntries.length > 0 && (
-        <div style={{marginTop:10,borderTop:'1px solid #e8e0d0',paddingTop:10}}>
+
+      {/* ─────────── RUNNING ─────────── */}
+      {phase==='running' && (
+        <div>
+          <div style={{display:'flex',gap:10,alignItems:'center'}}>
+            <span style={{fontSize:13,color:'#6b6660',flex:1}}>{from} → {to}</span>
+            <span className="fm" style={{fontSize:16,fontWeight:700,color:elapsed>300?'#f87171':'#1a1814'}}>{fmt(elapsed)}</span>
+          </div>
+
+          {level==='copilot' && steps.some(s=>s.text.trim()) && (
+            <div style={{marginTop:10,borderTop:'1px solid #f0ece3',paddingTop:10}}>
+              {steps.filter(s=>s.text.trim()).map((s,i)=>
+                <div key={i} onClick={()=>toggleStep(steps.indexOf(s))}
+                  style={{display:'flex',gap:8,alignItems:'center',padding:'5px 0',cursor:'pointer'}}>
+                  <span style={{fontSize:15}}>{s.done?'☑':'☐'}</span>
+                  <span style={{fontSize:13,color:s.done?'#9ca3af':'#1a1814',textDecoration:s.done?'line-through':'none'}}>{s.text}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {level==='copilot' && <div style={{fontSize:11,color:'#9ca3af',marginTop:8}}>I'm here. One step at a time — that's the whole job.</div>}
+
+          <div style={{display:'flex',gap:6,marginTop:10}}>
+            <button onClick={arrive} style={{...solidBtn,background:'#3d5a3d',borderRadius:8,padding:'7px 14px'}}>Arrived ✓</button>
+            <button onClick={()=>{setStuckTool(null);setPhase('stuck');}} style={{...ghostBtn,borderRadius:8,padding:'7px 12px',fontSize:12}}>I'm stuck</button>
+          </div>
+        </div>
+      )}
+
+      {/* ─────────── STUCK: tiered A / B / C ─────────── */}
+      {phase==='stuck' && (
+        <div>
+          <div style={{fontSize:12,color:'#1a1814',marginBottom:8}}>Stuck in the gap. Pick what fits — none of these is the whole task.</div>
+          <div style={{display:'flex',gap:6,marginBottom:10}}>
+            <button onClick={()=>setStuckTool('A')} style={{...chip(stuckTool==='A'),flex:1,padding:'7px'}}>A · Smallest move</button>
+            <button onClick={()=>setStuckTool('B')} style={{...chip(stuckTool==='B'),flex:1,padding:'7px'}}>B · Somatic reset</button>
+            <button onClick={()=>setStuckTool('C')} style={{...chip(stuckTool==='C'),flex:1,padding:'7px'}}>C · Ragdoll</button>
+          </div>
+
+          {stuckTool==='A' && (
+            <div style={{background:'#f9fafb',border:'1px solid #e8e0d0',borderRadius:8,padding:10}}>
+              <div style={{fontSize:12,color:'#1a1814',marginBottom:6}}>What's the single smallest physical action? Name it, do only that.</div>
+              <input value={smallMove} onChange={e=>setSmallMove(e.target.value)} placeholder="e.g. stand up" style={{...inputS,width:'100%',marginBottom:8}}/>
+              <button onClick={()=>{setSmallMove('');setPhase('running');}} style={{...solidBtn,borderRadius:8,padding:'6px 12px',fontSize:12}}>Did it → back to it</button>
+            </div>
+          )}
+
+          {stuckTool==='B' && (
+            <div style={{background:'#f9fafb',border:'1px solid #e8e0d0',borderRadius:8,padding:10}}>
+              <div style={{fontSize:12,color:'#1a1814',marginBottom:8}}>Voo breath ×5 — long low "voo" on the out-breath. Tap each one.</div>
+              <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:8}}>
+                <button onClick={()=>setVoo(v=>Math.min(5,v+1))} style={{...solidBtn,borderRadius:99,padding:'8px 16px'}}>Voo</button>
+                <span className="fm" style={{fontSize:16,fontWeight:700,color:voo>=5?'#3d5a3d':'#1a1814'}}>{voo}/5</span>
+                {voo>=5 && <span style={{fontSize:11,color:'#3d5a3d'}}>now 3 slow eye sweeps, left ↔ right</span>}
+              </div>
+              <button onClick={()=>{setVoo(0);setPhase('running');}} style={{...ghostBtn,borderRadius:8,padding:'6px 12px',fontSize:12}}>Reset done → back to it</button>
+            </div>
+          )}
+
+          {stuckTool==='C' && (
+            <div style={{background:'#f9fafb',border:'1px solid #e8e0d0',borderRadius:8,padding:10}}>
+              <div style={{fontSize:12,color:'#1a1814',lineHeight:1.45,marginBottom:8}}>
+                Go horizontal. This logs as <b>paused — a chosen rest, not a failure</b>. Partial credit is real. We map it tomorrow.
+              </div>
+              <button onClick={()=>save({paused:true,whatMoved:'chose rest'})} style={{...solidBtn,borderRadius:8,padding:'6px 12px',fontSize:12}}>Log &amp; rest</button>
+            </div>
+          )}
+
+          <div style={{display:'flex',gap:14,marginTop:12,alignItems:'center'}}>
+            <a href={SUPPORT_URL} target="_blank" rel="noreferrer" style={{fontSize:12,color:'#3d5a3d',textDecoration:'underline'}}>Talk to Claude</a>
+            <button onClick={()=>setPhase('running')} style={{background:'none',border:'none',color:'#6b6660',cursor:'pointer',fontSize:12}}>back to it</button>
+          </div>
+        </div>
+      )}
+
+      {/* ─────────── DONE: what moved + log ─────────── */}
+      {phase==='done' && (
+        <div>
+          <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:saved?0:10}}>
+            <span style={{fontSize:13,color:'#3d5a3d',flex:1}}>{paused?'⏸':'✓'} {from||'(gap)'} → {to||'(next)'}</span>
+            <span className="fm" style={{fontSize:14,fontWeight:700}}>{fmt(elapsed)}</span>
+            {median!==null && elapsed>median*1.5 && !paused &&
+              <span style={{fontSize:10,background:'#fef3c7',color:'#92400e',padding:'2px 6px',borderRadius:4}}>1.5× typical</span>}
+            <span style={{fontSize:9,background:'#eef2ff',color:'#4338ca',padding:'2px 6px',borderRadius:4}}>{LEVELS[level].label}</span>
+          </div>
+
+          {!saved && (
+            <div>
+              <div style={{fontSize:12,color:'#1a1814',marginBottom:6}}>What moved? One line — even one word counts. <span style={{color:'#9ca3af'}}>partial credit is real.</span></div>
+              <input value={whatMoved} onChange={e=>setWhatMoved(e.target.value)} placeholder="what moved…" style={{...inputS,width:'100%',marginBottom:8}}/>
+              <button onClick={()=>save()} style={{...solidBtn,borderRadius:8,padding:'7px 14px'}}>Log it ✓</button>
+            </div>
+          )}
+
+          {saved && (
+            <div style={{display:'flex',gap:10,alignItems:'center',marginTop:10}}>
+              <span style={{fontSize:12,color:'#6b6660',flex:1}}>Logged{whatMoved?` — "${whatMoved}"`:''}. The Reduction will see this tonight.</span>
+              <button onClick={reset} style={{...ghostBtn,borderRadius:8,padding:'5px 10px',fontSize:11}}>New</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ─────────── HISTORY ─────────── */}
+      {showHistory && phase==='idle' && allEntries.length>0 && (
+        <div style={{marginTop:12,borderTop:'1px solid #e8e0d0',paddingTop:10}}>
           {allEntries.slice(0,15).map((e,i)=>{
             const d = new Date(e.at);
             const dateStr = d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+            const lv = e.level ? (e.level==='copilot'?'C':e.level==='spotter'?'S':'•') : null;
             return (
-              <div key={i} style={{display:'flex',justifyContent:'space-between',fontSize:11,color:'#6b6660',marginBottom:3,gap:8}}>
-                <span style={{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{e.from} → {e.to}</span>
+              <div key={i} style={{display:'flex',justifyContent:'space-between',fontSize:11,color:'#6b6660',marginBottom:3,gap:8,alignItems:'center'}}>
+                <span style={{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                  {e.paused?'⏸ ':''}{e.from} → {e.to}{e.whatMoved?` · ${e.whatMoved}`:''}
+                </span>
+                {lv && <span style={{fontSize:8,background:'#eef2ff',color:'#4338ca',padding:'1px 4px',borderRadius:3}}>{lv}</span>}
                 <span style={{fontSize:9,color:'#9ca3af'}}>{dateStr}</span>
                 <span className="fm" style={{minWidth:45,textAlign:'right'}}>{fmt(e.secs)}</span>
               </div>
             );
           })}
-          {allEntries.length > 15 && (
-            <div style={{fontSize:10,color:'#9ca3af',textAlign:'center',marginTop:6}}>
-              + {allEntries.length - 15} more (showing last 15)
-            </div>
+          {allEntries.length>15 && (
+            <div style={{fontSize:10,color:'#9ca3af',textAlign:'center',marginTop:6}}>+ {allEntries.length-15} more (showing last 15)</div>
           )}
         </div>
       )}
