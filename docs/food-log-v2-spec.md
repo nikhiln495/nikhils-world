@@ -118,7 +118,9 @@ A small rules table keyed to Nikhil's actual goals (from the Reduction context +
 
 | Goal | Signal | Recommendation surfaced |
 |------|--------|-------------------------|
-| Protein ≥ 130 g/day | day protein < 130 | "Add a yogurt anchor (+25 g) or Orgain shake (+36 g)" |
+| Protein ≥ 160 g/day (elite) | day protein < target | "Add a yogurt anchor (+25 g) or Orgain shake (+36 g)" |
+| Creatine 5 g/day | not logged | "Log creatine — vegetarians respond strongly (strength/power/recovery)" |
+| Hydration ~3–4 L | training day | "Scale fluids + electrolytes to session length" |
 | Sodium ≤ 2,300 mg | sodium-stack detected | existing stack warning + lowest-Na swap |
 | Sugar < 50 g | sugar warn/high | "Swap one evening sweet for banana/berries" |
 | Vitamin D (Alaska) | D < target N days | "Take D3 supplement — Alaska spring = low UV" |
@@ -185,27 +187,34 @@ Recommendations render in the day view and roll up into the 30-day summary's Wat
 
 ### 4.4 Targets & migration
 
-**Targets profile** — a single constant `NUTRIENT_TARGETS` (vegetarian male, active; vitamin D bumped for Alaska). Caps vs. floors are typed so the engine knows direction:
+**Targets profile** — a single constant `NUTRIENT_TARGETS`. Each nutrient carries **two tiers**: `rda` = the standard government baseline (the minimum to not be deficient) and `elite` = the performance target for Nikhil's stated goal — *play any sport / any activity at a high level **and** carry visible (washboard) abs*. That goal means high training volume + a lean physique, so protein and recovery micros run well above RDA while added sugar runs tighter. Vegetarian + Alaska adjustments are baked in (iron/zinc/B12/D bumped). The engine scores adequacy against `elite` by default with a toggle to view `rda`. Caps vs. floors are typed so the engine knows direction.
 
 ```jsonc
 {
-  "protein_g":   { "type": "floor", "target": 130 },
-  "fiber_g":     { "type": "floor", "target": 30 },
-  "sodium_mg":   { "type": "cap",   "target": 2300 },
-  "sugar_g":     { "type": "cap",   "target": 50, "warn": 90 },
-  "iron_mg":     { "type": "floor", "target": 8 },
-  "zinc_mg":     { "type": "floor", "target": 11 },
-  "calcium_mg":  { "type": "floor", "target": 1000 },
-  "magnesium_mg":{ "type": "floor", "target": 400 },
-  "potassium_mg":{ "type": "floor", "target": 3400 },
-  "vitamin_d_iu":{ "type": "floor", "target": 1000 },
-  "b12_ug":      { "type": "floor", "target": 2.4 },
-  "folate_ug":   { "type": "floor", "target": 400 },
-  "vitamin_a_iu":{ "type": "floor", "target": 3000 },
-  "vitamin_c_mg":{ "type": "floor", "target": 90 },
-  "omega3_g":    { "type": "floor", "target": 1.6 }
+  // floors = aim at/above; caps = stay at/below.  rda = standard baseline, elite = performance target.
+  "protein_g":    { "type": "floor", "rda": 56,   "elite": 160,  "note": "1.8–2.2 g/kg for hard training + lean mass retention; 160g ≈ ~80kg. Confirm bodyweight to tune." },
+  "fiber_g":      { "type": "floor", "rda": 30,   "elite": 40 },
+  "sodium_mg":    { "type": "cap",   "rda": 2300, "elite": 2300, "note": "Cap stays — your log trends high. Add electrolytes back only around long/sweaty rides, not at the dinner table." },
+  "sugar_g":      { "type": "cap",   "rda": 50,   "elite": 40,   "warn": 60, "note": "Added sugar. Lean abs = tighter cap; whole-fruit sugar is fine." },
+  "iron_mg":      { "type": "floor", "rda": 8,    "elite": 14,   "note": "Vegetarian + endurance → ~1.8× RDA; non-heme absorbs poorly. Watch ferritin." },
+  "zinc_mg":      { "type": "floor", "rda": 11,   "elite": 15,   "note": "Phytates in a plant diet lower absorption; sweat losses add up." },
+  "calcium_mg":   { "type": "floor", "rda": 1000, "elite": 1200, "note": "Bone load from impact sports." },
+  "magnesium_mg": { "type": "floor", "rda": 400,  "elite": 500,  "note": "Muscle function + sweat losses; supports sleep/RHR." },
+  "potassium_mg": { "type": "floor", "rda": 3400, "elite": 4000, "note": "Counterbalances sodium; cramp prevention." },
+  "vitamin_d_iu": { "type": "floor", "rda": 600,  "elite": 2000, "note": "Alaska + athlete. Supplement D3; affects power, immunity, mood." },
+  "b12_ug":       { "type": "floor", "rda": 2.4,  "elite": 4,    "note": "Vegetarian — supplement or fortified; oxygen transport + nerve function." },
+  "folate_ug":    { "type": "floor", "rda": 400,  "elite": 500 },
+  "vitamin_a_iu": { "type": "floor", "rda": 3000, "elite": 3500 },
+  "vitamin_c_mg": { "type": "floor", "rda": 90,   "elite": 200,  "note": "Training oxidative load + non-heme iron absorption aid." },
+  "vitamin_e_mg": { "type": "floor", "rda": 15,   "elite": 20 },
+  "omega3_g":     { "type": "floor", "rda": 1.6,  "elite": 3,    "note": "Include 500+ mg EPA/DHA — plant ALA converts poorly; algae-oil DHA covers it. Recovery + anti-inflammation." },
+  "selenium_ug":  { "type": "floor", "rda": 55,   "elite": 70 }
 }
 ```
+
+**Elite-tier non-food notes** (surface as recommendations, not nutrients): **hydration** ~3–4 L/day scaled to training; **creatine monohydrate 5 g/day** — vegetarians have low baseline muscle creatine and respond strongly (strength/power/recovery); **protein timing** within ~1 h post-session; **electrolytes** (Na/K/Mg) around long rides only. These pair with the existing VO2-recovery context (target ~48) in the Reduction engine.
+
+> The §4.3 sample `adequacy` percentages were illustrated against the old 130 g protein baseline; under the elite profile (160 g) they recompute lower — e.g. an 80 g day is 50% of elite, not 62%. The engine recomputes from this table; the sample is illustrative only.
 
 **One-time migration `migrateV1toV2(v1)`** (pure function, reversible):
 1. Copy every v1 day verbatim.
