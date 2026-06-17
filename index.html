@@ -696,7 +696,7 @@ document.head.appendChild(__style);
 
   <!-- KaizenApp -->
   <script type="text/babel">
-const { useState, useEffect, useRef } = React;
+const { useState, useEffect, useRef, useMemo } = React;
 const _LR = window.LucideReact || {};
 const CheckCircle2 = _LR.CheckCircle2 || (() => null);
 const Circle = _LR.Circle || (() => null);
@@ -844,10 +844,11 @@ const uid = () => Math.random().toString(36).slice(2,9);
 // ─────────────────────────────────────────────────────
 
 const SK = {
-  projects : 'kaizen3:projects',
-  tasks    : 'kaizen3:tasks',
-  logs     : 'kaizen3:logs',
-  ping     : 'kaizen3:ping',
+  projects    : 'kaizen3:projects',
+  tasks       : 'kaizen3:tasks',
+  logs        : 'kaizen4:logs',
+  logsArchive : 'kaizen3:logs',
+  ping        : 'kaizen3:ping',
 };
 
 async function testStorage() {
@@ -880,6 +881,7 @@ function KaizenApp() {
   const [projects,  setProjectsRaw] = useState([]);
   const [tasks,     setTasksRaw]    = useState([]);
   const [logs,      setLogsRaw]     = useState({});
+  const [archiveLogs, setArchiveLogs] = useState({});
   const [view,      setView]        = useState('today');
 
   // 'booting' | 'active' | 'offline'
@@ -898,10 +900,11 @@ function KaizenApp() {
       const ok = await testStorage();
       setStoreSt(ok ? 'active' : 'offline');
       if (ok) {
-        const [p,t,l] = await Promise.all([
+        const [p,t,l,a] = await Promise.all([
           storageGet(SK.projects),
           storageGet(SK.tasks),
           storageGet(SK.logs),
+          storageGet(SK.logsArchive),
         ]);
         let seeded = null;
         try { const r = await window.storage.get('kaizen3:seeded'); seeded = r?.value; } catch {}
@@ -960,6 +963,7 @@ function KaizenApp() {
           }
         }
         if (l) setLogsRaw(l);
+        if (a) setArchiveLogs(a);
       }
       setLoaded(true);
     })();
@@ -982,11 +986,21 @@ function KaizenApp() {
   const setTasks    = v => { setTasksRaw(v);    persist(SK.tasks,    v); };
   const setLogs     = v => { setLogsRaw(v);     persist(SK.logs,     v); };
 
+  // ── Logs: merge frozen archive (kaizen3) with active store (kaizen4) for reads ──
+  const mergedLogs = useMemo(() => ({...archiveLogs, ...logs}), [archiveLogs, logs]);
+
+  // Safe write: read base from the merged view, but persist only to the active
+  // (kaizen4) store — never re-writes the archive, so a single edited day never
+  // drags the whole history back into the doc that's being kept small.
+  const updateLog = (date, patch) => {
+    const cur = mergedLogs[date] || { brainDump:'', highlight:'', micro:'', done:[], reflection:'' };
+    setLogs({ ...logs, [date]: { ...cur, ...patch } });
+  };
+
   // ── Today log shortcut ───────────────────
   const today    = todayISO();
-  const todayLog = logs[today] || { brainDump:'', highlight:'', micro:'', done:[], reflection:'' };
-  const updateTodayLog = patch =>
-    setLogs({ ...logs, [today]: { ...todayLog, ...patch } });
+  const todayLog = mergedLogs[today] || { brainDump:'', highlight:'', micro:'', done:[], reflection:'' };
+  const updateTodayLog = patch => updateLog(today, patch);
 
   // ── Enrich tasks ─────────────────────────
   const enriched = tasks.map(t => {
@@ -1003,7 +1017,7 @@ function KaizenApp() {
   // ── Export / Import ──────────────────────
   const doExport = () => {
     const blob = new Blob(
-      [JSON.stringify({projects,tasks,logs,v:3,at:new Date().toISOString()},null,2)],
+      [JSON.stringify({projects,tasks,logs:mergedLogs,v:3,at:new Date().toISOString()},null,2)],
       {type:'application/json'}
     );
     const a = document.createElement('a');
@@ -1058,8 +1072,8 @@ function KaizenApp() {
     tasks:     <TasksView    tasks={sorted} allTasks={tasks} projects={projects} setTasks={setTasks}/>,
     projects:  <ProjectsView projects={projects} tasks={tasks} setProjects={setProjects} setTasks={setTasks}/>,
     templates: <TemplatesView/>,
-    reflect:   <ReflectView  logs={logs} setLogs={setLogs} tasks={enriched} allTasks={tasks} setTasks={setTasks} projects={projects}/>,
-    trajectory:<TrajectoryView logs={logs} setLogs={setLogs} tasks={enriched}/>,
+    reflect:   <ReflectView  logs={mergedLogs} updateLog={updateLog} tasks={enriched} allTasks={tasks} setTasks={setTasks} projects={projects}/>,
+    trajectory:<TrajectoryView logs={mergedLogs} updateLog={updateLog} tasks={enriched}/>,
   };
 
   return (
@@ -2636,7 +2650,7 @@ Return 3-5 foci. Focus on what's genuinely active, not historical.`,
   );
 }
 
-function TrajectoryView({ logs, setLogs, tasks }) {
+function TrajectoryView({ logs, updateLog, tasks }) {
   const [bigPicture,   setBigPicture]   = useState('');
   const [catchEntries, setCatchEntries] = useState([]);
   const [tagTarget,    setTagTarget]    = useState(null); // {date, id}
@@ -2718,12 +2732,8 @@ function TrajectoryView({ logs, setLogs, tasks }) {
 
   // ── Tag a win with a domain ────────────────────────
   const tagWin = (date, id, domainId) => {
-    const newLog = { ...logs };
-    newLog[date] = {
-      ...newLog[date],
-      done: (newLog[date].done || []).map(w => w.id === id ? { ...w, domain: domainId || undefined } : w)
-    };
-    setLogs(newLog);
+    const newDone = (logs[date]?.done || []).map(w => w.id === id ? { ...w, domain: domainId || undefined } : w);
+    updateLog(date, { done: newDone });
     setTagTarget(null);
   };
 
@@ -3002,7 +3012,7 @@ function TrajectoryView({ logs, setLogs, tasks }) {
 // REFLECT VIEW
 // ─────────────────────────────────────────────────────
 
-function ReflectView({logs, setLogs, tasks, allTasks, setTasks, projects}) {
+function ReflectView({logs, updateLog, tasks, allTasks, setTasks, projects}) {
   const [expandedDate, setExpandedDate] = useState(null);
   const dates = Object.keys(logs).sort().reverse().slice(0,90);
   const last7  = dates.slice(0,7);
@@ -3016,11 +3026,6 @@ function ReflectView({logs, setLogs, tasks, allTasks, setTasks, projects}) {
   const avgVar = timed.length
     ? Math.round(timed.reduce((s,t)=>s+(t.actualTime-(t.estimatedTime||t.est)),0)/timed.length)
     : null;
-
-  const updateDayLog = (date, patch) => {
-    const cur = logs[date] || { brainDump:'', highlight:'', micro:'', done:[], reflection:'' };
-    setLogs({ ...logs, [date]: { ...cur, ...patch } });
-  };
 
   return (
     <div>
@@ -3073,7 +3078,7 @@ function ReflectView({logs, setLogs, tasks, allTasks, setTasks, projects}) {
               <div style={{marginTop:14,paddingTop:14,borderTop:'1px solid #e8e0d0'}}>
                 <DayLogEditor
                   log={l}
-                  updateLog={patch=>updateDayLog(d,patch)}
+                  updateLog={patch=>updateLog(d,patch)}
                 />
               </div>
             )}
@@ -7615,7 +7620,7 @@ function App() {
   ];
 
   const STORAGE_KEYS = [
-    'kaizen3:projects','kaizen3:tasks','kaizen3:logs','kaizen3:ping',
+    'kaizen3:projects','kaizen3:tasks','kaizen3:logs','kaizen4:logs','kaizen3:ping',
     'nikhil-food-log-v1',
     'creative-log-v2','creative-log','creative-streak','gatekeeper-name','creative-catch',
     'apple-health-import','med-log-daily',
