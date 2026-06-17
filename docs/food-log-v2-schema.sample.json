@@ -1,0 +1,147 @@
+{
+  "_comment": "Reference sample for Food & Activity Log v2. Two days: one fully-populated (micros from lookup/manual), one migrated-from-v1 (only sodium+sugar known, other micros absent = 'no data', not zero). Validates the additive/back-compat design in docs/food-log-v2-spec.md. Pasteable into the MERGE FOOD LOG box once STORAGE_KEY -> nikhil-food-log-v2.",
+
+  "2026-04-27": {
+    "label": "White Sauce Pizzas + Orgain Shake + Oat Cookie 🍕",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "m1",
+        "time": "Afternoon/Dinner",
+        "label": "White Sauce + South of Border Pizzas 🍕",
+        "protein_highlight": true,
+        "hungerTag": "hunger",
+        "items": [
+          {
+            "name": "White sauce homemade pizza slice ×2",
+            "kcal": 400,
+            "notes": "~12g protein",
+            "qty": 2, "unit": "slice", "source": "manual",
+            "nutrients": {
+              "protein_g": 12, "carb_g": 48, "fat_g": 16, "sat_fat_g": 6,
+              "fiber_g": 4, "sugar_g": 4, "sodium_mg": 620, "potassium_mg": 240,
+              "calcium_mg": 220, "iron_mg": 2.4, "zinc_mg": 1.6, "magnesium_mg": 36,
+              "vitamin_d_iu": 0, "b12_ug": 0.3, "folate_ug": 60, "vitamin_a_iu": 300,
+              "vitamin_c_mg": 6, "omega3_g": 0.1, "omega6_g": 4.0
+            }
+          },
+          {
+            "name": "South of Border pizza slice ×2 (refried beans, green sauce)",
+            "kcal": 360,
+            "notes": "~10g protein",
+            "qty": 2, "unit": "slice", "source": "manual",
+            "nutrients": {
+              "protein_g": 10, "carb_g": 52, "fat_g": 10, "sat_fat_g": 3,
+              "fiber_g": 8, "sugar_g": 3, "sodium_mg": 280, "potassium_mg": 420,
+              "calcium_mg": 120, "iron_mg": 3.0, "zinc_mg": 1.4, "magnesium_mg": 60,
+              "vitamin_d_iu": 0, "b12_ug": 0, "folate_ug": 120, "vitamin_a_iu": 500,
+              "vitamin_c_mg": 8, "omega3_g": 0.1, "omega6_g": 2.5
+            }
+          }
+        ]
+      },
+      {
+        "id": "m2",
+        "time": "Afternoon/Evening",
+        "label": "Orgain Protein Shake + Berries 🍓",
+        "protein_highlight": true,
+        "items": [
+          {
+            "name": "Orgain protein powder (2 scoops)",
+            "kcal": 300,
+            "notes": "~40g protein",
+            "qty": 2, "unit": "scoop", "source": "lookup",
+            "nutrients": {
+              "protein_g": 40, "carb_g": 30, "fat_g": 6, "sat_fat_g": 2,
+              "fiber_g": 14, "sugar_g": 2, "sodium_mg": 260, "potassium_mg": 600,
+              "calcium_mg": 600, "iron_mg": 9.0, "zinc_mg": 4.0, "magnesium_mg": 200,
+              "vitamin_d_iu": 200, "b12_ug": 2.4, "folate_ug": 200, "vitamin_a_iu": 1000,
+              "vitamin_c_mg": 30, "omega3_g": 0.2, "omega6_g": 1.0
+            }
+          },
+          {
+            "name": "Banana (1.67) + frozen berries",
+            "kcal": 216,
+            "notes": "~2.6g protein",
+            "source": "lookup",
+            "nutrients": {
+              "protein_g": 2.6, "carb_g": 54, "fat_g": 1, "sat_fat_g": 0,
+              "fiber_g": 6, "sugar_g": 30, "sodium_mg": 3, "potassium_mg": 760,
+              "calcium_mg": 20, "iron_mg": 0.6, "zinc_mg": 0.4, "magnesium_mg": 60,
+              "vitamin_d_iu": 0, "b12_ug": 0, "folate_ug": 50, "vitamin_a_iu": 120,
+              "vitamin_c_mg": 25, "omega3_g": 0.05, "omega6_g": 0.2
+            }
+          }
+        ]
+      }
+    ],
+    "health": {
+      "steps": 12088, "active_kcal": 670, "basal_kcal": 1614,
+      "rhr": null, "hrv": null, "sleep_hours": null, "sodium_mg": null,
+      "notes": "Intake ~1,757 kcal. Protein ~80g. Sugar ~12g. Burn 2,284. Deficit ~527 ✅",
+      "sleep_note": null
+    },
+    "totals": {
+      "kcal": 1276, "protein_g": 65, "carb_g": 184, "fat_g": 33, "sat_fat_g": 11,
+      "fiber_g": 32, "sugar_g": 39, "sodium_mg": 1163, "potassium_mg": 2020,
+      "calcium_mg": 960, "iron_mg": 15.0, "zinc_mg": 7.4, "magnesium_mg": 356,
+      "vitamin_d_iu": 200, "b12_ug": 3.0, "folate_ug": 430, "vitamin_a_iu": 1920,
+      "vitamin_c_mg": 69, "omega3_g": 0.35, "omega6_g": 7.7,
+      "_note": "Totals shown are for items with a nutrients block; full-day kcal (1,757) includes the third meal (oat cookie/rusk/oat milk) not micro-broken-out here."
+    },
+    "adequacy": {
+      "protein_g":    { "pct": 50,  "status": "warn" },
+      "fiber_g":      { "pct": 107, "status": "ok" },
+      "sodium_mg":    { "pct": 51,  "status": "ok" },
+      "sugar_g":      { "pct": 78,  "status": "ok" },
+      "iron_mg":      { "pct": 188, "status": "ok" },
+      "zinc_mg":      { "pct": 67,  "status": "warn" },
+      "calcium_mg":   { "pct": 96,  "status": "ok" },
+      "magnesium_mg": { "pct": 89,  "status": "ok" },
+      "potassium_mg": { "pct": 59,  "status": "warn" },
+      "vitamin_d_iu": { "pct": 20,  "status": "high" },
+      "b12_ug":       { "pct": 125, "status": "ok" },
+      "omega3_g":     { "pct": 22,  "status": "high" }
+    },
+    "recommendations": [
+      { "key": "vitamin_d", "text": "Vitamin D ~20% of target — Alaska spring, take D3 supplement.", "priority": "S5" },
+      { "key": "omega3",    "text": "Omega-3 low (ALA-only) — add walnuts/flax or algae-oil DHA.", "priority": "S5" },
+      { "key": "protein",   "text": "Day protein ~80g vs 130g target — a second yogurt anchor (+25g) closes most of the gap.", "priority": "S4" }
+    ]
+  },
+
+  "2026-04-08": {
+    "_comment": "Migrated-from-v1 day: only sodium+sugar were ever tracked. Other micros are ABSENT (not zero) so adequacy shows 'no data' rather than false deficiency. Renders identically to v1 for everything else.",
+    "label": "Wednesday — Band Practice 6 PM 🎵",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "m1",
+        "time": "Afternoon",
+        "label": "Caprese + Mozz Roll + Yogurt 🥛",
+        "protein_highlight": true,
+        "items": [
+          { "name": "Sourdough dinner roll + melted mozzarella (~1.5oz)", "kcal": 280, "notes": "~12g protein" },
+          { "name": "Caprese bowl: 2 tomatoes + fresh mozz (~2oz) + basil + olive oil", "kcal": 250, "notes": "~10g protein" },
+          { "name": "Greek yogurt (~1.1 cups) + granola (~¼ cup) + ¼ tsp honey", "kcal": 311, "notes": "~22g protein" }
+        ]
+      }
+    ],
+    "health": {
+      "steps": 10599, "active_kcal": 655, "basal_kcal": 1412,
+      "rhr": 56, "hrv": null, "sleep_hours": 6.9, "sodium_mg": 500,
+      "notes": "Band Practice 6–9 PM ✅.", "sleep_note": "~11:54 PM → 6:50 AM AKDT. 6.9h ✅."
+    },
+    "totals": {
+      "sodium_mg": 500, "sugar_g": 89,
+      "_note": "Only sodium+sugar carried over from SODIUM_DATA/SUGAR_DATA. protein_g still derivable via notes-regex fallback (~44g). All other micros: no data."
+    },
+    "adequacy": {
+      "sodium_mg": { "pct": 22, "status": "ok" },
+      "sugar_g":   { "pct": 178, "status": "high" }
+    },
+    "recommendations": [
+      { "key": "sugar", "text": "Sugar ~89g (high) — swap one evening sweet for banana/berries.", "priority": "S5" }
+    ]
+  }
+}
