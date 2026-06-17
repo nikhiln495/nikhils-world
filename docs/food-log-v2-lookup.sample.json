@@ -1,0 +1,84 @@
+{
+  "_comment": "Expanded FOOD_LOOKUP for Food Log v2. Each entry = nutrients per 1 'unit'. Extends the existing index.html FOOD_LOOKUP (which only had kcal/protein/sodium/unit) with a full micronutrient profile so tapping an autocomplete chip auto-fills micros, scaled by qty. Values for kcal/protein/sodium match the current in-app lookup; remaining micros are best-estimate (source='estimate') and should be confirmed. Covers Nikhil's most-logged anchor foods. See docs/food-log-v2-spec.md §4.5.",
+
+  "Greek yogurt (Kirkland)": {
+    "unit": "cup", "source": "estimate",
+    "kcal": 170, "protein_g": 20, "carb_g": 9, "fat_g": 0, "sat_fat_g": 0,
+    "fiber_g": 0, "sugar_g": 7, "sodium_mg": 95, "potassium_mg": 280,
+    "calcium_mg": 230, "iron_mg": 0.1, "zinc_mg": 1.1, "magnesium_mg": 25,
+    "vitamin_d_iu": 0, "b12_ug": 1.3, "folate_ug": 12, "vitamin_a_iu": 0,
+    "vitamin_c_mg": 0, "omega3_g": 0, "omega6_g": 0
+  },
+  "Orgain protein powder": {
+    "unit": "scoop", "source": "estimate",
+    "kcal": 150, "protein_g": 21, "carb_g": 15, "fat_g": 3, "sat_fat_g": 1,
+    "fiber_g": 7, "sugar_g": 1, "sodium_mg": 130, "potassium_mg": 300,
+    "calcium_mg": 300, "iron_mg": 4.5, "zinc_mg": 2.0, "magnesium_mg": 100,
+    "vitamin_d_iu": 100, "b12_ug": 1.2, "folate_ug": 100, "vitamin_a_iu": 500,
+    "vitamin_c_mg": 15, "omega3_g": 0.1, "omega6_g": 0.5
+  },
+  "Peanut butter": {
+    "unit": "tbsp", "source": "estimate",
+    "kcal": 95, "protein_g": 4, "carb_g": 3, "fat_g": 8, "sat_fat_g": 1.5,
+    "fiber_g": 1, "sugar_g": 1.5, "sodium_mg": 75, "potassium_mg": 105,
+    "calcium_mg": 8, "iron_mg": 0.3, "zinc_mg": 0.5, "magnesium_mg": 26,
+    "vitamin_d_iu": 0, "b12_ug": 0, "folate_ug": 12, "vitamin_a_iu": 0,
+    "vitamin_c_mg": 0, "omega3_g": 0.01, "omega6_g": 2.2
+  },
+  "Smart Dog": {
+    "unit": "dog", "source": "estimate",
+    "kcal": 50, "protein_g": 9, "carb_g": 2, "fat_g": 0, "sat_fat_g": 0,
+    "fiber_g": 1, "sugar_g": 0, "sodium_mg": 480, "potassium_mg": 30,
+    "calcium_mg": 20, "iron_mg": 1.0, "zinc_mg": 0.4, "magnesium_mg": 8,
+    "vitamin_d_iu": 0, "b12_ug": 1.5, "folate_ug": 4, "vitamin_a_iu": 0,
+    "vitamin_c_mg": 0, "omega3_g": 0, "omega6_g": 0.3
+  },
+  "UAF veggie calzone": {
+    "unit": "calzone", "source": "estimate",
+    "kcal": 690, "protein_g": 30, "carb_g": 78, "fat_g": 28, "sat_fat_g": 12,
+    "fiber_g": 5, "sugar_g": 6, "sodium_mg": 1200, "potassium_mg": 360,
+    "calcium_mg": 450, "iron_mg": 4.5, "zinc_mg": 3.0, "magnesium_mg": 60,
+    "vitamin_d_iu": 4, "b12_ug": 0.8, "folate_ug": 120, "vitamin_a_iu": 600,
+    "vitamin_c_mg": 4, "omega3_g": 0.2, "omega6_g": 6.0
+  },
+  "Costco pizza slice": {
+    "unit": "slice", "source": "estimate",
+    "kcal": 730, "protein_g": 34, "carb_g": 70, "fat_g": 34, "sat_fat_g": 15,
+    "fiber_g": 4, "sugar_g": 8, "sodium_mg": 1300, "potassium_mg": 320,
+    "calcium_mg": 600, "iron_mg": 4.0, "zinc_mg": 3.5, "magnesium_mg": 50,
+    "vitamin_d_iu": 8, "b12_ug": 1.0, "folate_ug": 100, "vitamin_a_iu": 700,
+    "vitamin_c_mg": 2, "omega3_g": 0.2, "omega6_g": 7.0
+  },
+  "Banana": {
+    "unit": "banana", "source": "estimate",
+    "kcal": 105, "protein_g": 1, "carb_g": 27, "fat_g": 0, "sat_fat_g": 0,
+    "fiber_g": 3, "sugar_g": 14, "sodium_mg": 1, "potassium_mg": 422,
+    "calcium_mg": 6, "iron_mg": 0.3, "zinc_mg": 0.2, "magnesium_mg": 32,
+    "vitamin_d_iu": 0, "b12_ug": 0, "folate_ug": 24, "vitamin_a_iu": 76,
+    "vitamin_c_mg": 10, "omega3_g": 0.03, "omega6_g": 0.05
+  },
+  "Sourdough bread": {
+    "unit": "slice", "source": "estimate",
+    "kcal": 110, "protein_g": 4, "carb_g": 21, "fat_g": 1, "sat_fat_g": 0,
+    "fiber_g": 1, "sugar_g": 1, "sodium_mg": 230, "potassium_mg": 40,
+    "calcium_mg": 10, "iron_mg": 1.2, "zinc_mg": 0.4, "magnesium_mg": 12,
+    "vitamin_d_iu": 0, "b12_ug": 0, "folate_ug": 40, "vitamin_a_iu": 0,
+    "vitamin_c_mg": 0, "omega3_g": 0.02, "omega6_g": 0.3
+  },
+  "Tofu firm": {
+    "unit": "100g", "source": "estimate",
+    "kcal": 144, "protein_g": 17, "carb_g": 3, "fat_g": 9, "sat_fat_g": 1,
+    "fiber_g": 2, "sugar_g": 1, "sodium_mg": 9, "potassium_mg": 150,
+    "calcium_mg": 350, "iron_mg": 2.7, "zinc_mg": 1.6, "magnesium_mg": 58,
+    "vitamin_d_iu": 0, "b12_ug": 0, "folate_ug": 19, "vitamin_a_iu": 0,
+    "vitamin_c_mg": 0, "omega3_g": 0.4, "omega6_g": 4.5
+  },
+  "Chai with oat milk": {
+    "unit": "mug", "source": "estimate",
+    "kcal": 120, "protein_g": 3, "carb_g": 18, "fat_g": 4, "sat_fat_g": 1,
+    "fiber_g": 1, "sugar_g": 14, "sodium_mg": 70, "potassium_mg": 120,
+    "calcium_mg": 120, "iron_mg": 0.3, "zinc_mg": 0.2, "magnesium_mg": 20,
+    "vitamin_d_iu": 100, "b12_ug": 0.6, "folate_ug": 6, "vitamin_a_iu": 200,
+    "vitamin_c_mg": 0, "omega3_g": 0.1, "omega6_g": 0.4
+  }
+}
