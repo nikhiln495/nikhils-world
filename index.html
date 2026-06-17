@@ -3987,6 +3987,10 @@ function computeDayTotals(data, date) {
     const mic = itemMicros(it);
     if (mic) for (const k in mic) if (typeof mic[k] === 'number') { totals[k] = (totals[k] || 0) + mic[k]; present[k] = true; }
   }));
+  // Day-level override (e.g. backfilled estimates) wins for the keys it provides.
+  if (data && data.nutrients && typeof data.nutrients === 'object') {
+    for (const k in data.nutrients) if (typeof data.nutrients[k] === 'number') { totals[k] = data.nutrients[k]; present[k] = true; }
+  }
   if (!present.protein_g) { const p = calcProtein(data.meals); if (p) { totals.protein_g = p; } }
   if (!present.sodium_mg) { const s = (SODIUM_DATA[date] && SODIUM_DATA[date].mg) || (data.health && data.health.sodium_mg); if (s) { totals.sodium_mg = s; } }
   if (!present.sugar_g)   { const s = SUGAR_DATA[date] && SUGAR_DATA[date].g; if (s) { totals.sugar_g = s; } }
@@ -8158,7 +8162,15 @@ function App() {
                 if (dateKeys.length === 0) throw new Error('No date entries found (expected keys like "2026-04-27")');
                 window.storage.get('nikhil-food-log-v1').then(existing => {
                   const base = existing?.value ? JSON.parse(existing.value) : {};
-                  const merged = { ...base, ...paste }; // paste date-keys overwrite base (newer data wins)
+                  // Non-destructive per-date merge: pasted fields win, but fields the
+                  // paste omits (e.g. meals/health when only backfilling `nutrients`)
+                  // are preserved from the existing day.
+                  const merged = { ...base };
+                  for (const dk of Object.keys(paste)) {
+                    merged[dk] = (base[dk] && typeof base[dk] === 'object' && typeof paste[dk] === 'object' && !Array.isArray(paste[dk]))
+                      ? { ...base[dk], ...paste[dk] }
+                      : paste[dk];
+                  }
                   window.storage.set('nikhil-food-log-v1', JSON.stringify(merged)).then(() => {
                     document.getElementById('foodlog-paste-area').value = '';
                     setBackupStatus(`✅ Merged ${dateKeys.length} date(s) into food log. Refresh Fuel tab.`);
