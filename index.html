@@ -3921,16 +3921,223 @@ function foodSuggestions(query) {
   return Object.keys(FOOD_LOOKUP).filter(k => k.toLowerCase().includes(q)).slice(0, 6);
 }
 
+// ── Nutrition core (v2): elite-athlete targets + micronutrients ─────
+// Two tiers per nutrient: rda = standard baseline, elite = performance
+// target tuned for "play any sport + visible abs" at 50–55 kg bodyweight,
+// vegetarian, in Alaska. type: floor = aim at/above, cap = stay at/below.
+const NUTRIENT_TARGETS = {
+  protein_g:    { type:'floor', rda:45,   elite:115,  label:'Protein',    unit:'g',  group:'macro'   },
+  fiber_g:      { type:'floor', rda:30,   elite:40,   label:'Fiber',      unit:'g',  group:'macro'   },
+  sugar_g:      { type:'cap',   rda:50,   elite:40,   warn:60, label:'Added sugar', unit:'g', group:'macro' },
+  omega3_g:     { type:'floor', rda:1.6,  elite:3,    label:'Omega-3',    unit:'g',  group:'macro'   },
+  sodium_mg:    { type:'cap',   rda:2300, elite:2300, warn:2300, label:'Sodium', unit:'mg', group:'mineral' },
+  potassium_mg: { type:'floor', rda:3400, elite:4000, label:'Potassium',  unit:'mg', group:'mineral' },
+  calcium_mg:   { type:'floor', rda:1000, elite:1200, label:'Calcium',    unit:'mg', group:'mineral' },
+  iron_mg:      { type:'floor', rda:8,    elite:14,   label:'Iron',       unit:'mg', group:'mineral' },
+  zinc_mg:      { type:'floor', rda:11,   elite:15,   label:'Zinc',       unit:'mg', group:'mineral' },
+  magnesium_mg: { type:'floor', rda:400,  elite:500,  label:'Magnesium',  unit:'mg', group:'mineral' },
+  vitamin_d_iu: { type:'floor', rda:600,  elite:2000, label:'Vitamin D',  unit:'IU', group:'vitamin' },
+  b12_ug:       { type:'floor', rda:2.4,  elite:4,    label:'B12',        unit:'µg', group:'vitamin' },
+  folate_ug:    { type:'floor', rda:400,  elite:500,  label:'Folate',     unit:'µg', group:'vitamin' },
+  vitamin_a_iu: { type:'floor', rda:3000, elite:3500, label:'Vitamin A',  unit:'IU', group:'vitamin' },
+  vitamin_c_mg: { type:'floor', rda:90,   elite:200,  label:'Vitamin C',  unit:'mg', group:'vitamin' },
+};
+
+// Per-1-unit micronutrient profiles, keyed to FOOD_LOOKUP keys. Tapping a
+// suggestion chip auto-attaches these (scaled by qty) to the logged item.
+const FOOD_MICROS = {
+  'Greek yogurt (Kirkland)':     { protein_g:20, fiber_g:0, sugar_g:7,  omega3_g:0,    sodium_mg:95,  potassium_mg:280, calcium_mg:230, iron_mg:0.1, zinc_mg:1.1, magnesium_mg:25, vitamin_d_iu:0,   b12_ug:1.3, folate_ug:12,  vitamin_a_iu:0,    vitamin_c_mg:0 },
+  'Costco Greek yogurt':         { protein_g:17, fiber_g:0, sugar_g:7,  omega3_g:0,    sodium_mg:65,  potassium_mg:240, calcium_mg:200, iron_mg:0.1, zinc_mg:1.0, magnesium_mg:22, vitamin_d_iu:0,   b12_ug:1.3, folate_ug:11,  vitamin_a_iu:0,    vitamin_c_mg:0 },
+  'Orgain protein powder':       { protein_g:21, fiber_g:7, sugar_g:1,  omega3_g:0.1,  sodium_mg:130, potassium_mg:300, calcium_mg:300, iron_mg:4.5, zinc_mg:2.0, magnesium_mg:100, vitamin_d_iu:100, b12_ug:1.2, folate_ug:100, vitamin_a_iu:500,  vitamin_c_mg:15 },
+  'Peanut butter':               { protein_g:4,  fiber_g:1, sugar_g:1.5, omega3_g:0.01, sodium_mg:75,  potassium_mg:105, calcium_mg:8,   iron_mg:0.3, zinc_mg:0.5, magnesium_mg:26, vitamin_d_iu:0,   b12_ug:0,   folate_ug:12,  vitamin_a_iu:0,    vitamin_c_mg:0 },
+  'Smart Dog':                   { protein_g:9,  fiber_g:1, sugar_g:0,  omega3_g:0,    sodium_mg:480, potassium_mg:30,  calcium_mg:20,  iron_mg:1.0, zinc_mg:0.4, magnesium_mg:8,  vitamin_d_iu:0,   b12_ug:1.5, folate_ug:4,   vitamin_a_iu:0,    vitamin_c_mg:0 },
+  'UAF veggie calzone':          { protein_g:30, fiber_g:5, sugar_g:6,  omega3_g:0.2,  sodium_mg:1200,potassium_mg:360, calcium_mg:450, iron_mg:4.5, zinc_mg:3.0, magnesium_mg:60, vitamin_d_iu:4,   b12_ug:0.8, folate_ug:120, vitamin_a_iu:600,  vitamin_c_mg:4 },
+  'Costco pizza slice':          { protein_g:34, fiber_g:4, sugar_g:8,  omega3_g:0.2,  sodium_mg:1300,potassium_mg:320, calcium_mg:600, iron_mg:4.0, zinc_mg:3.5, magnesium_mg:50, vitamin_d_iu:8,   b12_ug:1.0, folate_ug:100, vitamin_a_iu:700,  vitamin_c_mg:2 },
+  'Banana':                      { protein_g:1,  fiber_g:3, sugar_g:14, omega3_g:0.03, sodium_mg:1,   potassium_mg:422, calcium_mg:6,   iron_mg:0.3, zinc_mg:0.2, magnesium_mg:32, vitamin_d_iu:0,   b12_ug:0,   folate_ug:24,  vitamin_a_iu:76,   vitamin_c_mg:10 },
+  'Sourdough bread':             { protein_g:4,  fiber_g:1, sugar_g:1,  omega3_g:0.02, sodium_mg:230, potassium_mg:40,  calcium_mg:10,  iron_mg:1.2, zinc_mg:0.4, magnesium_mg:12, vitamin_d_iu:0,   b12_ug:0,   folate_ug:40,  vitamin_a_iu:0,    vitamin_c_mg:0 },
+  'Tofu firm':                   { protein_g:17, fiber_g:2, sugar_g:1,  omega3_g:0.4,  sodium_mg:9,   potassium_mg:150, calcium_mg:350, iron_mg:2.7, zinc_mg:1.6, magnesium_mg:58, vitamin_d_iu:0,   b12_ug:0,   folate_ug:19,  vitamin_a_iu:0,    vitamin_c_mg:0 },
+  'Chai with oat milk':          { protein_g:3,  fiber_g:1, sugar_g:14, omega3_g:0.1,  sodium_mg:70,  potassium_mg:120, calcium_mg:120, iron_mg:0.3, zinc_mg:0.2, magnesium_mg:20, vitamin_d_iu:100, b12_ug:0.6, folate_ug:6,   vitamin_a_iu:200,  vitamin_c_mg:0 },
+  'Oat milk (Kirkland)':         { protein_g:3,  fiber_g:2, sugar_g:7,  omega3_g:0.05, sodium_mg:100, potassium_mg:130, calcium_mg:350, iron_mg:0.4, zinc_mg:0.5, magnesium_mg:30, vitamin_d_iu:100, b12_ug:1.2, folate_ug:8,   vitamin_a_iu:160,  vitamin_c_mg:0 },
+  'Costco mixed nuts':           { protein_g:5,  fiber_g:2, sugar_g:1,  omega3_g:0.2,  sodium_mg:65,  potassium_mg:170, calcium_mg:30,  iron_mg:1.1, zinc_mg:1.0, magnesium_mg:65, vitamin_d_iu:0,   b12_ug:0,   folate_ug:20,  vitamin_a_iu:0,    vitamin_c_mg:0 },
+  'Hummus':                      { protein_g:2,  fiber_g:1, sugar_g:0,  omega3_g:0.05, sodium_mg:145, potassium_mg:40,  calcium_mg:15,  iron_mg:0.6, zinc_mg:0.3, magnesium_mg:18, vitamin_d_iu:0,   b12_ug:0,   folate_ug:18,  vitamin_a_iu:0,    vitamin_c_mg:0 },
+};
+
+function scaleMicros(base, qty) {
+  const q = parseFloat(qty) || 1;
+  const out = {};
+  for (const k in base) out[k] = Math.round(base[k] * q * 100) / 100;
+  return out;
+}
+
+// Resolve an item's micros: explicit item.nutrients wins, else match name to FOOD_MICROS
+function itemMicros(item) {
+  if (item && item.nutrients) return item.nutrients;
+  if (!item || !item.name) return null;
+  if (FOOD_MICROS[item.name]) return FOOD_MICROS[item.name];
+  const key = Object.keys(FOOD_MICROS).find(k => item.name.startsWith(k));
+  return key ? FOOD_MICROS[key] : null;
+}
+
+// Sum a day's nutrients. Only includes a nutrient if ≥1 item carries it
+// (so "no data" stays distinct from a real zero). Falls back to the
+// protein-from-notes regex and the legacy sodium/sugar day-maps.
+function computeDayTotals(data, date) {
+  const totals = {}, present = {};
+  (data.meals || []).forEach(m => (m.items || []).forEach(it => {
+    const mic = itemMicros(it);
+    if (mic) for (const k in mic) if (typeof mic[k] === 'number') { totals[k] = (totals[k] || 0) + mic[k]; present[k] = true; }
+  }));
+  if (!present.protein_g) { const p = calcProtein(data.meals); if (p) { totals.protein_g = p; } }
+  if (!present.sodium_mg) { const s = (SODIUM_DATA[date] && SODIUM_DATA[date].mg) || (data.health && data.health.sodium_mg); if (s) { totals.sodium_mg = s; } }
+  if (!present.sugar_g)   { const s = SUGAR_DATA[date] && SUGAR_DATA[date].g; if (s) { totals.sugar_g = s; } }
+  for (const k in totals) totals[k] = Math.round(totals[k] * 10) / 10;
+  return totals;
+}
+
+function nutrientStatus(key, value, tier) {
+  const t = NUTRIENT_TARGETS[key];
+  if (!t || value == null) return null;
+  const target = t[tier] || t.elite;
+  if (t.type === 'cap') {
+    const warn = t.warn || target;
+    const pct = Math.round((value / target) * 100);
+    if (value <= target) return { pct, status: 'ok' };
+    if (value <= warn)   return { pct, status: 'warn' };
+    return { pct, status: 'high' };
+  }
+  const pct = Math.round((value / target) * 100);
+  if (pct >= 90) return { pct, status: 'ok' };
+  if (pct >= 60) return { pct, status: 'warn' };
+  return { pct, status: 'low' };
+}
+
+const nutrientColor = (s) => s === 'ok' ? '#81c784' : s === 'warn' ? '#ffb74d' : (s === 'high' || s === 'low') ? '#ef5350' : '#ccc';
+
+function buildRecommendations(totals, tier) {
+  const recs = [];
+  const P = nutrientStatus('protein_g', totals.protein_g, tier);
+  if (totals.protein_g != null && P && P.status !== 'ok')
+    recs.push(`💪 Protein ${Math.round(totals.protein_g)}g / ${NUTRIENT_TARGETS.protein_g[tier]}g — add a yogurt anchor (+25g) or Orgain shake (+36g).`);
+  if (totals.vitamin_d_iu == null || (totals.vitamin_d_iu || 0) < NUTRIENT_TARGETS.vitamin_d_iu[tier] * 0.5)
+    recs.push('☀️ Vitamin D likely low — Alaska sun is weak, take a D3 supplement.');
+  if (totals.omega3_g != null && totals.omega3_g < NUTRIENT_TARGETS.omega3_g[tier] * 0.6)
+    recs.push('🐟 Omega-3 low (plant ALA only) — walnuts/flax today, consider algae-oil DHA.');
+  const S = nutrientStatus('sugar_g', totals.sugar_g, tier);
+  if (S && S.status !== 'ok') recs.push('🍬 Added sugar over — swap one evening sweet for banana or berries.');
+  const Na = nutrientStatus('sodium_mg', totals.sodium_mg, tier);
+  if (Na && Na.status !== 'ok') recs.push('🧂 Sodium over the cap — go lighter on the next salty item.');
+  const Fe = nutrientStatus('iron_mg', totals.iron_mg, tier);
+  if (Fe && Fe.status === 'low') recs.push('🩸 Iron low — pair beans/greens with vitamin C; blood panel still pending.');
+  recs.push('🧪 Elite extras: creatine 5g/day (vegetarians respond strongly) + 3–4 L water on training days.');
+  return recs;
+}
+
+function NutrientPanel({ date, data }) {
+  const [tier, setTier] = useState('elite');
+  const totals = computeDayTotals(data, date);
+  const recs = buildRecommendations(totals, tier);
+  const groups = { macro: 'Macros', mineral: 'Minerals', vitamin: 'Vitamins' };
+  return (
+    <div style={{ background:'#fff', borderRadius:14, padding:'16px 18px', border:'1px solid #e8e8e8', marginBottom:14 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:4 }}>
+        <div style={{ fontFamily:'Georgia, serif', fontWeight:700, fontSize:13, color:'#1a1a2e' }}>🧬 Micronutrients</div>
+        <div style={{ display:'flex', gap:4 }}>
+          {[['elite','Elite'],['rda','Baseline']].map(([t,l]) => (
+            <button key={t} onClick={()=>setTier(t)} style={{ fontSize:10, padding:'3px 9px', borderRadius:99, cursor:'pointer',
+              border:'1px solid '+(tier===t?'#0f1f35':'#ddd'), background:tier===t?'#0f1f35':'#fff', color:tier===t?'#fff':'#888' }}>{l}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ fontSize:10, color:'#aaa', marginBottom:12 }}>{tier==='elite' ? 'Elite-athlete targets (play any sport · visible abs · ~50–55kg)' : 'Standard recommended baseline (RDA)'}</div>
+      {Object.keys(groups).map(g => {
+        const keys = Object.keys(NUTRIENT_TARGETS).filter(k => NUTRIENT_TARGETS[k].group === g);
+        return (
+          <div key={g} style={{ marginBottom:10 }}>
+            <div style={{ fontSize:10, color:'#aaa', textTransform:'uppercase', letterSpacing:1, marginBottom:6 }}>{groups[g]}</div>
+            {keys.map(k => {
+              const t = NUTRIENT_TARGETS[k], val = totals[k], st = nutrientStatus(k, val, tier);
+              const target = t[tier], has = val != null, col = st ? nutrientColor(st.status) : '#ccc';
+              return (
+                <div key={k} style={{ marginBottom:7 }}>
+                  <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, marginBottom:2 }}>
+                    <span style={{ color:'#666' }}>{t.label}{t.type==='cap' ? ' (cap)' : ''}</span>
+                    <span style={{ color: has ? col : '#bbb', fontWeight:700 }}>
+                      {has ? (Math.round(val*10)/10 + t.unit) : 'no data'}
+                      <span style={{ color:'#ccc', fontWeight:400 }}> / {target}{t.unit}</span>
+                    </span>
+                  </div>
+                  <div style={{ background:'#f0f0f0', borderRadius:4, height:5 }}>
+                    <div style={{ width:(has && st ? Math.min(st.pct,100) : 0)+'%', background:col, borderRadius:4, height:5 }}/>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+      {recs.length > 0 && (
+        <div style={{ marginTop:6, borderTop:'1px dashed #eee', paddingTop:10 }}>
+          <div style={{ fontSize:10, color:'#aaa', textTransform:'uppercase', letterSpacing:1, marginBottom:6 }}>Recommendations</div>
+          {recs.map((r,i) => <div key={i} style={{ fontSize:11.5, color:'#555', padding:'3px 0', lineHeight:1.4 }}>{r}</div>)}
+        </div>
+      )}
+      <div style={{ marginTop:10, fontSize:10, color:'#bbb', lineHeight:1.4 }}>
+        Micros auto-fill when you log a known food from the suggestion chips. Free-hand days show protein/sodium/sugar until micros are added.
+      </div>
+    </div>
+  );
+}
+
+function MicroTrends({ log }) {
+  const [tier, setTier] = useState('elite');
+  const dates = Object.keys(log).sort();
+  const watch = ['protein_g','fiber_g','sugar_g','omega3_g','iron_mg','zinc_mg','calcium_mg','magnesium_mg','potassium_mg','vitamin_d_iu','b12_ug','vitamin_c_mg'];
+  const agg = {};
+  dates.forEach(d => { const t = computeDayTotals(log[d], d); watch.forEach(k => { if (t[k] != null) (agg[k] = agg[k] || []).push(t[k]); }); });
+  return (
+    <div style={{ background:'#fff', borderRadius:14, padding:'16px 18px', border:'1px solid #e8e8e8', marginBottom:14 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
+        <div style={{ fontFamily:'Georgia, serif', fontWeight:700, fontSize:13, color:'#1a1a2e' }}>🧬 Micronutrient trends <span style={{ fontSize:11, color:'#aaa', fontWeight:400 }}>(avg across logged days)</span></div>
+        <div style={{ display:'flex', gap:4 }}>
+          {[['elite','Elite'],['rda','Baseline']].map(([t,l]) => (
+            <button key={t} onClick={()=>setTier(t)} style={{ fontSize:10, padding:'3px 9px', borderRadius:99, cursor:'pointer',
+              border:'1px solid '+(tier===t?'#0f1f35':'#ddd'), background:tier===t?'#0f1f35':'#fff', color:tier===t?'#fff':'#888' }}>{l}</button>
+          ))}
+        </div>
+      </div>
+      {watch.map(k => {
+        const arr = agg[k], t = NUTRIENT_TARGETS[k];
+        const avg = arr && arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : null;
+        const st = nutrientStatus(k, avg, tier), target = t[tier], col = st ? nutrientColor(st.status) : '#ccc';
+        return (
+          <div key={k} style={{ marginBottom:8 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, marginBottom:2 }}>
+              <span style={{ color:'#666' }}>{t.label}{t.type==='cap' ? ' (cap)' : ''} <span style={{ color:'#ccc' }}>· {arr ? arr.length : 0}d</span></span>
+              <span style={{ color: avg!=null ? col : '#bbb', fontWeight:700 }}>{avg!=null ? (Math.round(avg*10)/10 + t.unit) : 'no data'}<span style={{ color:'#ccc', fontWeight:400 }}> / {target}{t.unit}</span></span>
+            </div>
+            <div style={{ background:'#f0f0f0', borderRadius:4, height:5 }}>
+              <div style={{ width:(avg!=null && st ? Math.min(st.pct,100) : 0)+'%', background:col, borderRadius:4, height:5 }}/>
+            </div>
+          </div>
+        );
+      })}
+      <div style={{ marginTop:8, fontSize:10, color:'#bbb', lineHeight:1.4 }}>Populates as you log foods from the suggestion chips. Protein/sodium/sugar already span all days.</div>
+    </div>
+  );
+}
+
 // Apply lookup with quantity multiplier
 function applyFoodLookup(key, qty) {
   const base = FOOD_LOOKUP[key];
   if (!base) return null;
   const q = parseFloat(qty) || 1;
-  return {
+  const out = {
     name: q === 1 ? key : `${key} ×${q}`,
     kcal: Math.round(base.kcal * q),
     notes: `~${Math.round(base.protein * q)}g protein${base.sodium * q > 400 ? ` · ⚠️${Math.round(base.sodium * q)}mg Na` : ''}`,
   };
+  if (FOOD_MICROS[key]) out.nutrients = scaleMicros(FOOD_MICROS[key], q);
+  return out;
 }
 
 const SODIUM_TRIGGERS = ['smart dog','chorizo','calzone','costco pizza','dominos','pizza','grilled cheese','soy sauce'];
@@ -3945,8 +4152,8 @@ function detectSodiumStack(meals) {
 }
 
 function proteinTier(grams) {
-  if (grams >= 130) return { color:'#22c55e', bg:'rgba(34,197,94,0.15)', label:'on target' };
-  if (grams >= 80)  return { color:'#eab308', bg:'rgba(234,179,8,0.18)', label:'mid' };
+  if (grams >= 115) return { color:'#22c55e', bg:'rgba(34,197,94,0.15)', label:'on target' };
+  if (grams >= 70)  return { color:'#eab308', bg:'rgba(234,179,8,0.18)', label:'mid' };
   return                  { color:'#ef4444', bg:'rgba(239,68,68,0.15)', label:'low' };
 }
 
@@ -4062,7 +4269,7 @@ function DayView({ date, data, editable, onUpdate, onDeleteDay }) {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
           <div style={{ background: tier.bg, borderRadius: 10, padding: "9px 13px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ fontSize: 11, color: tier.color }}>💪 Protein <span style={{ opacity: 0.7, marginLeft: 4 }}>({tier.label})</span></span>
-            <span style={{ fontSize: 15, fontWeight: 800, color: tier.color }}>{protein}g<span style={{ fontSize: 10, opacity: 0.7 }}>/130g</span>{protein >= 130 ? " 🎯" : ""}</span>
+            <span style={{ fontSize: 15, fontWeight: 800, color: tier.color }}>{protein}g<span style={{ fontSize: 10, opacity: 0.7 }}>/115g</span>{protein >= 115 ? " 🎯" : ""}</span>
           </div>
           {sodium?.mg && (
             <div style={{ background: "rgba(255,255,255,0.07)", borderRadius: 10, padding: "9px 13px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -4111,6 +4318,8 @@ function DayView({ date, data, editable, onUpdate, onDeleteDay }) {
           {clipState==='copied' ? '✓ Copied! Paste into Claude' : '📋 Ask Claude: check this day'}
         </button>
       </div>
+
+      <NutrientPanel date={date} data={data} />
 
       {editingDayMeta && (
         <DayMetaEditor data={data} onSave={saveDayMeta} onCancel={()=>setEditingDayMeta(false)}/>
@@ -4241,7 +4450,7 @@ function MealEditor({ meal, onSave, onCancel, onDelete }) {
     if (patch.name !== undefined) {
       const match = FOOD_LOOKUP[patch.name];
       if (match) {
-        setItems(newItems.map((it,j) => j===i ? {...it, name: patch.name, kcal: match.kcal, notes: `~${match.protein}g protein${match.sodium > 400 ? ` · ⚠️${match.sodium}mg sodium` : ''}`} : it));
+        setItems(newItems.map((it,j) => j===i ? {...it, name: patch.name, kcal: match.kcal, notes: `~${match.protein}g protein${match.sodium > 400 ? ` · ⚠️${match.sodium}mg sodium` : ''}`, ...(FOOD_MICROS[patch.name] ? { nutrients: FOOD_MICROS[patch.name] } : {})} : it));
       }
       // Show suggestions
       setSuggestions(s => ({...s, [i]: foodSuggestions(patch.name)}));
@@ -4389,7 +4598,7 @@ function WeekSummary({ log }) {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
           <div style={{ background: "rgba(61,163,93,0.2)", borderRadius: 10, padding: "9px 13px" }}>
             <div style={{ fontSize: 10, color: "#81c784", marginBottom: 2 }}>💪 Avg protein</div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: "#81c784" }}>{avgP}g<span style={{ fontSize: 10, opacity: 0.7 }}>/130g</span></div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: "#81c784" }}>{avgP}g<span style={{ fontSize: 10, opacity: 0.7 }}>/115g</span></div>
           </div>
           <div style={{ background: avgNa > 2300 ? "rgba(239,83,80,0.2)" : "rgba(61,163,93,0.2)", borderRadius: 10, padding: "9px 13px" }}>
             <div style={{ fontSize: 10, opacity: 0.8, marginBottom: 2, color: avgNa > 2300 ? "#ef9a9a" : "#81c784" }}>🧂 Avg sodium</div>
@@ -4405,6 +4614,7 @@ function WeekSummary({ log }) {
           </div>
         </div>
       </div>
+      <MicroTrends log={log} />
       <div style={{ background: "#fff", borderRadius: 14, padding: "16px 18px", border: "1px solid #e8e8e8", marginBottom: 14 }}>
         <div style={{ fontFamily: "Georgia, serif", fontWeight: 700, fontSize: 13, color: "#1a1a2e", marginBottom: 10 }}>🧂 Sodium by day <span style={{ fontSize: 11, color: "#aaa", fontWeight: 400 }}>(limit: 2,300mg)</span></div>
         <div style={{ fontSize: 11, color: "#888", marginBottom: 10 }}>Main culprits: Smart Dogs (480mg each), Costco pizza (~1,300mg), UAF calzones (~1,200mg), chorizo (510mg), Java Joe grilled cheese (high salt).</div>

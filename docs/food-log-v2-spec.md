@@ -192,7 +192,7 @@ Recommendations render in the day view and roll up into the 30-day summary's Wat
 ```jsonc
 {
   // floors = aim at/above; caps = stay at/below.  rda = standard baseline, elite = performance target.
-  "protein_g":    { "type": "floor", "rda": 56,   "elite": 160,  "note": "1.8–2.2 g/kg for hard training + lean mass retention; 160g ≈ ~80kg. Confirm bodyweight to tune." },
+  "protein_g":    { "type": "floor", "rda": 45,   "elite": 115,  "note": "~2.0–2.2 g/kg at 50–55 kg bodyweight for hard training + lean mass. Note: lower than the old 130g app default, which was above your bodyweight need." },
   "fiber_g":      { "type": "floor", "rda": 30,   "elite": 40 },
   "sodium_mg":    { "type": "cap",   "rda": 2300, "elite": 2300, "note": "Cap stays — your log trends high. Add electrolytes back only around long/sweaty rides, not at the dinner table." },
   "sugar_g":      { "type": "cap",   "rda": 50,   "elite": 40,   "warn": 60, "note": "Added sugar. Lean abs = tighter cap; whole-fruit sugar is fine." },
