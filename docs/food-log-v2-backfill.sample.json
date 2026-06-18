@@ -1,0 +1,33 @@
+{
+  "_comment": "OPT-IN backfill for Food Log v2. Paste into the System tab → 'MERGE FOOD LOG' box. Adds two days that were NEVER itemized in the food log (Apr 10 & Apr 12, 2026), with day-level micronutrient estimates reconstructed from the Brain Dump's mid-April analysis. Merging is non-destructive (per-date field merge) — it will NOT overwrite any existing day's meals/health. NOTE: Apr 6, Apr 8, and Apr 15 were intentionally EXCLUDED because the Brain Dump's micro tables for those dates describe different meals than your food log already has (e.g. Apr 8 log = caprese/band-practice ~72g protein; Brain Dump Apr 8 = chips/Doritos graze, 38g). Backfilling those would conflict with logged data. These two are estimates only (source: brain-dump).",
+
+  "2026-04-10": {
+    "label": "Apr 10 — reconstructed micros (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [],
+    "health": {
+      "notes": "No itemized food log for this day. Brain Dump reconstruction: aggressive workday on high-convenience packaged proteins — Greek yogurt (~1.5 cups), granola, 2 Kirkland chewy protein bars, 2 Field Roast smoked apple sage sausages, large side salad, Bitchin' sauce. ~2,300 kcal."
+    },
+    "nutrients": {
+      "protein_g": 105, "fiber_g": 28, "omega3_g": 0.8,
+      "sodium_mg": 2650, "potassium_mg": 950, "calcium_mg": 850,
+      "iron_mg": 14, "magnesium_mg": 160, "vitamin_a_iu": 2200
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-04-12": {
+    "label": "Apr 12 — reconstructed micros (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [],
+    "health": {
+      "notes": "No itemized food log for this day. Brain Dump reconstruction: weekend prep day on Indian staples — 3 dosas, potato masala sabji, chai, 2 servings homemade oat cookies, handful of walnuts. Protein dropped without the yogurt/shake anchors. ~1,850 kcal. Notable: walnuts pushed omega-3 (ALA) to ~2.5g — the best omega-3 day in the window."
+    },
+    "nutrients": {
+      "protein_g": 45, "omega3_g": 2.5,
+      "sodium_mg": 1100, "potassium_mg": 1200, "calcium_mg": 250,
+      "iron_mg": 8, "magnesium_mg": 130, "folate_ug": 110
+    },
+    "_source": "brain-dump"
+  }
+}
