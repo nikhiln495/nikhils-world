@@ -3835,6 +3835,8 @@ const sugarLabel = (s) => s === "ok" ? "✅ OK" : s === "warn" ? "⚠️ Over" :
 function formatDate(d) {
   return new Date(d + "T12:00:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
 }
+const isLogDateKey = (k) => /^\d{4}-\d{2}-\d{2}$/.test(k);
+const logDateKeys = (log) => Object.keys(log).filter(isLogDateKey);
 function calcTotal(meals) {
   return meals.reduce((s, m) => s + m.items.reduce((ss, i) => ss + (i.kcal || 0), 0), 0);
 }
@@ -4094,7 +4096,7 @@ function NutrientPanel({ date, data }) {
 
 function MicroTrends({ log }) {
   const [tier, setTier] = useState('elite');
-  const dates = Object.keys(log).sort();
+  const dates = logDateKeys(log).sort();
   const watch = ['protein_g','fiber_g','sugar_g','omega3_g','iron_mg','zinc_mg','calcium_mg','magnesium_mg','potassium_mg','vitamin_d_iu','b12_ug','vitamin_c_mg'];
   const agg = {};
   dates.forEach(d => { const t = computeDayTotals(log[d], d); watch.forEach(k => { if (t[k] != null) (agg[k] = agg[k] || []).push(t[k]); }); });
@@ -4568,7 +4570,7 @@ function MealEditor({ meal, onSave, onCancel, onDelete }) {
 }
 
 function WeekSummary({ log }) {
-  const dates = Object.keys(log).sort();
+  const dates = logDateKeys(log).sort();
   const intakes = dates.map(d => calcTotal(log[d].meals));
   const burns = dates.map(d => getTotalBurn(log[d].health));
   const proteins = dates.map(d => calcProtein(log[d].meals));
@@ -4713,9 +4715,9 @@ function FoodLog() {
     if (log === null) {
       setLog(initialLog);
       // pick today if it exists, else most recent
-      setActiveDate(todayKey in initialLog ? todayKey : Object.keys(initialLog).sort().reverse()[0]);
+      setActiveDate(todayKey in initialLog ? todayKey : logDateKeys(initialLog).sort().reverse()[0]);
     } else if (log && !log[activeDate]) {
-      const dates = Object.keys(log).sort().reverse();
+      const dates = logDateKeys(log).sort().reverse();
       if (dates.length) setActiveDate(todayKey in log ? todayKey : dates[0]);
     }
     // eslint-disable-next-line
@@ -4725,12 +4727,12 @@ function FoodLog() {
     <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:200, color:"#aaa", fontFamily:"Georgia, serif" }}>Loading…</div>
   );
 
-  const dates = Object.keys(log).sort().reverse();
+  const dates = logDateKeys(log).sort().reverse();
   const updateDay = (newDayData) => setLog({ ...log, [activeDate]: newDayData });
   const deleteDay = (date) => {
     const n = { ...log }; delete n[date];
     setLog(n);
-    if (activeDate === date) setActiveDate(Object.keys(n).sort().reverse()[0] || todayKey);
+    if (activeDate === date) setActiveDate(logDateKeys(n).sort().reverse()[0] || todayKey);
   };
   const startNewDay = (date, label) => {
     if (log[date]) {
@@ -8166,7 +8168,7 @@ function App() {
                   // paste omits (e.g. meals/health when only backfilling `nutrients`)
                   // are preserved from the existing day.
                   const merged = { ...base };
-                  for (const dk of Object.keys(paste)) {
+                  for (const dk of dateKeys) {
                     merged[dk] = (base[dk] && typeof base[dk] === 'object' && typeof paste[dk] === 'object' && !Array.isArray(paste[dk]))
                       ? { ...base[dk], ...paste[dk] }
                       : paste[dk];
