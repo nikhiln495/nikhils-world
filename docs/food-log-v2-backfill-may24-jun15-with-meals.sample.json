@@ -1,0 +1,599 @@
+{
+  "_comment": "OPT-IN backfill v2 (WITH MEALS / CALORIES) for the May 24–Jun 15, 2026 gap. SUPERSEDES the earlier micros-only backfill — paste this into System tab → 'MERGE FOOD LOG' (it's safe to paste on top of the previous merge; the per-date merge is non-destructive and these are full day objects). WHY THIS EXISTS: the app derives a day's calories ONLY by summing item.kcal across meals[], so the earlier file's empty meals:[] made every backfilled day show 0 kcal. This file adds an itemized meal per day so calories (and protein) populate. SOURCING: Jun 8/14/15 use the Brain Dump's exact itemized calorie tables. Every other day with a recorded day-total (May 24,26,28,29,30,31, Jun 1,4,5,6,7) is itemized to sum to that source total, with per-item protein distributed to match the day's protein figure. NO-TOTAL DAYS (Jun 2, 8, 9–13): the source gave a food list + micronutrients but never a calorie or protein total, so calories here are GOOD-FAITH ESTIMATES from the actual foods eaten (clearly flagged in each meal's note), and per-item protein is intentionally omitted so the protein total stays blank rather than understated. INTENTIONALLY ABSENT (no source data at all): May 20–23, 25, 27, Jun 3, 16, 17. DESIGN NOTE: item names are deliberately phrased so none exactly match the app's FOOD_MICROS auto-lookup table — this keeps the carefully-set day-level `nutrients` micronutrient overrides authoritative and prevents accidental double-counting. Source: brain-dump."
+,
+  "2026-05-24": {
+    "label": "May 24 — reconstructed micros (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260524",
+        "label": "Reconstructed log 🧬",
+        "items": [
+          { "name": "1 leftover Costco pizza slice (small 12-cut)", "kcal": 380, "protein": 9 },
+          { "name": "1 tbsp powdered parmesan", "kcal": 22, "protein": 2 },
+          { "name": "1 oat chocolate-chip cookie", "kcal": 150, "protein": 1 }
+        ],
+        "note": "Under-fueled active-recovery day (~500–600 kcal logged). Itemized to the source day-total."
+      }
+    ],
+    "health": {
+      "notes": "Significantly under-fueled active-recovery day, ~500-600 kcal logged: 1 leftover slice Costco pizza, 1 tbsp powdered parmesan, 1 oat chocolate-chip cookie. Missed the morning Greek yogurt anchor — protein crashed to single digits."
+    },
+    "nutrients": {
+      "protein_g": 12, "omega3_g": 0.2,
+      "sodium_mg": 1000, "potassium_mg": 150, "calcium_mg": 300,
+      "iron_mg": 3, "magnesium_mg": 35, "zinc_mg": 2,
+      "vitamin_a_iu": 400, "vitamin_c_mg": 2, "folate_ug": 30
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-05-26": {
+    "label": "May 26 — reconstructed micros (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260526",
+        "label": "Reconstructed log 🧬",
+        "items": [
+          { "name": "1 croissant (partial)", "kcal": 250, "protein": 4 },
+          { "name": "1 snack/protein bar", "kcal": 200, "protein": 10 },
+          { "name": "Sour Patch Kids (handful)", "kcal": 200, "protein": 0 },
+          { "name": "2 plant-based burger patties", "kcal": 480, "protein": 18 },
+          { "name": "cheese slices", "kcal": 150, "protein": 8 },
+          { "name": "condiments (mayo/ketchup)", "kcal": 120, "protein": 0 },
+          { "name": "side salad w/ dressing", "kcal": 250, "protein": 2 }
+        ],
+        "note": "Snack-heavy, low-protein day. Itemized to the source ~1,600–1,800 kcal / ~35–50g protein range."
+      }
+    ],
+    "health": {
+      "notes": "Low-protein, snack-heavy day (~1,600-1,800 kcal, ~35-50g protein) — missed the yogurt anchor again. Croissant bit, snack/protein bar, Sour Patch Kids, burger patties (likely Impossible), cheese, condiments, salad."
+    },
+    "nutrients": {
+      "protein_g": 42, "omega3_g": 0.5,
+      "sodium_mg": 1800, "potassium_mg": 800, "calcium_mg": 300,
+      "iron_mg": 10, "magnesium_mg": 85, "zinc_mg": 6,
+      "vitamin_a_iu": 1000, "vitamin_c_mg": 15, "folate_ug": 75
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-05-28": {
+    "label": "May 28 — reconstructed micros (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260528",
+        "label": "Reconstructed log 🧬",
+        "items": [
+          { "name": "1 homemade PB/whey protein bar", "kcal": 280, "protein": 18 },
+          { "name": "1 large Costco pizza slice", "kcal": 700, "protein": 34 },
+          { "name": "5 parmesan packets", "kcal": 110, "protein": 10 },
+          { "name": "3 scoops UAF ice cream", "kcal": 440, "protein": 4 },
+          { "name": "black tea", "kcal": 0, "protein": 0 }
+        ],
+        "note": "Fully-logged 'Ice Cream Thursday'. Itemized to the source ~1,535 kcal / ~66g protein."
+      }
+    ],
+    "health": {
+      "notes": "Fully-logged but light 'Ice Cream Thursday' day, ~1,535 kcal: homemade PB/whey bar, large Costco pizza slice, 5 parmesan packets, 3 scoops UAF ice cream, black tea."
+    },
+    "nutrients": {
+      "protein_g": 66, "omega3_g": 0.4,
+      "sodium_mg": 2500, "potassium_mg": 800, "calcium_mg": 1100,
+      "iron_mg": 8, "magnesium_mg": 110, "zinc_mg": 6,
+      "vitamin_a_iu": 1400, "vitamin_c_mg": 4, "folate_ug": 100
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-05-29": {
+    "label": "May 29 — reconstructed micros (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260529",
+        "label": "Reconstructed log 🧬",
+        "items": [
+          { "name": "1 Impossible patty (breakfast sandwich)", "kcal": 240, "protein": 19 },
+          { "name": "sourdough loaf (sandwich)", "kcal": 300, "protein": 10 },
+          { "name": "~4 thick slices Beecher's/cheddar", "kcal": 460, "protein": 28 },
+          { "name": "kale / tomato / mayo (sandwich fixings)", "kcal": 200, "protein": 3 },
+          { "name": "evening pizza flight (multiple slices)", "kcal": 1400, "protein": 55 },
+          { "name": "side salad", "kcal": 250, "protein": 5 }
+        ],
+        "note": "Itemized to the source ~2,850 kcal / ~120g protein."
+      }
+    ],
+    "health": {
+      "notes": "~2,850 kcal, ~120g+ protein, ~170g fat. Morning loaded sandwich (Impossible patty, sourdough, ~4 thick Beecher's/cheddar slices, kale/tomato/mayo). Evening pizza flight + side salad. Sodium/calcium/iron were only described qualitatively (High/Excellent/Solid) in the source — no number given, so omitted here."
+    },
+    "nutrients": {
+      "protein_g": 120, "omega3_g": 2.5,
+      "potassium_mg": 1200, "magnesium_mg": 140, "zinc_mg": 12,
+      "vitamin_a_iu": 3000, "vitamin_c_mg": 45, "vitamin_d_iu": 30, "folate_ug": 150
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-05-30": {
+    "label": "May 30 — reconstructed micros (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260530",
+        "label": "Reconstructed log 🧬",
+        "items": [
+          { "name": "bean-&-cheese pizza slice", "kcal": 350, "protein": 14 },
+          { "name": "regular pizza slice", "kcal": 300, "protein": 12 },
+          { "name": "Costco shredded cheese (side)", "kcal": 200, "protein": 12 },
+          { "name": "sour cream", "kcal": 60, "protein": 1 },
+          { "name": "salsa & tomatoes", "kcal": 40, "protein": 2 },
+          { "name": "kettle chips + French-onion dip", "kcal": 350, "protein": 4 },
+          { "name": "Sipping Streams veggie bun", "kcal": 180, "protein": 4.5 },
+          { "name": "chocolate cupcake", "kcal": 175, "protein": 3 }
+        ],
+        "note": "Itemized to the source ~1,655 kcal / ~52.5g protein."
+      }
+    ],
+    "health": {
+      "notes": "~1,655 kcal, ~52.5g protein. Bean-&-cheese slice, regular pizza slice, Costco shredded cheese, sour cream, salsa, tomatoes, kettle chips + French-onion dip, veggie bun, chocolate cupcake."
+    },
+    "nutrients": {
+      "protein_g": 52.5, "omega3_g": 0.5,
+      "potassium_mg": 1300, "magnesium_mg": 90, "zinc_mg": 4,
+      "vitamin_a_iu": 1800, "vitamin_c_mg": 20, "vitamin_d_iu": 15, "folate_ug": 110
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-05-31": {
+    "label": "May 31 — reconstructed micros (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260531",
+        "label": "Reconstructed log 🧬",
+        "items": [
+          { "name": "post-therapy pizza slice", "kcal": 450, "protein": 18 },
+          { "name": "Moody's BBQ plate (Impossible patties)", "kcal": 850, "protein": 55 },
+          { "name": "BBQ sides (beans/bread)", "kcal": 138, "protein": 4 },
+          { "name": "brownie", "kcal": 300, "protein": 4 },
+          { "name": "ice cream", "kcal": 350, "protein": 6 },
+          { "name": "1 oat chocolate-chip cookie", "kcal": 150, "protein": 2 }
+        ],
+        "note": "Itemized to the source ~2,238 kcal / ~89g protein."
+      }
+    ],
+    "health": {
+      "notes": "~2,238 kcal, ~89g protein. Post-therapy pizza slice, Moody's BBQ (Impossible patties), brownie, ice cream, oat cookie. No sodium/calcium/iron figures given in the source for this day."
+    },
+    "nutrients": {
+      "protein_g": 89, "omega3_g": 0.8,
+      "potassium_mg": 1100, "magnesium_mg": 130, "zinc_mg": 14,
+      "vitamin_a_iu": 800, "vitamin_c_mg": 5, "vitamin_d_iu": 20, "folate_ug": 80
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-06-01": {
+    "label": "Jun 1 — reconstructed micros (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260601",
+        "label": "Reconstructed log 🧬",
+        "items": [
+          { "name": "Kirkland Greek yogurt bowl", "kcal": 260, "protein": 24 },
+          { "name": "veg red-sauce & white pizza squares", "kcal": 600, "protein": 35 },
+          { "name": "El Dorado potato tacos x2", "kcal": 480, "protein": 13 },
+          { "name": "rice & refried beans", "kcal": 350, "protein": 14.5 },
+          { "name": "grapefruit Paloma (cocktail)", "kcal": 200, "protein": 0 },
+          { "name": "chocolate sea-salt caramel", "kcal": 140, "protein": 1 }
+        ],
+        "note": "Itemized to the source ~2,030 kcal / ~87.5g protein."
+      }
+    ],
+    "health": {
+      "notes": "~2,030 kcal, ~87.5g protein, ~74.5g fat, ~213g carbs. Kirkland Greek yogurt, veg pizza squares, El Dorado potato tacos x2, rice & refried beans, grapefruit Paloma, chocolate sea-salt caramel."
+    },
+    "nutrients": {
+      "protein_g": 87.5, "omega3_g": 0.4,
+      "potassium_mg": 1600, "magnesium_mg": 140, "zinc_mg": 4.5,
+      "vitamin_a_iu": 1200, "vitamin_c_mg": 40, "vitamin_d_iu": 0, "folate_ug": 160
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-06-02": {
+    "label": "Jun 2 — reconstructed micros, partial data day (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260602",
+        "label": "Reconstructed log (partial) 🧬",
+        "items": [
+          { "name": "Kirkland Greek yogurt", "kcal": 260 },
+          { "name": "tea (w/ splash of milk)", "kcal": 20 },
+          { "name": "strained cocoa drink", "kcal": 70 },
+          { "name": "breakfast — unspecified (rough est.)", "kcal": 300 },
+          { "name": "late dinner — unspecified (rough est.)", "kcal": 450 }
+        ],
+        "note": "PARTIAL DAY: only the yogurt/tea/cocoa were itemized in the source. Breakfast & dinner were logged as 'unspecified', so those two lines are rough good-faith estimates. No full-day protein total exists, so per-item protein is intentionally left blank."
+      }
+    ],
+    "health": {
+      "notes": "Thin, low-protein day well below target — no macro total exists in the source. Kirkland Greek yogurt, tea, unspecified breakfast, strained cocoa, unspecified late dinner."
+    },
+    "nutrients": {
+      "omega3_g": 0.1, "potassium_mg": 600, "magnesium_mg": 60, "zinc_mg": 2.5,
+      "vitamin_a_iu": 100, "vitamin_c_mg": 0, "vitamin_d_iu": 0, "folate_ug": 20
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-06-04": {
+    "label": "Jun 4 — reconstructed micros (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260604",
+        "label": "Reconstructed log 🧬",
+        "items": [
+          { "name": "1 large Costco pizza slice", "kcal": 700, "protein": 34 },
+          { "name": "tortilla chips", "kcal": 400, "protein": 4 },
+          { "name": "street-corn dip", "kcal": 250, "protein": 6.5 },
+          { "name": "Bitchin' sauce", "kcal": 130, "protein": 3 },
+          { "name": "Greek yogurt (a few tbsp)", "kcal": 110, "protein": 14 },
+          { "name": "1 oat chocolate-chip cookie", "kcal": 150, "protein": 2 }
+        ],
+        "note": "Itemized to the source ~1,740 kcal / ~63.5g protein."
+      }
+    ],
+    "health": {
+      "notes": "~1,740 kcal, ~63.5g protein. Costco pizza slice, tortilla chips, street-corn dip, Bitchin' sauce, a few tbsp Greek yogurt, oat-choc-chip cookie."
+    },
+    "nutrients": {
+      "protein_g": 63.5, "omega3_g": 0.8,
+      "potassium_mg": 900, "magnesium_mg": 110, "zinc_mg": 5,
+      "vitamin_a_iu": 1400, "vitamin_c_mg": 8, "vitamin_d_iu": 15, "folate_ug": 120
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-06-05": {
+    "label": "Jun 5 — reconstructed micros (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260605",
+        "label": "Reconstructed log 🧬",
+        "items": [
+          { "name": "large Greek-yogurt bowl", "kcal": 380, "protein": 36 },
+          { "name": "East Ramp wood-fired pizza (3 slices)", "kcal": 900, "protein": 42 },
+          { "name": "two homemade pizzas (portions)", "kcal": 700, "protein": 36 },
+          { "name": "half enchilada + shredded cheese", "kcal": 300, "protein": 12 },
+          { "name": "nut granola", "kcal": 250, "protein": 6 },
+          { "name": "1 oat chocolate-chip cookie", "kcal": 130, "protein": 0 }
+        ],
+        "note": "Highest-protein day in the window. Itemized to the source ~2,660 kcal / ~132g protein."
+      }
+    ],
+    "health": {
+      "notes": "~2,660 kcal, ~132g protein — highest-protein day in this window. Large Greek-yogurt bowl (~36g protein), East Ramp wood-fired pizza (3 slices), two homemade pizzas, half an enchilada + shredded cheese, nut granola, cookie."
+    },
+    "nutrients": {
+      "protein_g": 132, "omega3_g": 1.2,
+      "potassium_mg": 1400, "magnesium_mg": 180, "zinc_mg": 9,
+      "vitamin_a_iu": 2500, "vitamin_c_mg": 12, "vitamin_d_iu": 30, "folate_ug": 150
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-06-06": {
+    "label": "Jun 6 — reconstructed micros (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260606",
+        "label": "Reconstructed log 🧬",
+        "items": [
+          { "name": "Greek yogurt", "kcal": 260, "protein": 24 },
+          { "name": "leftover homemade pizza", "kcal": 450, "protein": 22 },
+          { "name": "parmesan", "kcal": 90, "protein": 8 },
+          { "name": "3 Kirkland protein bars", "kcal": 570, "protein": 30 },
+          { "name": "white-sauce pizza x2 slices", "kcal": 550, "protein": 22 },
+          { "name": "1 oat chocolate-chip cookie", "kcal": 150, "protein": 1 }
+        ],
+        "note": "Itemized to the source ~2,070 kcal / ~107g protein."
+      }
+    ],
+    "health": {
+      "notes": "~2,070 kcal, ~107g protein. Yogurt, leftover homemade pizza, parmesan, 3 Kirkland bars, white-sauce pizza x2, oat-choc cookie."
+    },
+    "nutrients": {
+      "protein_g": 107, "omega3_g": 0.6,
+      "potassium_mg": 1050, "magnesium_mg": 160, "zinc_mg": 7,
+      "vitamin_a_iu": 1100, "vitamin_c_mg": 4, "vitamin_d_iu": 10, "folate_ug": 90
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-06-07": {
+    "label": "Jun 7 — reconstructed micros (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260607",
+        "label": "Reconstructed log 🧬",
+        "items": [
+          { "name": "enchiladas + refried beans", "kcal": 500, "protein": 22 },
+          { "name": "Field Roast chipotle chorizo x2", "kcal": 480, "protein": 30 },
+          { "name": "1 Costco giant pizza slice", "kcal": 700, "protein": 35 },
+          { "name": "tortilla chips", "kcal": 300, "protein": 4 },
+          { "name": "Bitchin' sauce", "kcal": 130, "protein": 3 },
+          { "name": "laddoo", "kcal": 200, "protein": 3 }
+        ],
+        "note": "Itemized to the source ~2,310 kcal / ~97g protein."
+      }
+    ],
+    "health": {
+      "notes": "~2,310 kcal, ~97g protein. Enchiladas + refried beans, Field Roast chipotle chorizo x2, Costco giant pizza slice, tortilla chips, Bitchin' sauce, laddoo."
+    },
+    "nutrients": {
+      "protein_g": 97, "omega3_g": 1.0,
+      "potassium_mg": 1800, "magnesium_mg": 170, "zinc_mg": 8,
+      "vitamin_a_iu": 1900, "vitamin_c_mg": 15, "vitamin_d_iu": 15, "folate_ug": 160
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-06-08": {
+    "label": "Jun 8 — reconstructed micros, partial macro data (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260608",
+        "label": "Reconstructed log (breakfast itemized, rest est.) 🧬",
+        "items": [
+          { "name": "homemade enchilada (~1.25 portions w/ refried beans)", "kcal": 275 },
+          { "name": "Field Roast smoked apple sage sausage", "kcal": 220 },
+          { "name": "sour cream (1 tbsp)", "kcal": 30 },
+          { "name": "baby lettuce", "kcal": 5 },
+          { "name": "black tea + half & half splash", "kcal": 20 },
+          { "name": "red/white pizza (slices) — est.", "kcal": 600 },
+          { "name": "peanut butter (~2 tbsp) — est.", "kcal": 190 },
+          { "name": "granola — est.", "kcal": 250 },
+          { "name": "maple latte (whole milk) — est.", "kcal": 250 }
+        ],
+        "note": "Only the ~550 kcal breakfast was itemized in the source (first 5 lines). The rest of the day (pizza, peanut butter, granola, maple latte) was named but never quantified, so those lines are good-faith estimates. No reliable full-day protein total exists, so per-item protein is intentionally left blank."
+      }
+    ],
+    "health": {
+      "notes": "No full-day protein/calorie total exists — only an itemized ~550kcal/34.5g-protein breakfast (enchilada, Field Roast sausage, sour cream, lettuce, black tea w/ half-and-half) was found; the rest of the day (pizza, peanut butter, granola, maple latte mentioned) was never itemized, so protein_g is intentionally omitted below."
+    },
+    "nutrients": {
+      "omega3_g": 0.5, "sodium_mg": 3100, "potassium_mg": 1200, "calcium_mg": 450,
+      "iron_mg": 12, "magnesium_mg": 180, "zinc_mg": 4,
+      "vitamin_a_iu": 1500, "vitamin_c_mg": 15, "vitamin_d_iu": 40, "folate_ug": 110
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-06-09": {
+    "label": "Jun 9 — reconstructed micros, no macro data (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260609",
+        "label": "Reconstructed log (calories estimated) 🧬",
+        "items": [
+          { "name": "walnut salad (w/ mayo)", "kcal": 450 },
+          { "name": "peanut butter (~2 tbsp)", "kcal": 190 },
+          { "name": "cheddar cheese", "kcal": 220 },
+          { "name": "red/white pizza (slices)", "kcal": 650 },
+          { "name": "Kirkland Greek yogurt", "kcal": 200 },
+          { "name": "granola", "kcal": 250 },
+          { "name": "1 oat chocolate-chip cookie", "kcal": 150 }
+        ],
+        "note": "Source gave a food list + micronutrients but NO calorie or protein total. Calories are good-faith estimates from the named foods; protein intentionally left blank."
+      }
+    ],
+    "health": {
+      "notes": "No protein/calorie total exists in the source for this day — only a micronutrient breakdown. Walnut salad, peanut butter, cheddar cheese, red/white pizza, Kirkland Greek yogurt, granola, oat cookie."
+    },
+    "nutrients": {
+      "omega3_g": 2.5, "sodium_mg": 2650, "potassium_mg": 850, "calcium_mg": 800,
+      "iron_mg": 10, "magnesium_mg": 150, "zinc_mg": 5.5,
+      "vitamin_a_iu": 2800, "vitamin_c_mg": 12, "vitamin_d_iu": 20, "folate_ug": 85
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-06-10": {
+    "label": "Jun 10 — reconstructed micros, no macro data (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260610",
+        "label": "Reconstructed log (calories estimated) 🧬",
+        "items": [
+          { "name": "cheddar cheese", "kcal": 220 },
+          { "name": "red pizza (slices)", "kcal": 550 },
+          { "name": "2 Kirkland protein bars", "kcal": 380 },
+          { "name": "chickpea curry bowl (w/ rice)", "kcal": 550 },
+          { "name": "Kirkland Greek yogurt", "kcal": 200 },
+          { "name": "1 oat chocolate-chip cookie", "kcal": 150 }
+        ],
+        "note": "Source gave a food list + micronutrients but NO calorie or protein total. Calories are good-faith estimates from the named foods; protein intentionally left blank."
+      }
+    ],
+    "health": {
+      "notes": "No protein/calorie total exists in the source for this day — only a micronutrient breakdown. Cheddar cheese, red pizza, Kirkland bars, chickpea curry bowl, Kirkland Greek yogurt, oat cookie."
+    },
+    "nutrients": {
+      "omega3_g": 0.4, "sodium_mg": 2400, "potassium_mg": 1100, "calcium_mg": 950,
+      "iron_mg": 14, "magnesium_mg": 160, "zinc_mg": 6,
+      "vitamin_a_iu": 1200, "vitamin_c_mg": 18, "vitamin_d_iu": 20, "folate_ug": 180
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-06-11": {
+    "label": "Jun 11 — reconstructed micros, no macro data (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260611",
+        "label": "Reconstructed log (calories estimated) 🧬",
+        "items": [
+          { "name": "1 Costco pizza slice", "kcal": 700 },
+          { "name": "white/red homemade pizza (slices)", "kcal": 650 },
+          { "name": "Field Roast sausage", "kcal": 220 },
+          { "name": "parmesan", "kcal": 90 },
+          { "name": "Kirkland Greek yogurt", "kcal": 200 },
+          { "name": "tortilla chips / snack", "kcal": 200 }
+        ],
+        "note": "Source gave a food list + micronutrients (notably very high sodium ~3,850mg) but NO calorie or protein total. Calories are good-faith estimates from the named foods; protein intentionally left blank."
+      }
+    ],
+    "health": {
+      "notes": "No protein/calorie total exists in the source for this day — only a micronutrient breakdown. Costco pizza, white/red pizza, Field Roast sausage, parmesan, Kirkland Greek yogurt."
+    },
+    "nutrients": {
+      "omega3_g": 0.3, "sodium_mg": 3850, "potassium_mg": 1050, "calcium_mg": 1250,
+      "iron_mg": 13, "magnesium_mg": 95, "zinc_mg": 7,
+      "vitamin_a_iu": 2400, "vitamin_c_mg": 18, "vitamin_d_iu": 30, "folate_ug": 120
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-06-12": {
+    "label": "Jun 12 — reconstructed micros, no macro data (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260612",
+        "label": "Reconstructed log (calories estimated) 🧬",
+        "items": [
+          { "name": "garlic bread", "kcal": 300 },
+          { "name": "white pizza (slices)", "kcal": 550 },
+          { "name": "shredded cheese", "kcal": 150 },
+          { "name": "Orgain shake (banana + berries + oat milk)", "kcal": 350 },
+          { "name": "Kirkland Greek yogurt", "kcal": 200 },
+          { "name": "granola", "kcal": 250 }
+        ],
+        "note": "Source gave a food list + micronutrients but NO calorie or protein total. Calories are good-faith estimates from the named foods; protein intentionally left blank."
+      }
+    ],
+    "health": {
+      "notes": "No protein/calorie total exists in the source for this day — only a micronutrient breakdown. Garlic bread, white pizza, shredded cheese, banana/berries protein shake (Orgain), Kirkland Greek yogurt, granola."
+    },
+    "nutrients": {
+      "omega3_g": 0.5, "sodium_mg": 1950, "potassium_mg": 1450, "calcium_mg": 1100,
+      "iron_mg": 12, "magnesium_mg": 130, "zinc_mg": 6,
+      "vitamin_a_iu": 1100, "vitamin_c_mg": 65, "vitamin_d_iu": 40, "folate_ug": 110
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-06-13": {
+    "label": "Jun 13 — reconstructed micros, no macro data (Brain Dump estimate, not itemized) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260613",
+        "label": "Reconstructed log (calories estimated) 🧬",
+        "items": [
+          { "name": "1 Kirkland protein bar", "kcal": 190 },
+          { "name": "1 oat chocolate-chip cookie", "kcal": 150 },
+          { "name": "Orgain shake (banana + berries)", "kcal": 350 },
+          { "name": "granola w/ oat milk", "kcal": 300 }
+        ],
+        "note": "Light day (source micros all low, sodium only ~650mg). Source gave a food list + micronutrients but NO calorie or protein total. Calories are good-faith estimates from the named foods; protein intentionally left blank."
+      }
+    ],
+    "health": {
+      "notes": "No protein/calorie total exists in the source for this day — only a micronutrient breakdown. Kirkland bar, oat cookie, banana/berries Orgain shake, oat milk granola."
+    },
+    "nutrients": {
+      "omega3_g": 0.4, "sodium_mg": 650, "potassium_mg": 850, "calcium_mg": 350,
+      "iron_mg": 10, "magnesium_mg": 80, "zinc_mg": 3,
+      "vitamin_a_iu": 300, "vitamin_c_mg": 50, "vitamin_d_iu": 40, "folate_ug": 60
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-06-14": {
+    "label": "Jun 14 — reconstructed from itemized log (Brain Dump estimate) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260614",
+        "label": "Reconstructed log (itemized in source) 🧬",
+        "items": [
+          { "name": "1 Costco deli pizza (1/6 slice, large)", "kcal": 700, "protein": 34 },
+          { "name": "spaghetti (~1.5 cups cooked)", "kcal": 220, "protein": 8 },
+          { "name": "Impossible meatballs (3)", "kcal": 200, "protein": 12 },
+          { "name": "tomato/red sauce (~1/2 cup)", "kcal": 45, "protein": 1 },
+          { "name": "small sourdough loaf (2 slices)", "kcal": 150, "protein": 5 },
+          { "name": "butter & garlic spread", "kcal": 20, "protein": 0 },
+          { "name": "parmesan powder (~1.5 tbsp)", "kcal": 30, "protein": 3 },
+          { "name": "sourdough heel (1 piece)", "kcal": 75, "protein": 3 },
+          { "name": "peanut butter (2.5 tbsp / ~40g)", "kcal": 238, "protein": 8.8 },
+          { "name": "homemade oat chocolate-chip cookie (0.7 serving)", "kcal": 105, "protein": 1.4 }
+        ],
+        "note": "Exact itemization from the source 'Initial Log' table (~1,783 kcal / ~76.2g protein)."
+      }
+    ],
+    "health": {
+      "notes": "~1,783 kcal, ~76.2g protein, ~71.7g fat, ~199.2g carbs ('Initial Log' / current grand totals — no later 'final' version was found for this date). Costco deli pizza slice, spaghetti + Impossible meatballs, sourdough, butter/garlic spread, parmesan, peanut butter, oat chocolate-chip cookie."
+    },
+    "nutrients": {
+      "protein_g": 76.2, "omega3_g": 0.6,
+      "sodium_mg": 3200, "potassium_mg": 1350, "calcium_mg": 850,
+      "iron_mg": 18, "magnesium_mg": 190, "zinc_mg": 14,
+      "vitamin_a_iu": 1600, "vitamin_c_mg": 10, "b12_ug": 3, "folate_ug": 220
+    },
+    "_source": "brain-dump"
+  },
+
+  "2026-06-15": {
+    "label": "Jun 15 — reconstructed from itemized 'Complete Final Log' (Brain Dump estimate) 🧬",
+    "schema": 2,
+    "meals": [
+      {
+        "id": "bf_20260615",
+        "label": "Reconstructed log (itemized in source) 🧬",
+        "items": [
+          { "name": "sourdough/French loaf (1 thick slice)", "kcal": 150, "protein": 5 },
+          { "name": "Costco shredded pizza cheese (~100g)", "kcal": 300, "protein": 26 },
+          { "name": "pizza sauce / marinara (2 tsp)", "kcal": 10, "protein": 0 },
+          { "name": "Alaska-grown tomato (1 whole)", "kcal": 30, "protein": 2 },
+          { "name": "Orgain protein shake (2 scoops)", "kcal": 150, "protein": 21 },
+          { "name": "1 banana", "kcal": 105, "protein": 1 },
+          { "name": "frozen strawberries (7)", "kcal": 25, "protein": 0.5 },
+          { "name": "frozen blueberries (17)", "kcal": 15, "protein": 0.2 },
+          { "name": "Kirkland oat milk (~0.5 cup)", "kcal": 60, "protein": 1 },
+          { "name": "Adukale Kayi Kodubale (entire 180g packet)", "kcal": 966, "protein": 9 },
+          { "name": "Field Roast smoked apple sage sausage", "kcal": 220, "protein": 23 },
+          { "name": "Bitchin' sauce (1.5 tbsp)", "kcal": 67, "protein": 1.5 },
+          { "name": "oat chocolate-chip cookie (0.3 serving)", "kcal": 45, "protein": 0.6 },
+          { "name": "peanut butter (1 tbsp)", "kcal": 95, "protein": 3.5 }
+        ],
+        "note": "Exact itemization from the source 'Complete Final Log' table (~2,238 kcal / ~94.3g protein). The 180g Kodubale packet alone was ~966 kcal."
+      }
+    ],
+    "health": {
+      "notes": "~2,238 kcal, ~94.3g protein, ~101.5g fat, ~237.6g carbs, ~22.6g fiber. Sourdough/cheese pizza bread, Orgain protein shake w/ banana + berries + oat milk, an entire 180g packet of Adukale Kayi Kodubale (~966 kcal alone), Field Roast sausage, Bitchin' sauce, oat cookie, peanut butter. This day had two micronutrient passes — values below prefer the later 'Complete Final Log' deep-dive numbers where they overlap (sodium/calcium/iron/potassium/magnesium/vitamin A/C/D/folate); zinc_mg and omega3_g are carried over from the earlier pass since the deep-dive table didn't cover them."
+    },
+    "nutrients": {
+      "protein_g": 94.3, "fiber_g": 22.6, "omega3_g": 0.6,
+      "sodium_mg": 3485, "potassium_mg": 1540, "calcium_mg": 1200,
+      "iron_mg": 15.5, "magnesium_mg": 107, "zinc_mg": 8,
+      "vitamin_a_iu": 1150, "vitamin_c_mg": 65, "vitamin_d_iu": 0, "folate_ug": 45
+    },
+    "_source": "brain-dump"
+  }
+}
