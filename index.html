@@ -55,6 +55,7 @@
     window.Recharts = window.Recharts || {};
 
     // ── Firebase init ──────────────────────────────────────────────
+    const AI_PROXY_URL = "PASTE_FUNCTION_URL_HERE"; // set after first deploy, per Keystone Runbook §3-4
     const firebaseConfig = {
       apiKey: "AIzaSyA0dH-rzuO36KKokNa_azNh7mMHk2eQzrM",
       authDomain: "nikhils-world.firebaseapp.com",
@@ -2380,10 +2381,10 @@ function SessionsPanel() {
     setSyncing(true);
     setSyncStatus('Connecting to Fireflies…');
     try {
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      const resp = await fetch(AI_PROXY_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify({ mode: 'proxy', body: {
           model: 'claude-sonnet-4-20250514',
           max_tokens: 4000,
           system: `You are a session summarizer. Use the Fireflies MCP to fetch recent transcripts.
@@ -2404,7 +2405,7 @@ For each found transcript, extract and return ONLY a JSON array (no other text) 
 Return maximum 15 most recent sessions. Return ONLY the JSON array, nothing else.`,
           messages: [{ role: 'user', content: 'Fetch my recent therapy and somatic session transcripts from Fireflies and summarize them.' }],
           mcp_servers: [{ type: 'url', url: 'https://api.fireflies.ai/mcp', name: 'fireflies' }]
-        })
+        }})
       });
       const data = await resp.json();
       // Extract text from response
@@ -2464,10 +2465,10 @@ Assignment: ${s.assignment || 'none'}
 Body: ${s.body_sensations || ''}
 ${s.raw_notes ? 'Notes: ' + s.raw_notes.slice(0, 400) : ''}`).join('\n---\n');
 
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      const resp = await fetch(AI_PROXY_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify({ mode: 'proxy', body: {
           model: 'claude-sonnet-4-20250514',
           max_tokens: 1500,
           system: `You are analyzing therapy and somatic sessions for a person named Nikhil.
@@ -2490,7 +2491,7 @@ Return ONLY a JSON object (no other text):
 }
 Return 3-5 foci. Focus on what's genuinely active, not historical.`,
           messages: [{ role: 'user', content: `Here are my recent sessions:\n\n${sessionDump}\n\nAnalyze my current foci.` }]
-        })
+        }})
       });
       const data = await resp.json();
       const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
