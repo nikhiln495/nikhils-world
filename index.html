@@ -167,6 +167,19 @@
         } catch(e) { return null; }
       },
 
+      // Like exportAll, but returns every doc individually keyed by its Firestore
+      // doc ID rather than its `key` field. Needed because multiple docs can
+      // legitimately share the same `key` field (e.g. dated log archives) —
+      // exportAll's {key: value} map would silently collapse those onto one entry.
+      exportAllDocs: async () => {
+        try { await window.__dbReady; } catch (_) {}
+        if (!db) return null;
+        try {
+          const snap = await db.collection('appdata').get();
+          return snap.docs.map(doc => ({ id: doc.id, key: doc.data().key || doc.id, value: doc.data().value }));
+        } catch(e) { return null; }
+      },
+
       // Lets the SaveStatusPill display "Local-only" mode distinctly
       isCloudReady: () => !!window.__dbAvailable,
     };
@@ -873,6 +886,72 @@ async function storageSet(key, value) {
   } catch { return false; }
 }
 
+// ── Logs durability: rollover threshold + archive discovery ──────────
+// Firestore's hard per-document limit is 1,048,576 chars. Keep the active
+// `kaizen4:logs` doc well under that so a silent write rejection (which is
+// what happened 2026-07-02) can't recur.
+const LOGS_SAFE_THRESHOLD = 800000; // chars
+const LOGS_KEEP_RECENT_DAYS = 7;
+
+// Find every appdata doc that holds an archived slice of daily logs — the
+// legacy `kaizen3:logs` freeze, plus any dated rollover archive (see
+// rolloverLogsIfNeeded below) — and merge them into one object. Archive docs
+// are identified by DOC ID pattern, not by the `key` field: the 2026-07-06
+// manual rescue doc stores key:'kaizen4:logs' (same as the active doc),
+// while auto-created archives (below) store their own doc ID as `key` —
+// so `key` can't reliably distinguish an archive from the active doc, but
+// the `_archive_` naming convention in the doc ID always can. Matching by
+// `key` alone is exactly how exportAll()'s {key: value} map silently
+// collapses a same-keyed archive onto the active entry — the bug this fixes.
+async function loadAllArchives() {
+  const merged = {};
+  const docs = await window.storage.exportAllDocs?.();
+  if (docs) {
+    const archiveDocs = docs.filter(d =>
+      d.id === 'kaizen3_logs' || d.key === SK.logsArchive ||
+      (typeof d.id === 'string' && /^kaizen[34]_logs_archive_/.test(d.id))
+    );
+    for (const d of archiveDocs) {
+      try {
+        const parsed = d.value ? JSON.parse(d.value) : null;
+        if (parsed) Object.assign(merged, parsed);
+      } catch {}
+    }
+    return merged;
+  }
+  // exportAllDocs unavailable (offline / localStorage fallback) — fall back
+  // to the one archive doc the app has always known about.
+  const legacy = await storageGet(SK.logsArchive);
+  if (legacy) Object.assign(merged, legacy);
+  return merged;
+}
+
+// If the active logs doc is approaching Firestore's size limit, move all but
+// the most recent LOGS_KEEP_RECENT_DAYS days into a new dated archive doc.
+// The active doc is only ever trimmed AFTER the archive write is confirmed —
+// never on an unconfirmed write, which is how the 2026-07-02 data loss
+// happened in the first place.
+async function rolloverLogsIfNeeded(activeLogs) {
+  if (JSON.stringify(activeLogs).length <= LOGS_SAFE_THRESHOLD) return null;
+
+  const dateKeys = Object.keys(activeLogs).sort();
+  if (dateKeys.length <= LOGS_KEEP_RECENT_DAYS) return null; // nothing old enough to move
+
+  const moveKeys = dateKeys.slice(0, -LOGS_KEEP_RECENT_DAYS);
+  const keepKeys = dateKeys.slice(-LOGS_KEEP_RECENT_DAYS);
+  const moved = {}; moveKeys.forEach(k => { moved[k] = activeLogs[k]; });
+  const kept  = {}; keepKeys.forEach(k => { kept[k]  = activeLogs[k]; });
+
+  const archiveDocId = `kaizen4_logs_archive_${todayISO()}`;
+  const archiveWriteOk = await storageSet(archiveDocId, moved);
+  if (!archiveWriteOk) return { ok: false };
+
+  const trimWriteOk = await storageSet(SK.logs, kept);
+  if (!trimWriteOk) return { ok: false }; // archive saved, active doc untouched — safe, just retry next boot
+
+  return { ok: true, kept, moved };
+}
+
 // ─────────────────────────────────────────────────────
 // ROOT APP
 // ─────────────────────────────────────────────────────
@@ -890,6 +969,9 @@ function KaizenApp() {
   const [saveSt,    setSaveSt]    = useState('idle');
   const [loaded,    setLoaded]    = useState(false);
   const [notice,    setNotice]    = useState(null);
+  // Persistent (no auto-dismiss) banner shown while a storage write is known
+  // to have failed. Distinct from `notice`, which auto-clears after 3.5s.
+  const [saveFailure, setSaveFailure] = useState(null);
   const fileRef   = useRef(null);
   const saveTimers = useRef({});
   const glance = window.useGlanceData();
@@ -900,11 +982,11 @@ function KaizenApp() {
       const ok = await testStorage();
       setStoreSt(ok ? 'active' : 'offline');
       if (ok) {
-        const [p,t,l,a] = await Promise.all([
+        const [p,t,l,archives] = await Promise.all([
           storageGet(SK.projects),
           storageGet(SK.tasks),
           storageGet(SK.logs),
-          storageGet(SK.logsArchive),
+          loadAllArchives(),
         ]);
         let seeded = null;
         try { const r = await window.storage.get('kaizen3:seeded'); seeded = r?.value; } catch {}
@@ -962,8 +1044,25 @@ function KaizenApp() {
             if (needsMigration) await storageSet(SK.tasks, migrated);
           }
         }
-        if (l) setLogsRaw(l);
-        if (a) setArchiveLogs(a);
+        // Auto-rollover: if the active logs doc is approaching Firestore's
+        // 1 MiB limit, move older days into a new dated archive doc before
+        // trimming the active one. Runs once per boot; never trims unless
+        // the archive write is confirmed first (see rolloverLogsIfNeeded).
+        if (l) {
+          const rollover = await rolloverLogsIfNeeded(l);
+          if (rollover?.ok) {
+            setLogsRaw(rollover.kept);
+            setArchiveLogs({ ...archives, ...rollover.moved });
+          } else {
+            setLogsRaw(l);
+            setArchiveLogs(archives);
+            if (rollover && rollover.ok === false) {
+              setSaveFailure({ message: "Auto-archive of older daily logs failed — the active log is near Firestore's size limit. Reload and check, or export a backup." });
+            }
+          }
+        } else {
+          setArchiveLogs(archives);
+        }
       }
       setLoaded(true);
     })();
@@ -977,7 +1076,20 @@ function KaizenApp() {
     saveTimers.current[key] = setTimeout(async () => {
       const ok = await storageSet(key, value);
       setSaveSt(ok ? 'saved' : 'error');
-      if (ok) setTimeout(() => setSaveSt('idle'), 1500);
+      if (ok) {
+        setTimeout(() => setSaveSt('idle'), 1500);
+        return;
+      }
+      // A failed write is invisible if we only rely on the debounced status
+      // pill — this banner stays until the user dismisses it (no timer).
+      let size = 0;
+      try { size = JSON.stringify(value).length; } catch {}
+      const likelyFull = key === SK.logs && size > 1000000;
+      setSaveFailure({
+        message: likelyFull
+          ? "A save didn't go through. Your latest entry may not be stored. The daily log is full and needs archiving — reload and check, or export a backup. (Auto-rollover is meant to prevent this; if you're seeing it, the rollover write itself likely failed too.)"
+          : "A save didn't go through. Your latest entry may not be stored. Reload and check, or export a backup."
+      });
     }, 350);
   };
 
@@ -1117,6 +1229,17 @@ function KaizenApp() {
         {storeSt==='offline' && (
           <div style={{...alertBox, background:'#fffbeb',borderColor:'#fde68a',color:'#78350f',marginBottom:16}}>
             Auto-save unavailable. Hit <strong>Backup</strong> before closing the tab.
+          </div>
+        )}
+
+        {/* Persistent save-failure banner — stays until dismissed, unlike the flash notice below */}
+        {saveFailure && (
+          <div style={{...alertBox, background:'#fef2f2',borderColor:'#fecaca',color:'#7f1d1d',marginBottom:16,
+            display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:12}}>
+            <span>{saveFailure.message}</span>
+            <button onClick={()=>setSaveFailure(null)} style={{background:'none',border:'none',cursor:'pointer',color:'#7f1d1d',flexShrink:0,padding:2}} aria-label="Dismiss">
+              <X size={14}/>
+            </button>
           </div>
         )}
 
