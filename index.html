@@ -709,6 +709,9 @@ document.head.appendChild(__style);
 
   <!-- KaizenApp -->
   <script type="text/babel">
+  // AI proxy (holds the API key server-side; CORS allows https://nikhils-world.web.app only)
+  const AI_PROXY_URL = "https://us-central1-nikhils-world.cloudfunctions.net/anthropic";
+  const AI_MODEL = "claude-sonnet-5-5";
 const { useState, useEffect, useRef, useMemo } = React;
 const _LR = window.LucideReact || {};
 const CheckCircle2 = _LR.CheckCircle2 || (() => null);
@@ -2503,12 +2506,13 @@ function SessionsPanel() {
     setSyncing(true);
     setSyncStatus('Connecting to Fireflies…');
     try {
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      const resp = await fetch(AI_PROXY_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 4000,
+          model: AI_MODEL,
+          max_tokens: 16000,
+          output_config: { effort: 'low' },
           system: `You are a session summarizer. Use the Fireflies MCP to fetch recent transcripts.
 Search for transcripts mentioning "Shobha", "Brighton", or "therapy" in the last 60 days.
 For each found transcript, extract and return ONLY a JSON array (no other text) with objects:
@@ -2587,12 +2591,13 @@ Assignment: ${s.assignment || 'none'}
 Body: ${s.body_sensations || ''}
 ${s.raw_notes ? 'Notes: ' + s.raw_notes.slice(0, 400) : ''}`).join('\n---\n');
 
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      const resp = await fetch(AI_PROXY_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1500,
+          model: AI_MODEL,
+          max_tokens: 16000,
+          output_config: { effort: 'low' },
           system: `You are analyzing therapy and somatic sessions for a person named Nikhil.
 Return ONLY a JSON object (no other text):
 {
