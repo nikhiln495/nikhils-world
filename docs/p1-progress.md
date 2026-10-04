@@ -4,7 +4,7 @@ Branch: `claude/kind-shannon-6i3pkk` (assigned by the environment).
 
 ## Where I am
 
-Steps 1, 2 and 3 of 4 are committed (Nikhil replied "continue" after the step-2 pause). Next: step 4 (Learn, Dr. Shobha, Gaps, Progress).
+All 4 steps are committed. Every screen is built and checked in the harness. The PR stays a draft for Nikhil to review; nothing is merged.
 
 ## Precondition
 
@@ -24,10 +24,10 @@ Steps 1, 2 and 3 of 4 are committed (Nikhil replied "continue" after the step-2 
 | 1 | Today | done | harness scenarios (morning without a Daily Brief doc, evening without it, with the doc, east-of-UTC date): default stack, bedtime plan after 6 PM, Waking up button before noon until level 4 / up-at, Level 1–4 and up-at logging, Forgot box, card Log, homework strip with due dates and Add update, not-working practice hidden, yesterday's log untouched, Start opens the guided flow | — |
 | 2 | Library | done | harness: grouped by categories, search, the three "Where am I" filters, not-working stays visible, "after level 4" tag on post4, detail view fields, Change status needs a non-blank reason and appends `{date, change, reason, by:"Nikhil (app)"}`, rest of playbook unchanged, Log rep, no delete/remove buttons | — |
 | 3 | Guided flow | done | harness: one step per screen with Next/Back; optional before/after 0–10 with labels brace / on edge (cats sit, body) / fear / self-criticism (learn); thought-stop 60 s, power-nap 15 min, soothing-breath 3 min timers (countdown observed); passage-of-time hidden-clock count shows real elapsed seconds; grief-release tap counter to 11 only on steps that say 11; Save → entry with before/after and source "app" | Timers are visual only (vibrate where supported, no sound). |
-| 4 | Learn | not started | — | placeholder text |
-| 5 | Dr. Shobha | not started | — | placeholder text |
-| 6 | Gaps | not started | — | placeholder text |
-| 7 | Progress | not started | — | placeholder text |
+| 4 | Learn | done | harness: course name and why; path by weeks in stored order; per practice "N reps so far · first rep <date>" from the per-day logs, or "No reps yet"; reads 180 days of log docs; Start opens the guided flow | Reps older than 180 days aren't counted (see decisions). |
+| 5 | Dr. Shobha | done | harness: WhatsApp message lists open requests (owed by her) first, then the top 5 open queue items, numbered with no gaps, as capitalised sentences ending in punctuation, with practice ids swapped for names; closed requests and covered items left out; Copy puts exactly that text on the clipboard; Add appends `{item, since, status:"open"}`; Mark covered with a date sets `status:"covered"` + `coveredOn` on that item only; message renumbers afterwards; owed-by-her list; homework; Draft with Claude sends only the message, with no tools, and ids are swapped in the draft too; a 503 is shown | — |
+| 6 | Gaps | done | harness: theme, since, owners, options; Add appends `{theme, since, owners[], options[]}`; the new gap shows straight away; unreadable doc → Add disabled and doc untouched | — |
+| 7 | Progress | done | harness: reads exactly the last 30 per-day log docs (today plus 29 before it); missing day = no reps; an unreadable day is reported and left alone; reps in the last 7 / 30 days and last done per practice; Deep Pass comment + trend and note from `practice:progress` | — |
 | 8 | Stuck | done | harness: Stuck button on Today, Library, guided flow and Waking up; situations from `practice:stuck-map` in stored order, skipping missing ids, not-working and post4 (until level 4); **fallback**: missing doc and unreadable doc both use the built-in list with a small note, grief situation only after level 4, "Something else" last and sends his words to layer b; Ask Claude request body checked field by field against the spec (INDEX format, `now` over `when`, voice rules, context line with level + today's ratings), picks filtered in code (unknown / not-working / post4 dropped, max 3), Start → rep saved with source "app-stuck"; failures (500, no tool_use, unreachable) show what failed and point to the list; offline disables Ask Claude with a note and practices still run; layer c sends only the web_search tool, Save as proposal appends to `practice:outside-map`, playbook untouched; crisis footer only on this screen | The AI proxy itself was never called for real (faked in the harness). |
 | 9 | Waking up | done | harness: Q1/Q2 big buttons; fixed step rules checked for lying + cold + phone, eyes closed + dizzy + dread, propped, standing (first item of today's plan); missing ids skipped; a step naming 30 seconds gets a timer; "Didn't work, try another" uses single steps only (one step from a not-working practice, never physio, grief tapping or post4); I'm up → `{waking-ladder, level 4, time, note:<answers>, source:"app-waking"}` then today's first item; Coach me request restricted to pre4/stage4/any and filtered in code; no food suggested | — |
 
@@ -35,15 +35,14 @@ Steps 1, 2 and 3 of 4 are committed (Nikhil replied "continue" after the step-2 
 
 All go through `pRead` / `pWrite`, which throw on any key not starting with `practice:`.
 
-- read: `practice:playbook`, `practice:homework`, `practice:today:<YYYY_MM_DD>`, `practice:log:<YYYY_MM_DD>` (today and yesterday), `practice:stuck-map`
-- write (read-modify-write): `practice:log:<today>` (append entry), `practice:playbook` (status change + history), `practice:homework` (append to an item's `updates[]`), `practice:outside-map` (append a proposal)
-- Step 4 will add: `practice:shobha-queue`, `practice:progress` (read), `practice:log:<past 30 days>` (read).
+- read: `practice:playbook`, `practice:homework`, `practice:shobha-queue`, `practice:outside-map`, `practice:progress`, `practice:stuck-map`, `practice:today:<YYYY_MM_DD>`, `practice:log:<YYYY_MM_DD>` (today; yesterday; the last 30 days for Progress; the last 180 days for Learn)
+- write (read-modify-write, append only): `practice:log:<today>` (append entry), `practice:playbook` (status change + history), `practice:homework` (append to an item's `updates[]`), `practice:shobha-queue` (append item; mark covered), `practice:outside-map` (append gap or proposal)
 
 ## How checks are run
 
 ```
 NODE_PATH=$(npm root -g) node scripts/p1-check.js     # page load, nav, console errors
-NODE_PATH=$(npm root -g) node scripts/p1-test.js all  # all scenarios (or 2 / 3 for one step)
+NODE_PATH=$(npm root -g) node scripts/p1-test.js all  # all scenarios (or 2 / 3 / 4 for one step)
 ```
 
 The harness loads index.html in headless Chromium with:
@@ -59,6 +58,13 @@ Console errors from the deliberately blocked requests are not counted; any other
 
 - Step 3: `p1-test.js all` → 146 passed, 0 failed (steps 2 + 3). `grep -c "api.anthropic.com" index.html` → 0. Screenshots at 390×844 reviewed (Stuck with the built-in list, Waking up count step). Two bugs found by the checks and fixed before committing: "start over" in Waking up kept the old answers; returning from a practice to Stuck lost Claude's picks (lower screens now stay mounted while hidden).
 
+- Step 4: `p1-test.js all` → 195 passed, 0 failed (steps 2–4). `p1-check.js` → console errors: none. `grep -c "api.anthropic.com" index.html` → 0. Screenshots at 390×844 reviewed (Dr. Shobha, Progress, Learn). Audit: the Practice script calls `window.storage` only inside `pRead`/`pWrite` (key guard) and `fetch` only inside `pCallClaude` (AI proxy).
+
+## Not checked
+
+- The real AI proxy was never called; every request went to a local fake. The request bodies were checked field by field, but the live proxy's replies (for example, whether it allows `web_search`) were not.
+- Not tried on a real phone or against the real seeded docs. Field shapes the spec doesn't fix (for example `steps[]`, `evidence`, `updates[]`, `owedByDrShobha[]`) are displayed whether they hold strings or objects.
+
 ## Next step
 
-Step 4: Learn (4), Dr. Shobha (5) incl. WhatsApp message and Draft with Claude, Gaps (6), Progress (7).
+Nikhil reviews the draft PR. Nothing is left in the spec to build.

@@ -2,6 +2,7 @@
 // Uses the mocked window.storage from p1-check.js; the live Firestore is never touched.
 const { openPage } = require('./p1-check');
 const F = require('./p1-fixtures');
+const P_LEARN_DAYS = 180;
 
 let failures = 0, passes = 0;
 const ok = (cond, label) => { if (cond) { passes++; console.log('  ✓', label); } else { failures++; console.log('  ✗', label); } };
@@ -465,10 +466,159 @@ async function step3() {
   }
 }
 
+const logDoc = (iso, entries) => JSON.stringify({ date: iso, entries });
+const k = (iso) => 'practice:log:' + iso.replace(/-/g, '_');
+
+async function step4() {
+  console.log('\n[Learn]');
+  {
+    const seed = { ...F.base(),
+      [k('2026-09-20')]: logDoc('2026-09-20', [{ time: '09:00', practiceId: 'sc-break', source: 'app' }]),
+      [k('2026-10-01')]: logDoc('2026-10-01', [{ time: '09:00', practiceId: 'sc-break', source: 'app' }, { time: '10:00', practiceId: 'sc-break', source: 'app-stuck' }]),
+      [k('2026-10-03')]: logDoc('2026-10-03', [{ time: '09:00', practiceId: 'softer-voice', source: 'app' }]),
+    };
+    const ctx = await openPractice({ seed, now: '2026-10-04T12:00:00' });
+    const { page } = ctx;
+    await page.getByRole('tab', { name: 'Learn' }).click();
+    await page.waitForFunction(() => !document.querySelector('.pr-root').innerText.includes('Counting reps'));
+    const t = await visibleText(page);
+    ok(t.includes('Self-compassion course') && t.includes('Less self-criticism'), 'course name and why');
+    ok(/WEEKS 1-2/i.test(t) && /WEEKS 3-4/i.test(t) && t.indexOf('Self-compassion break') < t.indexOf('Compassionate friend'), 'course path by weeks, in order');
+    ok(t.includes('3 reps so far · first rep 2026-09-20'), 'reps so far + first rep date (sc-break)');
+    ok(t.includes('1 rep so far · first rep 2026-10-03'), 'reps so far + first rep date (softer-voice)');
+    ok((t.match(/No reps yet/g) || []).length === 3, 'practices without reps say so');
+    const reads = await page.evaluate(i => window.__storageLog.slice(i).filter(x => x[0] === 'get' && x[1].startsWith('practice:log:')).map(x => x[1]), ctx.mark);
+    ok(reads.includes('practice:log:2026_04_08') && !reads.includes('practice:log:2026_04_07'), `reads ${P_LEARN_DAYS} days of logs (back to 2026-04-08)`);
+    await page.getByRole('button', { name: 'Start' }).first().click();
+    ok((await visibleText(page)).includes('how much self-criticism'), 'Start from Learn opens the guided flow (self-criticism label)');
+    await finish(ctx, 'learn');
+  }
+
+  console.log('\n[Progress]');
+  {
+    const seed = { ...F.base(),
+      [k('2026-10-04')]: logDoc('2026-10-04', [{ time: '08:00', practiceId: 'sc-break', source: 'app' }, { time: '08:05', practiceId: 'waking-ladder', level: 3, source: 'app' }]),
+      [k('2026-09-30')]: logDoc('2026-09-30', [{ time: '08:00', practiceId: 'sc-break', source: 'app' }]),
+      [k('2026-09-10')]: logDoc('2026-09-10', [{ time: '08:00', practiceId: 'sc-break', source: 'app' }, { time: '09:00', practiceId: 'thought-stop', source: 'app' }]),
+      [k('2026-09-04')]: logDoc('2026-09-04', [{ time: '08:00', practiceId: 'sc-break', source: 'app' }]),
+      [k('2026-09-15')]: '{broken',
+    };
+    const ctx = await openPractice({ seed, now: '2026-10-04T12:00:00' });
+    const { page } = ctx;
+    await page.getByRole('tab', { name: 'Progress' }).click();
+    await page.waitForFunction(() => !document.querySelector('.pr-root').innerText.includes('Reading the last 30 days'));
+    const t = await visibleText(page);
+    const card = (name) => { const i = t.indexOf(name + '\n'); return i < 0 ? '' : t.slice(i, i + 220); };
+    const sc = card('Self-compassion break');
+    ok(/^Self-compassion break\n2\nlast 7 days\n3\nlast 30 days\n2026-10-04\nlast done/.test(sc), 'sc-break: 2 in 7 days, 3 in 30 days (Sept 4 excluded), last done today');
+    ok(sc.includes('Deep Pass (up):') && sc.includes('Steady.'), 'Deep Pass comment from practice:progress');
+    ok(/^Thought stop\n0\nlast 7 days\n1\nlast 30 days\n2026-09-10/.test(card('Thought stop')), 'thought-stop: 0 / 1, last done Sept 10');
+    ok(t.includes('Deep Pass note') && t.includes('Deep Pass note.'), 'Deep Pass note shown');
+    ok(t.includes('3 of the last 30 days have logged reps') && t.includes("1 day couldn't be read"), 'missing days = no reps; unreadable day reported');
+    const reads = await page.evaluate(i => window.__storageLog.slice(i).filter(x => x[0] === 'get' && x[1].startsWith('practice:log:')).map(x => x[1]), ctx.mark);
+    const uniq = new Set(reads);
+    ok(uniq.has('practice:log:2026_09_05') && !uniq.has('practice:log:2026_09_04') && uniq.size === 30, 'reads exactly the last 30 per-day log docs');
+    ok((await mem(page, k('2026-09-15'))) === '{broken', 'unreadable log doc left alone');
+    await finish(ctx, 'progress');
+  }
+
+  console.log('\n[Dr. Shobha]');
+  {
+    const hw = JSON.parse(F.base()['practice:homework']);
+    hw.owedByDrShobha = ['send the grief worksheet', { item: 'Old request', status: 'done' }, { item: 'confirm the nightly call time?', status: 'open' }];
+    const queue = { items: [
+      { item: 'ask about the morning freeze', since: '2026-09-20', status: 'open' },
+      { item: 'Old covered thing', since: '2026-09-01', status: 'covered', coveredOn: '2026-09-18' },
+      { item: 'how to use sc-break when I am in public', since: '2026-09-21', status: 'open' },
+      { item: 'comparing myself to friends', since: '2026-09-22', status: 'open' },
+      { item: 'Sleep after 2 AM', since: '2026-09-23', status: 'open' },
+      { item: 'Talk about the drop after class', since: '2026-09-24', status: 'open' },
+      { item: 'Sixth open item', since: '2026-09-25', status: 'open' },
+    ] };
+    let reply = { status: 200, json: { content: [{ type: 'text', text: 'Hi Dr. Shobha,\n1. Please send the grief worksheet.\n2. Can we talk about sc-break in public?' }] } };
+    const seed = { ...F.base(), 'practice:homework': JSON.stringify(hw), 'practice:shobha-queue': JSON.stringify(queue) };
+    const ctx = await openPractice({ seed, now: '2026-10-04T12:00:00', proxy: async () => reply });
+    const { page } = ctx;
+    await page.getByRole('tab', { name: 'Dr. Shobha' }).click();
+    let t = await visibleText(page);
+    const expected = ['Hi Dr. Shobha,', '', '1. Send the grief worksheet.', '2. Confirm the nightly call time?', '3. Ask about the morning freeze.', '4. How to use Self-compassion break when I am in public.', '5. Comparing myself to friends.', '6. Sleep after 2 AM.', '7. Talk about the drop after class.'].join('\n');
+    ok(t.includes(expected), 'WhatsApp message: open requests first, then top 5 open queue items, numbered with no gaps, plain sentences, no ids');
+    ok(!t.includes('Sixth open item.') && !/\d\. Old/.test(t), 'only the top 5 open queue items; closed requests and covered items left out');
+    await clickName(page, 'Copy WhatsApp message');
+    await page.waitForTimeout(200);
+    const clip = await page.evaluate(() => navigator.clipboard.readText().catch(() => null));
+    ok(clip === expected, 'Copy puts exactly that message on the clipboard');
+    ok((await visibleText(page)).includes('Copied'), 'copy confirmed on screen');
+    await clickName(page, 'Draft with Claude');
+    await page.waitForTimeout(400);
+    const call = ctx.proxyCalls[ctx.proxyCalls.length - 1];
+    ok(call && !call.tools && !call.tool_choice && call.model === 'claude-sonnet-5-5' && call.max_tokens === 16000 && call.output_config.effort === 'low' && /vessel/.test(call.system) && call.messages[0].content === expected, 'Draft with Claude: same proxy call, no tools, sends only the message');
+    t = await visibleText(page);
+    ok(t.includes('Can we talk about Self-compassion break in public?') && !/\bsc-break\b/.test(t.split('Copy WhatsApp message')[1] || ''), "Claude's draft shown with ids swapped for names");
+    await page.fill('#pr-queue-add', 'Bring up the cold mornings');
+    await clickName(page, 'Add');
+    await page.waitForTimeout(300);
+    let q = await memJSON(page, 'practice:shobha-queue');
+    ok(q.items.length === 8 && q.items[7].item === 'Bring up the cold mornings' && q.items[7].since === '2026-10-04' && q.items[7].status === 'open', 'Add appends {item, since, status:"open"}');
+    await page.getByRole('button', { name: 'Mark covered' }).first().click();
+    await page.getByLabel('Covered on').fill('2026-10-02');
+    await clickName(page, 'Save');
+    await page.waitForTimeout(300);
+    q = await memJSON(page, 'practice:shobha-queue');
+    ok(q.items.length === 8 && q.items[0].status === 'covered' && q.items[0].coveredOn === '2026-10-02' && q.items[2].status === 'open', 'Mark covered sets status + coveredOn on that item only; nothing removed');
+    t = await visibleText(page);
+    ok(t.includes('3. How to use Self-compassion break when I am in public.') && t.includes('7. Sixth open item.'), 'message renumbers with no gaps after covering');
+    ok(t.includes('Send the grief worksheet') && t.includes('✓ Old request'), 'owed-by-her list shows open and done');
+    ok(t.includes('Self-forgiveness sentence each morning') && t.includes('2026-10-09'), 'homework on this screen');
+    ok(!(await page.getByRole('button', { name: /delete|remove/i }).count()), 'no delete/remove buttons');
+    reply = { status: 503, json: {} };
+    await clickName(page, 'Draft with Claude'); await page.waitForTimeout(300);
+    ok((await visibleText(page)).includes('The AI proxy answered 503'), 'draft failure shown');
+    await finish(ctx, 'shobha', { allowProxyFailure: true });
+  }
+
+  console.log('\n[Gaps]');
+  {
+    const ctx = await openPractice({ seed: F.base(), now: '2026-10-04T12:00:00' });
+    const { page } = ctx;
+    await page.getByRole('tab', { name: 'Gaps' }).click();
+    let t = await visibleText(page);
+    ok(t.includes('Cold mornings') && t.includes('Owners: Brighton') && t.includes('Heater on a timer') && t.includes('since 2026-09-20'), 'gaps show theme, since, owners, options');
+    await page.getByLabel('Gap theme').fill('Noise at night');
+    await page.getByLabel('Gap owners').fill('Dr. Shobha, landlord');
+    await page.getByLabel('Gap options').fill('Earplugs\nWhite noise');
+    await clickName(page, 'Add');
+    await page.waitForTimeout(300);
+    const om = await memJSON(page, 'practice:outside-map');
+    const it = om.items[1];
+    ok(om.items.length === 2 && om.items[0].theme === 'Cold mornings' && it.theme === 'Noise at night' && it.since === '2026-10-04' && JSON.stringify(it.owners) === '["Dr. Shobha","landlord"]' && JSON.stringify(it.options) === '["Earplugs","White noise"]', 'Add appends {theme, since, owners[], options[]}');
+    t = await visibleText(page);
+    ok(t.includes('Noise at night') && t.includes('Owners: Dr. Shobha, landlord'), 'new gap shown');
+    ok(!(await page.getByRole('button', { name: /delete|remove/i }).count()), 'no delete/remove buttons');
+    await finish(ctx, 'gaps');
+  }
+
+  console.log('\n[Unreadable queue / gaps are not overwritten]');
+  {
+    const seed = { ...F.base(), 'practice:shobha-queue': '{x', 'practice:outside-map': '{y' };
+    const ctx = await openPractice({ seed, now: '2026-10-04T12:00:00' });
+    const { page } = ctx;
+    await page.getByRole('tab', { name: 'Dr. Shobha' }).click();
+    await page.fill('#pr-queue-add', 'test');
+    ok(await page.getByRole('button', { name: 'Add', exact: true }).isDisabled(), 'unreadable queue: Add disabled');
+    await page.getByRole('tab', { name: 'Gaps' }).click();
+    await page.getByLabel('Gap theme').fill('test');
+    ok(await page.getByRole('button', { name: 'Add', exact: true }).isDisabled(), 'unreadable gaps: Add disabled');
+    ok((await mem(page, 'practice:shobha-queue')) === '{x' && (await mem(page, 'practice:outside-map')) === '{y', 'both docs untouched');
+    await finish(ctx, 'unreadable-4');
+  }
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
   if (which === 'all' || which === '2') await step2();
   if (which === 'all' || which === '3') await step3();
+  if (which === 'all' || which === '4') await step4();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

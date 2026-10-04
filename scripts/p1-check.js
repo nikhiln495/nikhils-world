@@ -27,6 +27,7 @@ async function openPage({ seed = {}, now = null, proxy = null, offline = false, 
     proxy: process.env.HTTPS_PROXY ? { server: process.env.HTTPS_PROXY } : undefined,
   });
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, timezoneId });
+  try { await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: ORIGIN }); } catch (_) {}
   const page = await context.newPage();
   const errors = [];
   const blocked = [];
