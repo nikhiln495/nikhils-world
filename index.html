@@ -7771,6 +7771,633 @@ window.CreativeRoulette = CreativeRoulette;
 
   </script>
 
+  <!-- PracticeApp (Spec P1) -->
+  <script type="text/babel">
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+// ─────────────────────────────────────────────────────
+// DATA LAYER — every key read or written here starts with "practice:"
+// ─────────────────────────────────────────────────────
+
+const P_PREFIX = 'practice:';
+const P_KEYS = {
+  playbook:   'practice:playbook',
+  homework:   'practice:homework',
+  queue:      'practice:shobha-queue',
+  outside:    'practice:outside-map',
+  progress:   'practice:progress',
+  stuckMap:   'practice:stuck-map',
+  today: (dayKey) => `practice:today:${dayKey}`,
+  log:   (dayKey) => `practice:log:${dayKey}`,
+};
+const P_STATUSES = ['homework','active','learning','reference','in-session','pending','open','setup','restart','new','not-working','paused'];
+const P_BY = 'Nikhil (app)';
+
+// Local calendar date from the device clock (getFullYear/getMonth/getDate), never UTC.
+const pTwo = (n) => String(n).padStart(2, '0');
+const pLocalISO = (d = new Date()) => `${d.getFullYear()}-${pTwo(d.getMonth() + 1)}-${pTwo(d.getDate())}`;
+const pDayKey = (d = new Date()) => pLocalISO(d).replace(/-/g, '_');
+const pTimeHM = (d = new Date()) => `${pTwo(d.getHours())}:${pTwo(d.getMinutes())}`;
+const pDaysAgo = (n, from = new Date()) => { const d = new Date(from.getFullYear(), from.getMonth(), from.getDate()); d.setDate(d.getDate() - n); return d; };
+
+const pCheckKey = (key) => {
+  if (typeof key !== 'string' || !key.startsWith(P_PREFIX)) throw new Error(`Practice tab may only touch "practice:" keys (got "${key}")`);
+  return key;
+};
+
+// Returns { data, missing, error }. "missing" = no doc; "error" = doc exists but unreadable / read failed.
+async function pRead(key) {
+  pCheckKey(key);
+  try {
+    const r = await window.storage.get(key);
+    if (!r || r.value == null || r.value === '') return { data: null, missing: true, error: null };
+    try { return { data: JSON.parse(r.value), missing: false, error: null }; }
+    catch (e) { return { data: null, missing: false, error: 'unreadable (not valid JSON)' }; }
+  } catch (e) {
+    return { data: null, missing: false, error: e?.message || 'read failed' };
+  }
+}
+
+async function pWrite(key, obj) {
+  pCheckKey(key);
+  const ok = await window.storage.set(key, JSON.stringify(obj));
+  if (!ok) throw new Error('Save failed — nothing was stored. Try again.');
+  return true;
+}
+
+// All writes go through one queue so two quick taps never race each other.
+let __pQueue = Promise.resolve();
+const pSerial = (fn) => {
+  const run = __pQueue.then(fn, fn);
+  __pQueue = run.catch(() => {});
+  return run;
+};
+
+// Read-modify-write. Never overwrites a doc that exists but can't be read.
+// makeEmpty: () => fresh doc if missing, or null to refuse when missing.
+function pUpdate(key, makeEmpty, mutate) {
+  return pSerial(async () => {
+    const cur = await pRead(key);
+    if (cur.error) throw new Error(`${key} is ${cur.error}; not saving so nothing gets overwritten.`);
+    let base = cur.data;
+    if (cur.missing) {
+      base = makeEmpty ? makeEmpty() : null;
+      if (!base) throw new Error(`${key} doesn't exist yet; not creating it from the app.`);
+    }
+    const next = mutate(JSON.parse(JSON.stringify(base)));
+    await pWrite(key, next);
+    return next;
+  });
+}
+
+// Append one rep to today's per-day log (created on first rep).
+function pAppendLog(entry, when = new Date()) {
+  const clean = { time: entry.time || pTimeHM(when), practiceId: entry.practiceId };
+  ['before', 'after', 'level', 'note'].forEach(k => {
+    if (entry[k] !== undefined && entry[k] !== null && entry[k] !== '') clean[k] = entry[k];
+  });
+  clean.source = entry.source || 'app';
+  return pUpdate(P_KEYS.log(pDayKey(when)), () => ({ date: pLocalISO(when), entries: [] }), (doc) => {
+    if (!Array.isArray(doc.entries)) doc.entries = [];
+    doc.entries.push(clean);
+    return doc;
+  });
+}
+
+const pLastWakingLevel = (log) => {
+  const es = (log?.entries || []).filter(e => e.practiceId === 'waking-ladder' && typeof e.level === 'number');
+  return es.length ? es[es.length - 1].level : null;
+};
+const pIsUp = (log) => (log?.entries || []).some(e => e.practiceId === 'waking-ladder' && typeof e.level === 'number' && e.level >= 4);
+
+const pTrigger = (p) => (p?.now && String(p.now).trim()) ? p.now : (p?.when || '');
+const pFindPractice = (pb, id) => (pb?.practices || []).find(p => p.id === id) || null;
+const pUsable = (p) => !!p && p.status !== 'not-working';
+
+// Renders strings, arrays or objects from seeded docs without assuming a shape.
+const pText = (v) => {
+  if (v == null) return '';
+  if (typeof v === 'string' || typeof v === 'number') return String(v);
+  if (Array.isArray(v)) return v.map(pText).filter(Boolean).join(' · ');
+  if (typeof v === 'object') {
+    const pick = v.text || v.title || v.name || v.item || v.label || v.step || v.change;
+    if (pick) return [v.date, pick].filter(Boolean).join(' — ');
+    return Object.entries(v).map(([k, x]) => `${k}: ${pText(x)}`).join(', ');
+  }
+  return String(v);
+};
+const pList = (v) => (Array.isArray(v) ? v : (v == null || v === '' ? [] : [v]));
+
+// ─────────────────────────────────────────────────────
+// STYLE — matches the app's dark panes (Pending view palette, DM Sans / Space Mono)
+// ─────────────────────────────────────────────────────
+
+const PC = {
+  bg: '#0f1117', card: '#1a1d27', border: '#2a2e3d', text: '#e4e4e7', muted: '#9ca3af',
+  accent: '#a78bfa', accentDim: 'rgba(167,139,250,0.15)', warn: '#f59e0b', good: '#22c55e', bad: '#ef4444',
+};
+const pFont = "'DM Sans', system-ui, sans-serif";
+const pMono = "'Space Mono', monospace";
+
+const pBtn = (kind = 'ghost', extra = {}) => ({
+  minHeight: 44, padding: '10px 16px', borderRadius: 10, fontSize: 14, fontWeight: 600,
+  fontFamily: pFont, cursor: 'pointer', lineHeight: 1.3,
+  border: kind === 'solid' ? 'none' : `1px solid ${PC.border}`,
+  background: kind === 'solid' ? PC.accent : kind === 'warn' ? PC.warn : 'transparent',
+  color: kind === 'solid' || kind === 'warn' ? '#0f1117' : PC.text,
+  ...extra,
+});
+const pCard = (extra = {}) => ({ background: PC.card, border: `1px solid ${PC.border}`, borderRadius: 12, padding: 14, marginBottom: 10, ...extra });
+const pLabel = { fontSize: 11, color: PC.muted, textTransform: 'uppercase', letterSpacing: 1.5, fontFamily: pMono, marginBottom: 8 };
+const pInput = { width: '100%', minHeight: 44, padding: '10px 12px', fontSize: 15, background: '#0b0d12', color: PC.text, border: `1px solid ${PC.border}`, borderRadius: 10, fontFamily: pFont, boxSizing: 'border-box' };
+
+if (!document.getElementById('practice-style')) {
+  const st = document.createElement('style');
+  st.id = 'practice-style';
+  st.textContent = `
+    .pr-root button:focus-visible, .pr-root input:focus-visible, .pr-root textarea:focus-visible, .pr-root select:focus-visible { outline: 2px solid ${PC.accent}; outline-offset: 2px; }
+    .pr-root button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .pr-root button { transition: background 0.15s, border-color 0.15s; }
+    @media (prefers-reduced-motion: reduce) { .pr-root *, .pr-root *::before, .pr-root *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
+  `;
+  document.head.appendChild(st);
+}
+
+function PTag({ children, color = PC.muted }) {
+  return <span style={{ display: 'inline-block', fontSize: 11, padding: '2px 8px', borderRadius: 99, background: color + '22', color, fontWeight: 600, marginRight: 6, whiteSpace: 'nowrap' }}>{children}</span>;
+}
+function PStageTag({ p }) {
+  return p?.stage === 'post4' ? <PTag color={PC.warn}>after level 4</PTag> : null;
+}
+function PNote({ msg }) {
+  if (!msg) return null;
+  const isErr = msg.startsWith('❌');
+  return <div role="status" style={{ fontSize: 13, padding: '10px 12px', borderRadius: 10, marginBottom: 10, background: isErr ? 'rgba(239,68,68,0.12)' : 'rgba(34,197,94,0.12)', color: isErr ? '#fca5a5' : '#86efac' }}>{msg}</div>;
+}
+
+// ─────────────────────────────────────────────────────
+// SCREEN 1 — TODAY
+// ─────────────────────────────────────────────────────
+
+function WakingQuickLog({ onLog }) {
+  // Empty = "now"; the field shows the current time until he changes it.
+  const [upAt, setUpAt] = useState('');
+  const [, setTick] = useState(0);
+  useEffect(() => { const iv = setInterval(() => setTick(t => t + 1), 30000); return () => clearInterval(iv); }, []);
+  const logUp = async () => {
+    const t = upAt || pTimeHM();
+    const ok = await onLog({ practiceId: 'waking-ladder', level: 4, time: t, note: `up at ${t}` });
+    if (ok) setUpAt('');
+  };
+  return (
+    <div style={pCard()}>
+      <div style={pLabel}>Waking ladder — log where you got to</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 10 }}>
+        {[1, 2, 3, 4].map(l => (
+          <button key={l} style={pBtn('ghost', { minHeight: 52 })} onClick={() => onLog({ practiceId: 'waking-ladder', level: l })}>Level {l}</button>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <label style={{ fontSize: 14, color: PC.muted, whiteSpace: 'nowrap' }} htmlFor="pr-upat">Up at</label>
+        <input id="pr-upat" type="time" value={upAt || pTimeHM()} onChange={e => setUpAt(e.target.value)} style={{ ...pInput, flex: 1 }} />
+        <button style={pBtn('solid')} onClick={logUp}>Log</button>
+      </div>
+    </div>
+  );
+}
+
+function ForgotBox({ onLog }) {
+  const [txt, setTxt] = useState('');
+  const send = async () => { if (!txt.trim()) return; const ok = await onLog({ practiceId: 'forgot-log', note: txt.trim() }); if (ok) setTxt(''); };
+  return (
+    <div style={pCard()}>
+      <label style={pLabel} htmlFor="pr-forgot">Forgot something?</label>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <input id="pr-forgot" value={txt} onChange={e => setTxt(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') send(); }} placeholder="What, and where it is" style={{ ...pInput, flex: 1 }} />
+        <button style={pBtn('solid')} disabled={!txt.trim()} onClick={send}>Log</button>
+      </div>
+    </div>
+  );
+}
+
+function HomeworkStrip({ homework, missing, onAddUpdate }) {
+  const [openId, setOpenId] = useState(null);
+  const [txt, setTxt] = useState('');
+  const items = homework?.items || [];
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={pLabel}>Homework{homework?.nextSession ? ` · next session ${pText(homework.nextSession)}` : ''}</div>
+      {missing && <div style={{ fontSize: 13, color: PC.muted, marginBottom: 8 }}>No homework doc found.</div>}
+      {items.map(it => (
+        <div key={it.id || it.title} style={pCard({ borderLeft: `3px solid ${it.hard ? PC.warn : PC.accent}` })}>
+          <div style={{ fontSize: 15, color: PC.text, fontWeight: 600, lineHeight: 1.4 }}>{it.title}</div>
+          <div style={{ fontSize: 12, color: PC.muted, marginTop: 4 }}>
+            {it.due ? <>due <strong style={{ color: PC.text }}>{pText(it.due)}</strong></> : 'no due date'}
+            {it.status ? <> · {it.status}</> : null}{it.hard ? <> · hard</> : null}{it.source ? <> · {pText(it.source)}</> : null}
+          </div>
+          {(it.updates || []).length > 0 && (
+            <ul style={{ margin: '8px 0 0 18px', fontSize: 13, color: PC.muted, lineHeight: 1.5 }}>
+              {it.updates.map((u, i) => <li key={i}>{pText(u)}</li>)}
+            </ul>
+          )}
+          {openId === it.id ? (
+            <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <input aria-label={`Update for ${it.title}`} value={txt} onChange={e => setTxt(e.target.value)} placeholder="What happened" style={pInput} />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button style={pBtn('solid', { flex: 1 })} disabled={!txt.trim()} onClick={async () => { const ok = await onAddUpdate(it.id, txt.trim()); if (ok) { setTxt(''); setOpenId(null); } }}>Save update</button>
+                <button style={pBtn()} onClick={() => { setOpenId(null); setTxt(''); }}>Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <button style={pBtn('ghost', { marginTop: 10 })} onClick={() => { setOpenId(it.id); setTxt(''); }}>Add update</button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PracticeCard({ p, name, why, trigger, firstStep, onStart, onLog }) {
+  return (
+    <div style={pCard()}>
+      <div style={{ fontSize: 17, color: PC.text, fontWeight: 700, marginBottom: 4 }}>{name || p?.name || p?.id} {p && <PStageTag p={p} />}</div>
+      {why && <div style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, marginBottom: 6 }}>{pText(why)}</div>}
+      {trigger && <div style={{ fontSize: 13, color: PC.muted, lineHeight: 1.5, marginBottom: 6 }}><strong>When:</strong> {pText(trigger)}</div>}
+      {firstStep && <div style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, background: PC.accentDim, borderRadius: 8, padding: '8px 10px', marginBottom: 10 }}><strong>First step:</strong> {pText(firstStep)}</div>}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button style={pBtn('solid', { flex: 1 })} onClick={onStart}>Start</button>
+        <button style={pBtn('ghost', { flex: 1 })} onClick={onLog}>Log</button>
+      </div>
+    </div>
+  );
+}
+
+function TodayScreen({ data, onLog, onStart, onWaking, onAddUpdate }) {
+  const { playbook, homework, homeworkMissing, today, todayMissing, todayError, todayLog } = data;
+  const now = new Date();
+  const showWaking = now.getHours() < 12 && !pIsUp(todayLog);
+  const todayCards = (today?.practices || []).filter(tp => {
+    const p = pFindPractice(playbook, tp.id);
+    return !p || pUsable(p);
+  });
+  const defaultIds = ['ten-percent-intercept', 'sc-break'].concat(now.getHours() >= 18 ? ['bedtime-plan'] : []);
+  const defaultCards = defaultIds.map(id => pFindPractice(playbook, id)).filter(pUsable);
+  const entries = todayLog?.entries || [];
+  const nameOf = (id) => pFindPractice(playbook, id)?.name || id;
+
+  return (
+    <div>
+      {showWaking && (
+        <button onClick={onWaking} style={pBtn('warn', { width: '100%', minHeight: 72, fontSize: 22, fontWeight: 700, marginBottom: 14 })}>
+          Waking up
+        </button>
+      )}
+
+      {today && (
+        <>
+          {todayCards.map((tp, i) => {
+            const p = pFindPractice(playbook, tp.id);
+            return (
+              <PracticeCard key={tp.id + i} p={p} name={tp.name} why={tp.why} trigger={tp.when || pTrigger(p)} firstStep={tp.firstStep}
+                onStart={() => onStart(tp.id)} onLog={() => onLog({ practiceId: tp.id })} />
+            );
+          })}
+          <WakingQuickLog onLog={onLog} />
+          {(today.sleep && (today.sleep.wakeTarget || today.sleep.lightsOutTarget || today.sleep.tomorrowFirstFixedPoint)) && (
+            <div style={pCard()}>
+              <div style={pLabel}>Sleep</div>
+              <div style={{ fontSize: 14, color: PC.text, lineHeight: 1.7 }}>
+                {today.sleep.wakeTarget && <div>Wake target: {pText(today.sleep.wakeTarget)}</div>}
+                {today.sleep.lightsOutTarget && <div>Lights out: {pText(today.sleep.lightsOutTarget)}</div>}
+                {today.sleep.tomorrowFirstFixedPoint && <div>Tomorrow's first fixed point: {pText(today.sleep.tomorrowFirstFixedPoint)}</div>}
+              </div>
+            </div>
+          )}
+          {(today.progressNotes || []).length > 0 && (
+            <div style={pCard()}>
+              <div style={pLabel}>Notes</div>
+              {today.progressNotes.map((n, i) => <div key={i} style={{ fontSize: 14, color: PC.text, lineHeight: 1.6 }}>{pText(n)}</div>)}
+            </div>
+          )}
+        </>
+      )}
+
+      {!today && (
+        <>
+          <div style={{ fontSize: 12, color: PC.muted, marginBottom: 10 }}>
+            {todayError ? `Today's plan is ${todayError}; showing the default stack.` : "No plan from the Daily Brief for today yet; showing homework and the default stack."}
+          </div>
+          <HomeworkStrip homework={homework} missing={homeworkMissing} onAddUpdate={onAddUpdate} />
+          <div style={pLabel}>Default stack</div>
+          <WakingQuickLog onLog={onLog} />
+          {defaultCards.map(p => (
+            <PracticeCard key={p.id} p={p} trigger={pTrigger(p)} firstStep={(p.steps || [])[0]}
+              onStart={() => onStart(p.id)} onLog={() => onLog({ practiceId: p.id })} />
+          ))}
+        </>
+      )}
+
+      <ForgotBox onLog={onLog} />
+
+      {today && <HomeworkStrip homework={homework} missing={homeworkMissing} onAddUpdate={onAddUpdate} />}
+
+      {entries.length > 0 && (
+        <div style={pCard()}>
+          <div style={pLabel}>Logged today ({entries.length})</div>
+          {entries.map((e, i) => (
+            <div key={i} style={{ fontSize: 13, color: PC.text, lineHeight: 1.7 }}>
+              <span style={{ color: PC.muted, fontFamily: pMono }}>{e.time}</span> {nameOf(e.practiceId)}
+              {typeof e.level === 'number' ? ` · level ${e.level}` : ''}
+              {e.before != null || e.after != null ? ` · ${e.before ?? '–'} → ${e.after ?? '–'}` : ''}
+              {e.note ? ` · ${e.note}` : ''}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────
+// SCREEN 2 — LIBRARY
+// ─────────────────────────────────────────────────────
+
+const P_WHERE = [
+  { id: 'all',  label: 'All' },
+  { id: 'pre4', label: 'Not past level 4', stages: ['pre4', 'any'] },
+  { id: 'at4',  label: 'At level 4',       stages: ['stage4', 'any'] },
+  { id: 'up',   label: 'Up',               stages: ['post4', 'any'] },
+];
+
+function StatusChanger({ p, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [to, setTo] = useState('');
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  if (!open) return <button style={pBtn('ghost', { flex: 1 })} onClick={() => { setOpen(true); setTo(''); setReason(''); }}>Change status</button>;
+  return (
+    <div style={{ ...pCard({ marginTop: 10, marginBottom: 0 }), width: '100%' }}>
+      <label style={pLabel} htmlFor="pr-status">New status (now: {p.status})</label>
+      <select id="pr-status" value={to} onChange={e => setTo(e.target.value)} style={{ ...pInput, marginBottom: 8 }}>
+        <option value="">Choose…</option>
+        {P_STATUSES.filter(s => s !== p.status).map(s => <option key={s} value={s}>{s}</option>)}
+      </select>
+      <label style={pLabel} htmlFor="pr-reason">Reason (required)</label>
+      <textarea id="pr-reason" rows={3} value={reason} onChange={e => setReason(e.target.value)} placeholder="Why the change" style={{ ...pInput, minHeight: 80, marginBottom: 8, resize: 'vertical' }} />
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button style={pBtn('solid', { flex: 1 })} disabled={!to || !reason.trim() || busy}
+          onClick={async () => { setBusy(true); const ok = await onChange(p.id, to, reason.trim()); setBusy(false); if (ok) setOpen(false); }}>
+          Save status
+        </button>
+        <button style={pBtn()} onClick={() => setOpen(false)}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function PracticeDetail({ p, onBack, onStart, onLog, onStatus }) {
+  const Row = ({ label, children }) => children ? (
+    <div style={{ marginBottom: 12 }}>
+      <div style={pLabel}>{label}</div>
+      <div style={{ fontSize: 14, color: PC.text, lineHeight: 1.6 }}>{children}</div>
+    </div>
+  ) : null;
+  return (
+    <div>
+      <button style={pBtn('ghost', { marginBottom: 12 })} onClick={onBack}>← Library</button>
+      <div style={pCard()}>
+        <div style={{ fontSize: 20, fontWeight: 700, color: PC.text, marginBottom: 6, fontFamily: "'Fraunces', serif" }}>{p.name}</div>
+        <div style={{ marginBottom: 12 }}>
+          <PTag color={p.status === 'not-working' ? PC.bad : PC.accent}>{p.status}</PTag>
+          <PStageTag p={p} />
+        </div>
+        <Row label="When">{p.when ? pText(p.when) : null}</Row>
+        <Row label="Now">{p.now ? pText(p.now) : null}</Row>
+        {(p.steps || []).length > 0 && (
+          <Row label="Steps">
+            <ol style={{ margin: 0, paddingLeft: 20 }}>{p.steps.map((s, i) => <li key={i} style={{ marginBottom: 4 }}>{pText(s)}</li>)}</ol>
+          </Row>
+        )}
+        <Row label="Note">{p.note ? pText(p.note) : null}</Row>
+        <Row label="Evidence">{p.evidence ? pList(p.evidence).map((e, i) => <div key={i}>{pText(e)}</div>) : null}</Row>
+        <Row label="Source">{p.source ? pText(p.source) : null}</Row>
+        <Row label="History">{(p.history || []).length ? p.history.map((h, i) => (
+          <div key={i} style={{ fontSize: 13, color: PC.muted }}>{h.date} — {pText(h.change)}{h.reason ? ` (${h.reason})` : ''}{h.by ? ` · ${h.by}` : ''}</div>
+        )) : null}</Row>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button style={pBtn('solid', { flex: 1 })} onClick={() => onStart(p.id)}>Start</button>
+          <button style={pBtn('ghost', { flex: 1 })} onClick={() => onLog({ practiceId: p.id })}>Log rep</button>
+          <StatusChanger p={p} onChange={onStatus} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LibraryScreen({ data, detailId, setDetailId, onStart, onLog, onStatus }) {
+  const { playbook, playbookMissing, playbookError } = data;
+  const [q, setQ] = useState('');
+  const [where, setWhere] = useState('all');
+  const practices = playbook?.practices || [];
+
+  const detail = detailId ? pFindPractice(playbook, detailId) : null;
+  if (detail) return <PracticeDetail p={detail} onBack={() => setDetailId(null)} onStart={onStart} onLog={onLog} onStatus={onStatus} />;
+
+  if (!playbook) return <div style={pCard()}><div style={{ fontSize: 14, color: PC.muted }}>{playbookError ? `The playbook is ${playbookError}.` : playbookMissing ? 'No playbook found yet.' : 'Loading…'}</div></div>;
+
+  const w = P_WHERE.find(x => x.id === where);
+  const needle = q.trim().toLowerCase();
+  const matches = practices.filter(p => {
+    if (w?.stages && !w.stages.includes(p.stage || 'any')) return false;
+    if (!needle) return true;
+    const hay = [p.id, p.name, p.when, p.now, p.note, p.source, pText(p.steps)].map(x => pText(x).toLowerCase()).join(' ');
+    return hay.includes(needle);
+  });
+  const cats = (playbook.categories || []).map(c => Array.isArray(c) ? { id: c[0], label: c[1] } : { id: c.id, label: c.label || c.id });
+  const known = new Set(cats.map(c => c.id));
+  const groups = cats.map(c => ({ ...c, items: matches.filter(p => p.cat === c.id) }));
+  const other = matches.filter(p => !known.has(p.cat));
+  if (other.length) groups.push({ id: '_other', label: 'Other', items: other });
+
+  return (
+    <div>
+      <input aria-label="Search practices" value={q} onChange={e => setQ(e.target.value)} placeholder="Search practices" style={{ ...pInput, marginBottom: 10 }} />
+      <div style={pLabel}>Where am I</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 }}>
+        {P_WHERE.map(x => (
+          <button key={x.id} aria-pressed={where === x.id} onClick={() => setWhere(x.id)}
+            style={pBtn(where === x.id ? 'solid' : 'ghost', { fontSize: 13 })}>{x.label}</button>
+        ))}
+      </div>
+      {matches.length === 0 && <div style={{ fontSize: 14, color: PC.muted, marginBottom: 12 }}>Nothing matches.</div>}
+      {groups.filter(g => g.items.length).map(g => (
+        <div key={g.id} style={{ marginBottom: 16 }}>
+          <div style={pLabel}>{g.label} ({g.items.length})</div>
+          {g.items.map(p => (
+            <button key={p.id} onClick={() => setDetailId(p.id)} style={{ ...pCard({ marginBottom: 8 }), width: '100%', textAlign: 'left', cursor: 'pointer', display: 'block', fontFamily: pFont }}>
+              <div style={{ fontSize: 15, color: p.status === 'not-working' ? PC.muted : PC.text, fontWeight: 600, marginBottom: 4 }}>{p.name}</div>
+              <div style={{ marginBottom: pTrigger(p) ? 4 : 0 }}>
+                <PTag color={p.status === 'not-working' ? PC.bad : PC.accent}>{p.status}</PTag>
+                <PStageTag p={p} />
+              </div>
+              {pTrigger(p) && <div style={{ fontSize: 13, color: PC.muted, lineHeight: 1.5 }}>{pText(pTrigger(p))}</div>}
+            </button>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────
+// PRACTICE APP — sub-screens + shared data
+// ─────────────────────────────────────────────────────
+
+const P_SCREENS = [
+  { id: 'today',    label: 'Today' },
+  { id: 'library',  label: 'Library' },
+  { id: 'learn',    label: 'Learn' },
+  { id: 'shobha',   label: 'Dr. Shobha' },
+  { id: 'gaps',     label: 'Gaps' },
+  { id: 'progress', label: 'Progress' },
+];
+
+function PracticeApp() {
+  const [screen, setScreen] = useState('today');
+  const [detailId, setDetailId] = useState(null);
+  const [flow, setFlow] = useState(null);       // { id, source } — guided flow (step 3)
+  const [waking, setWaking] = useState(false);  // Waking up (step 3)
+  const [msg, setMsg] = useState('');
+  const [data, setData] = useState({ loaded: false });
+  const msgTimer = useRef(null);
+
+  const flash = (m) => {
+    setMsg(m);
+    clearTimeout(msgTimer.current);
+    msgTimer.current = setTimeout(() => setMsg(''), m.startsWith('❌') ? 8000 : 3000);
+  };
+
+  const load = useCallback(async () => {
+    const dk = pDayKey();
+    const [pb, hw, td, lg] = await Promise.all([
+      pRead(P_KEYS.playbook), pRead(P_KEYS.homework), pRead(P_KEYS.today(dk)), pRead(P_KEYS.log(dk)),
+    ]);
+    setData({
+      loaded: true, dayKey: dk,
+      playbook: pb.data, playbookMissing: pb.missing, playbookError: pb.error,
+      homework: hw.data, homeworkMissing: hw.missing,
+      today: td.data, todayMissing: td.missing, todayError: td.error,
+      todayLog: lg.data, todayLogError: lg.error,
+    });
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+  // Routines write the same docs; re-read when the app comes back into view.
+  useEffect(() => {
+    const onVis = () => { if (document.visibilityState === 'visible') load(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [load]);
+
+  const go = (id) => { setScreen(id); setDetailId(null); setFlow(null); setWaking(false); load(); };
+
+  const logRep = async (entry) => {
+    try {
+      const doc = await pAppendLog(entry);
+      setData(d => ({ ...d, todayLog: doc, todayLogError: null, dayKey: pDayKey() }));
+      const name = pFindPractice(data.playbook, entry.practiceId)?.name || entry.practiceId;
+      flash(`✅ Logged: ${name}${typeof entry.level === 'number' ? ` · level ${entry.level}` : ''}`);
+      return true;
+    } catch (e) {
+      flash(`❌ ${e.message}`);
+      return false;
+    }
+  };
+
+  const changeStatus = async (id, to, reason) => {
+    try {
+      const pb = await pUpdate(P_KEYS.playbook, null, (doc) => {
+        const p = (doc.practices || []).find(x => x.id === id);
+        if (!p) throw new Error(`"${id}" is no longer in the playbook.`);
+        const from = p.status;
+        p.status = to;
+        p.history = Array.isArray(p.history) ? p.history : [];
+        p.history.push({ date: pLocalISO(), change: `status ${from} → ${to}`, reason, by: P_BY });
+        return doc;
+      });
+      setData(d => ({ ...d, playbook: pb }));
+      flash(`✅ Status changed to ${to}`);
+      return true;
+    } catch (e) { flash(`❌ ${e.message}`); return false; }
+  };
+
+  const addHomeworkUpdate = async (itemId, text) => {
+    try {
+      const hw = await pUpdate(P_KEYS.homework, null, (doc) => {
+        const it = (doc.items || []).find(x => x.id === itemId);
+        if (!it) throw new Error('That homework item is no longer there.');
+        it.updates = Array.isArray(it.updates) ? it.updates : [];
+        it.updates.push({ date: pLocalISO(), text, by: P_BY });
+        return doc;
+      });
+      setData(d => ({ ...d, homework: hw }));
+      flash('✅ Update added');
+      return true;
+    } catch (e) { flash(`❌ ${e.message}`); return false; }
+  };
+
+  const start = (id, source = 'app') => { setFlow({ id, source }); setWaking(false); };
+
+  let body;
+  if (!data.loaded) body = <div style={{ fontSize: 14, color: PC.muted }}>Loading…</div>;
+  else if (waking) body = (
+    <div style={pCard()}>
+      <div style={{ fontSize: 18, color: PC.text, fontWeight: 700, marginBottom: 8 }}>Waking up</div>
+      <div style={{ fontSize: 14, color: PC.muted, lineHeight: 1.6, marginBottom: 12 }}>This screen is built in step 3. For now, use the waking ladder log on Today.</div>
+      <button style={pBtn()} onClick={() => setWaking(false)}>← Back</button>
+    </div>
+  );
+  else if (flow) {
+    const p = pFindPractice(data.playbook, flow.id);
+    body = (
+      <div style={pCard()}>
+        <div style={{ fontSize: 18, color: PC.text, fontWeight: 700, marginBottom: 8 }}>{p?.name || flow.id}</div>
+        <div style={{ fontSize: 13, color: PC.muted, marginBottom: 10 }}>The step-by-step guided flow is built in step 3. Steps:</div>
+        <ol style={{ margin: '0 0 12px', paddingLeft: 20, fontSize: 15, color: PC.text, lineHeight: 1.6 }}>{(p?.steps || []).map((s, i) => <li key={i}>{pText(s)}</li>)}</ol>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button style={pBtn('solid', { flex: 1 })} onClick={async () => { if (await logRep({ practiceId: flow.id, source: flow.source })) setFlow(null); }}>Log rep</button>
+          <button style={pBtn()} onClick={() => setFlow(null)}>← Back</button>
+        </div>
+      </div>
+    );
+  }
+  else if (screen === 'today') body = <TodayScreen data={data} onLog={logRep} onStart={start} onWaking={() => setWaking(true)} onAddUpdate={addHomeworkUpdate} />;
+  else if (screen === 'library') body = <LibraryScreen data={data} detailId={detailId} setDetailId={setDetailId} onStart={start} onLog={logRep} onStatus={changeStatus} />;
+  else body = <div style={pCard()}><div style={{ fontSize: 14, color: PC.muted }}>This screen is built in step 4.</div></div>;
+
+  return (
+    <div className="pr-root" style={{ background: PC.bg, minHeight: '100%', padding: '20px 16px 80px', fontFamily: pFont, color: PC.text }}>
+      <div style={{ maxWidth: 640, margin: '0 auto' }}>
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11, color: PC.accent, letterSpacing: 2, textTransform: 'uppercase', marginBottom: 4, fontFamily: pMono }}>Dr. Shobha · Brighton · every rep counts</div>
+          <h1 style={{ fontSize: 26, fontWeight: 700, color: PC.text, margin: 0, letterSpacing: -0.5 }}>Practice</h1>
+        </div>
+        <div role="tablist" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginBottom: 16 }}>
+          {P_SCREENS.map(s => (
+            <button key={s.id} role="tab" aria-selected={screen === s.id && !flow && !waking} onClick={() => go(s.id)}
+              style={pBtn(screen === s.id && !flow && !waking ? 'solid' : 'ghost', { fontSize: 13, padding: '8px 6px' })}>{s.label}</button>
+          ))}
+        </div>
+        <PNote msg={msg} />
+        {body}
+      </div>
+    </div>
+  );
+}
+
+window.PracticeApp = PracticeApp;
+  </script>
+
   <!-- App Shell -->
   <script type="text/babel">
 const { useState, useEffect, useRef } = React;
@@ -7780,11 +8407,13 @@ const Utensils   = _LRApp.Utensils   || (() => null);
 const Dices      = _LRApp.Dices      || (() => null);
 const Activity   = _LRApp.Activity   || (() => null);
 const Database   = _LRApp.Database   || (() => null);
+const Sprout     = _LRApp.Sprout || _LRApp.Leaf || _LRApp.Heart || (() => null);
 
 const KaizenApp       = window.KaizenApp;
 const FoodLog         = window.FoodLog;
 const HealthDashboard = window.HealthDashboard;
 const CreativeRoulette = window.CreativeRoulette;
+const PracticeApp     = window.PracticeApp;
 
 const _LRPend = window.LucideReact || {};
 const Inbox = _LRPend.Inbox || (() => null);
@@ -7901,6 +8530,7 @@ function App() {
     { id: 'kaizen',   label: 'Kaizen',  Icon: LayoutGrid  },
     { id: 'food',     label: 'Fuel',    Icon: Utensils    },
     { id: 'health',   label: 'Vitals',  Icon: Activity    },
+    { id: 'practice', label: 'Practice', Icon: Sprout     },
     { id: 'pending',  label: 'Pending', Icon: Inbox       },
     { id: 'system',   label: 'System',  Icon: Database    },
   ];
@@ -8158,6 +8788,7 @@ function App() {
       <div style={paneStyle('kaizen')}><KaizenApp /></div>
       <div style={paneStyle('food')}><FoodLog /></div>
       <div style={paneStyle('health')}><HealthDashboard /></div>
+      <div style={paneStyle('practice')}><PracticeApp /></div>
 
       <div style={paneStyle('pending')}>
         <PendingView glance={glance} onJump={(tab) => setActiveTab(tab)}/>

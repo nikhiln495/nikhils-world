@@ -9,17 +9,24 @@ const { chromium } = require('playwright');
 
 const HTML = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
 const ORIGIN = 'https://nikhils-world.web.app';
+const os = require('os');
+const crypto = require('crypto');
+// CDN scripts (React, Babel, lucide, recharts) are cached on disk between runs.
+const CACHE_DIR = process.env.P1_CDN_CACHE || path.join(os.tmpdir(), 'p1-cdn-cache');
+fs.mkdirSync(CACHE_DIR, { recursive: true });
 
+const FONTS = /^https:\/\/fonts\.(googleapis|gstatic)\.com\//;
 const BLOCK = [
   /firestore\.googleapis\.com/, /firebase/i, /gstatic\.com/, /accounts\.google\.com/,
   /googleapis\.com/, /api\.anthropic\.com/,
 ];
+const isBlocked = (url) => !FONTS.test(url) && BLOCK.some(re => re.test(url));
 
-async function openPage({ seed = {}, now = null, proxy = null, offline = false } = {}) {
+async function openPage({ seed = {}, now = null, proxy = null, offline = false, timezoneId = 'America/Anchorage' } = {}) {
   const browser = await chromium.launch({
     proxy: process.env.HTTPS_PROXY ? { server: process.env.HTTPS_PROXY } : undefined,
   });
-  const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 } });
+  const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, timezoneId });
   const page = await context.newPage();
   const errors = [];
   const blocked = [];
@@ -28,7 +35,7 @@ async function openPage({ seed = {}, now = null, proxy = null, offline = false }
     if (m.type() !== 'error') return;
     const where = (m.location() || {}).url || '';
     // Aborted Firebase/Google requests are expected; count them separately.
-    if (/Failed to load resource/.test(m.text()) && BLOCK.some(re => re.test(where))) return;
+    if (/Failed to load resource/.test(m.text()) && isBlocked(where)) return;
     errors.push(m.text() + (where ? ' @ ' + where : ''));
   });
   page.on('pageerror', e => errors.push('pageerror: ' + e.message));
@@ -46,7 +53,26 @@ async function openPage({ seed = {}, now = null, proxy = null, offline = false }
       const r = await proxy(body);
       return route.fulfill({ status: r.status || 200, contentType: 'application/json', body: JSON.stringify(r.json) });
     }
-    if (BLOCK.some(re => re.test(url))) { blocked.push(url); return route.abort(); }
+    if (isBlocked(url)) { blocked.push(url); return route.abort(); }
+    if ((/^https:\/\/unpkg\.com\//.test(url) || FONTS.test(url)) && route.request().method() === 'GET') {
+      const f = path.join(CACHE_DIR, crypto.createHash('sha1').update(url).digest('hex'));
+      if (fs.existsSync(f)) {
+        const c = JSON.parse(fs.readFileSync(f + '.json', 'utf8'));
+        return route.fulfill({ status: 200, headers: c.headers, body: fs.readFileSync(f) });
+      }
+      for (let i = 0; i < 3; i++) {
+        try {
+          const resp = await route.fetch({ timeout: 30000 });
+          if (resp.status() === 200) {
+            const body = await resp.body();
+            const headers = { 'content-type': resp.headers()['content-type'] || 'application/javascript', 'access-control-allow-origin': '*' };
+            fs.writeFileSync(f, body); fs.writeFileSync(f + '.json', JSON.stringify({ headers }));
+            return route.fulfill({ status: 200, headers, body });
+          }
+        } catch (_) {}
+      }
+      return route.abort();
+    }
     return route.continue();
   });
 
