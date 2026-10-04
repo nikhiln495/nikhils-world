@@ -180,6 +180,39 @@
         } catch(e) { return null; }
       },
 
+      // Every doc whose key starts with `prefix` (e.g. "practice:log:"), and nothing else:
+      // Firestore is queried on the doc-ID range of the sanitised prefix. Keys only in
+      // localStorage (written while Firestore was unreachable) are included too; the
+      // Firestore copy wins when both exist. Returns null if Firestore is up but the query fails.
+      listPrefix: async (prefix) => {
+        try { await window.__dbReady; } catch (_) {}
+        const out = {};
+        try {
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.startsWith(prefix)) out[k] = { id: sanitiseKey(k), key: k, value: localStorage.getItem(k) };
+          }
+        } catch (_) {}
+        if (db) {
+          try {
+            const start = sanitiseKey(prefix);
+            const idField = firebase.firestore.FieldPath.documentId();
+            const snap = await db.collection('appdata').where(idField, '>=', start).where(idField, '<', start + '').get();
+            snap.forEach(doc => {
+              const d = doc.data() || {};
+              const k = d.key || doc.id;
+              const localKey = Object.keys(out).find(lk => out[lk].id === doc.id);
+              if (localKey) delete out[localKey];
+              out[k] = { id: doc.id, key: k, value: d.value };
+            });
+          } catch (e) {
+            console.warn('Firestore prefix list failed:', e);
+            return null;
+          }
+        }
+        return Object.values(out);
+      },
+
       // Lets the SaveStatusPill display "Local-only" mode distinctly
       isCloudReady: () => !!window.__dbAvailable,
     };
@@ -8610,7 +8643,7 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
   const [where, setWhere] = useState(null);
   const [blocks, setBlocks] = useState([]);
   const [other, setOther] = useState('');
-  const [stage, setStage] = useState('q1'); // q1 | q2 | steps | end | up
+  const [stage, setStage] = useState('q1'); // q1 | q2 | steps | up
   const [queue, setQueue] = useState([]);
   const [idx, setIdx] = useState(0);
   const [tried, setTried] = useState([]);
@@ -8633,6 +8666,8 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
     const ok = await onLog({ practiceId: 'waking-ladder', level: 4, note: answers(), source: 'app-waking' });
     if (ok) setStage('up');
   };
+
+  const startOver = () => { setWhere(null); setBlocks([]); setOther(''); setCoach({ busy: false, err: '', picks: null }); setStage('q1'); };
 
   const tryAnother = () => {
     const cur = queue[idx];
@@ -8696,23 +8731,28 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
           <div style={{ fontSize: 13, color: PC.muted, marginBottom: 8, fontFamily: pMono }}>Step {idx + 1} of {queue.length}</div>
           <div style={{ fontSize: 28, fontWeight: 700, color: PC.text, lineHeight: 1.35, marginBottom: 16 }}>{queue[idx].text}</div>
           {queue[idx].kind === 'count' ? <PHiddenCount key={`c${idx}`} target={60} /> : (pDuration(queue[idx].text) ? <PTimer key={`t${idx}-${queue[idx].text}`} seconds={pDuration(queue[idx].text)} /> : null)}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
-            <button style={pBtn('solid', { minHeight: 60, fontSize: 16 })} onClick={() => (idx < queue.length - 1 ? setIdx(idx + 1) : setStage('end'))}>Done, next</button>
-            <button style={pBtn('ghost', { minHeight: 60, fontSize: 16 })} onClick={tryAnother}>Didn't work, try another</button>
-          </div>
-          <button style={pBtn('warn', { width: '100%', minHeight: 64, fontSize: 20, marginBottom: 14 })} onClick={imUp}>I'm up</button>
+          {idx < queue.length - 1 ? (
+            <>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
+                <button style={pBtn('solid', { minHeight: 60, fontSize: 16 })} onClick={() => setIdx(idx + 1)}>Done, next</button>
+                <button style={pBtn('ghost', { minHeight: 60, fontSize: 16 })} onClick={tryAnother}>Didn't work, try another</button>
+              </div>
+              <button style={pBtn('warn', { width: '100%', minHeight: 64, fontSize: 20, marginBottom: 14 })} onClick={imUp}>I'm up and moving</button>
+            </>
+          ) : (
+            <>
+              {/* Last step: tapping it means he's up, so it logs straight away. */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
+                <button style={pBtn('warn', { minHeight: 60, fontSize: 16 })} onClick={imUp}>I'm up and moving</button>
+                <button style={pBtn('ghost', { minHeight: 60, fontSize: 16 })} onClick={tryAnother}>Didn't work, try another</button>
+              </div>
+              <button style={pBtn('ghost', { width: '100%', marginBottom: 14 })} onClick={startOver}>Not yet, start over</button>
+            </>
+          )}
           <button style={pBtn('ghost', { width: '100%' })} disabled={!online || coach.busy} onClick={coachMe}>{coach.busy ? 'Asking…' : 'Coach me'}</button>
           {!online && <div style={{ fontSize: 12, color: PC.muted, marginTop: 6 }}>Coach me needs the internet. The steps above still work offline.</div>}
           {coach.err && <PNote msg={`❌ ${coach.err} The steps above still work.`} />}
           {coach.picks && <div style={{ marginTop: 12 }}><PPicks picks={coach.picks} onStart={(id) => onStart(id, 'app-waking')} /></div>}
-        </div>
-      )}
-
-      {stage === 'end' && (
-        <div>
-          <div style={{ fontSize: 26, fontWeight: 700, color: PC.text, marginBottom: 14 }}>That was the last step.</div>
-          <button style={pBtn('warn', { width: '100%', minHeight: 64, fontSize: 20, marginBottom: 10 })} onClick={imUp}>I'm up</button>
-          <button style={pBtn('ghost', { width: '100%', minHeight: 56 })} onClick={() => { setWhere(null); setBlocks([]); setOther(''); setCoach({ busy: false, err: '', picks: null }); setStage('q1'); }}>Not yet, start over</button>
         </div>
       )}
 
@@ -8886,6 +8926,30 @@ async function pReadLogs(days) {
   return out;
 }
 
+// Every practice:log:<day> doc there is (all time), via storage.listPrefix.
+// Returns null when listing isn't possible, so the caller can fall back to a day-by-day scan.
+async function pReadAllLogs() {
+  const prefix = pCheckKey('practice:log:');
+  if (typeof window.storage?.listPrefix !== 'function') return null;
+  let rows;
+  try { rows = await window.storage.listPrefix(prefix); } catch (_) { return null; }
+  if (!Array.isArray(rows)) return null;
+  const now = new Date();
+  const t0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const byDay = {};
+  rows.forEach(r => {
+    const m = String(r?.key || '').match(/^practice:log:(\d{4})_(\d{2})_(\d{2})$/) || String(r?.id || '').match(/^practice_log_(\d{4})_(\d{2})_(\d{2})$/);
+    if (!m) return;
+    const iso = `${m[1]}-${m[2]}-${m[3]}`;
+    let entries = [], error = null;
+    try { const d = JSON.parse(r.value); entries = Array.isArray(d?.entries) ? d.entries : []; }
+    catch (_) { error = 'unreadable (not valid JSON)'; }
+    const n = Math.round((t0 - new Date(+m[1], +m[2] - 1, +m[3])) / 86400000);
+    byDay[iso] = { n, iso, entries, error };
+  });
+  return Object.values(byDay);
+}
+
 // practiceId -> { reps7, reps30, total, first, last } over the days read
 const pStats = (logs) => {
   const m = {};
@@ -8901,15 +8965,23 @@ const pStats = (logs) => {
   return m;
 };
 
-function useLogs(days, refreshKey) {
+// days = a number (that many most recent days) or 'all' (every log doc; falls back to fallbackDays).
+function useLogs(days, refreshKey, fallbackDays = 180) {
   const [state, setState] = useState({ loading: true, logs: [] });
   useEffect(() => {
     let cancel = false;
     setState(s => ({ ...s, loading: true }));
-    pReadLogs(days).then(logs => { if (!cancel) setState({ loading: false, logs }); })
+    (async () => {
+      if (days === 'all') {
+        const all = await pReadAllLogs();
+        if (all) return { loading: false, logs: all, allTime: true };
+        return { loading: false, logs: await pReadLogs(fallbackDays), allTime: false, days: fallbackDays };
+      }
+      return { loading: false, logs: await pReadLogs(days), days };
+    })().then(st => { if (!cancel) setState(st); })
       .catch(() => { if (!cancel) setState({ loading: false, logs: [], failed: true }); });
     return () => { cancel = true; };
-  }, [days, refreshKey]);
+  }, [days, refreshKey, fallbackDays]);
   return state;
 }
 
@@ -8917,11 +8989,12 @@ function useLogs(days, refreshKey) {
 // SCREEN 4 — LEARN
 // ─────────────────────────────────────────────────────
 
-const P_LEARN_DAYS = 180;
+const P_LEARN_FALLBACK_DAYS = 180;
 
 function LearnScreen({ data, onStart, refreshKey }) {
   const { playbook } = data;
-  const { loading, logs } = useLogs(P_LEARN_DAYS, refreshKey);
+  const { loading, logs, allTime, failed } = useLogs('all', refreshKey, P_LEARN_FALLBACK_DAYS);
+  const unreadable = logs.filter(l => l.error).length;
   const stats = useMemo(() => pStats(logs), [logs]);
   const course = playbook?.course;
   if (!course) return <div style={pCard()}><div style={{ fontSize: 14, color: PC.muted }}>{playbook ? 'No course in the playbook yet.' : 'The playbook could not be read.'}</div></div>;
@@ -8931,7 +9004,13 @@ function LearnScreen({ data, onStart, refreshKey }) {
         <div style={{ fontSize: 20, fontWeight: 700, color: PC.text, fontFamily: "'Fraunces', serif", marginBottom: 6 }}>{course.name}</div>
         {course.why && <div style={{ fontSize: 14, color: PC.text, lineHeight: 1.6 }}>{pText(course.why)}</div>}
       </div>
-      <div style={{ fontSize: 12, color: PC.muted, marginBottom: 10 }}>{loading ? 'Counting reps…' : `Reps counted from the app's daily logs over the last ${P_LEARN_DAYS} days.`}</div>
+      <div style={{ fontSize: 12, color: PC.muted, marginBottom: 10 }}>
+        {loading ? 'Counting reps…'
+          : failed ? "Couldn't read the logs, so reps aren't counted right now."
+          : allTime ? 'Reps of all time, from every daily log in the app.'
+          : `Couldn't list every log, so this counts the last ${P_LEARN_FALLBACK_DAYS} days only.`}
+        {!loading && unreadable ? ` ${unreadable} day${unreadable === 1 ? '' : 's'} couldn't be read.` : ''}
+      </div>
       {(course.path || []).map((w, i) => (
         <div key={i} style={{ marginBottom: 16 }}>
           <div style={pLabel}>Weeks {pText(w.weeks)}</div>

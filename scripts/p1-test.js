@@ -2,7 +2,7 @@
 // Uses the mocked window.storage from p1-check.js; the live Firestore is never touched.
 const { openPage } = require('./p1-check');
 const F = require('./p1-fixtures');
-const P_LEARN_DAYS = 180;
+const P_LEARN_FALLBACK_DAYS = 180;
 
 let failures = 0, passes = 0;
 const ok = (cond, label) => { if (cond) { passes++; console.log('  ✓', label); } else { failures++; console.log('  ✗', label); } };
@@ -182,13 +182,13 @@ async function step2() {
 
 const toolUse = (picks) => ({ status: 200, json: { content: [{ type: 'text', text: 'ok' }, { type: 'tool_use', id: 't1', name: 'choose_practices', input: { picks } }] } });
 const clickName = (page, name, exact = true) => page.getByRole('button', { name, exact }).first().click();
-async function stepsThrough(page) { // collect step texts in the waking flow until the end screen
+async function stepsThrough(page) { // collect step texts in the waking flow, stopping on the last step
   const seen = [];
   for (let i = 0; i < 12; i++) {
     const t = await visibleText(page);
-    if (t.includes('That was the last step')) break;
     const m = t.match(/Step \d+ of \d+\n+([^\n]+)/);
     seen.push(m ? m[1] : '?');
+    if (!(await page.getByRole('button', { name: 'Done, next', exact: true }).count())) break; // last step
     await clickName(page, 'Done, next');
   }
   return seen;
@@ -314,11 +314,11 @@ async function step3() {
     ok(/Where: Eyes closed/.test(call.messages[0].content) && /Context: local time/.test(call.messages[0].content), 'TEXT = answers + local time');
     ok(!/task-drop-reset|grief-release|fall-practice|elbow-prop/.test(call.system) && /countdown \| Countdown 5-4-3-2-1 \| stage:any/.test(call.system), 'index restricted to pre4/stage4/any, no not-working');
     ok(t.includes('Count out loud and sit up on 1.') && !t.includes('post4') && !t.includes('not working'), 'picks filtered in code (post4, not-working, grief dropped)');
-    await clickName(page, "I'm up");
+    await clickName(page, "I'm up and moving");
     await page.waitForTimeout(300);
     const lg = await memJSON(page, 'practice:log:2026_10_04');
     const e = lg.entries[lg.entries.length - 1];
-    ok(e.practiceId === 'waking-ladder' && e.level === 4 && e.source === 'app-waking' && e.time === '07:1' + e.time.slice(-1) && /Where: Eyes closed/.test(e.note), "I'm up → waking-ladder level 4, source app-waking, note = answers");
+    ok(e.practiceId === 'waking-ladder' && e.level === 4 && e.source === 'app-waking' && e.time === '07:1' + e.time.slice(-1) && /Where: Eyes closed/.test(e.note), "I'm up and moving (mid-flow) → waking-ladder level 4, source app-waking, note = answers");
     t = await visibleText(page);
     ok(/first thing on today's plan/i.test(t) && t.includes('Self-compassion break') && t.includes('Put a hand on your chest'), "after I'm up: first item of today's plan");
     await clickName(page, 'Back to Today');
@@ -338,6 +338,14 @@ async function step3() {
     await clickName(ctx.page, "Didn't work, try another");
     t = await visibleText(ctx.page);
     ok(t.includes('Stay on your side for 30 seconds') && t.includes('0:30'), 'step naming 30 seconds gets a timer');
+    ok(!(await ctx.page.getByRole('button', { name: 'Done, next', exact: true }).count()) && (await ctx.page.getByRole('button', { name: "I'm up and moving", exact: true }).count()) === 1, "last step: \"I'm up and moving\" replaces \"Done, next\" (one button, no duplicate)");
+    ok(!(await mem(ctx.page, 'practice:log:2026_10_04')), 'nothing logged before tapping it');
+    await clickName(ctx.page, "I'm up and moving");
+    await ctx.page.waitForTimeout(300);
+    const lg = await memJSON(ctx.page, 'practice:log:2026_10_04');
+    t = await visibleText(ctx.page);
+    ok(lg && lg.entries.length === 1 && lg.entries[0].practiceId === 'waking-ladder' && lg.entries[0].level === 4 && lg.entries[0].time === '07:10' && lg.entries[0].source === 'app-waking' && /Where: Eyes closed/.test(lg.entries[0].note), "tapping \"I'm up and moving\" on the last step logs up straight away");
+    ok(t.includes('Up. Logged at level 4.') && !t.includes('That was the last step'), 'goes straight to the "Up" screen, no in-between screen');
     await finish(ctx, 'waking-timer');
   }
 
@@ -476,6 +484,9 @@ async function step4() {
       [k('2026-09-20')]: logDoc('2026-09-20', [{ time: '09:00', practiceId: 'sc-break', source: 'app' }]),
       [k('2026-10-01')]: logDoc('2026-10-01', [{ time: '09:00', practiceId: 'sc-break', source: 'app' }, { time: '10:00', practiceId: 'sc-break', source: 'app-stuck' }]),
       [k('2026-10-03')]: logDoc('2026-10-03', [{ time: '09:00', practiceId: 'softer-voice', source: 'app' }]),
+      [k('2025-01-15')]: logDoc('2025-01-15', [{ time: '09:00', practiceId: 'sc-break', source: 'app' }]),
+      [k('2025-02-01')]: '{broken',
+      'practice:log:notes': logDoc('x', [{ time: '09:00', practiceId: 'sc-break', source: 'app' }]),
     };
     const ctx = await openPractice({ seed, now: '2026-10-04T12:00:00' });
     const { page } = ctx;
@@ -484,14 +495,61 @@ async function step4() {
     const t = await visibleText(page);
     ok(t.includes('Self-compassion course') && t.includes('Less self-criticism'), 'course name and why');
     ok(/WEEKS 1-2/i.test(t) && /WEEKS 3-4/i.test(t) && t.indexOf('Self-compassion break') < t.indexOf('Compassionate friend'), 'course path by weeks, in order');
-    ok(t.includes('3 reps so far · first rep 2026-09-20'), 'reps so far + first rep date (sc-break)');
+    ok(t.includes('Reps of all time, from every daily log in the app.') && t.includes("1 day couldn't be read."), 'Learn says reps are all-time; an unreadable day is reported');
+    ok(t.includes('4 reps so far · first rep 2025-01-15'), 'all-time reps + first rep date, including a log from 2025 (sc-break)');
     ok(t.includes('1 rep so far · first rep 2026-10-03'), 'reps so far + first rep date (softer-voice)');
     ok((t.match(/No reps yet/g) || []).length === 3, 'practices without reps say so');
-    const reads = await page.evaluate(i => window.__storageLog.slice(i).filter(x => x[0] === 'get' && x[1].startsWith('practice:log:')).map(x => x[1]), ctx.mark);
-    ok(reads.includes('practice:log:2026_04_08') && !reads.includes('practice:log:2026_04_07'), `reads ${P_LEARN_DAYS} days of logs (back to 2026-04-08)`);
+    const lists = await page.evaluate(i => window.__storageLog.slice(i).filter(x => x[0] === 'list').map(x => x[1]), ctx.mark);
+    ok(lists.length >= 1 && lists.every(x => x === 'practice:log:'), 'lists logs with the "practice:log:" prefix only');
+    ok((await mem(page, k('2025-02-01'))) === '{broken', 'unreadable log doc left alone');
     await page.getByRole('button', { name: 'Start' }).first().click();
     ok((await visibleText(page)).includes('how much self-criticism'), 'Start from Learn opens the guided flow (self-criticism label)');
     await finish(ctx, 'learn');
+  }
+
+  console.log('\n[Learn: fallback when logs cannot be listed]');
+  {
+    const seed = { ...F.base(),
+      [k('2026-04-08')]: logDoc('2026-04-08', [{ time: '09:00', practiceId: 'sc-break', source: 'app' }]),
+      [k('2026-04-07')]: logDoc('2026-04-07', [{ time: '09:00', practiceId: 'sc-break', source: 'app' }]),
+    };
+    const ctx = await openPractice({ seed, now: '2026-10-04T12:00:00', noList: true });
+    const { page } = ctx;
+    await page.getByRole('tab', { name: 'Learn' }).click();
+    await page.waitForFunction(() => !document.querySelector('.pr-root').innerText.includes('Counting reps'));
+    const t = await visibleText(page);
+    ok(t.includes(`Couldn't list every log, so this counts the last ${P_LEARN_FALLBACK_DAYS} days only.`), 'no listPrefix → falls back to the 180-day scan and says so');
+    ok(t.includes('1 rep so far · first rep 2026-04-08'), 'fallback counts back to 2026-04-08 (180 days incl. today), not 2026-04-07');
+    await finish(ctx, 'learn-fallback');
+  }
+
+  console.log('\n[Learn: real window.storage.listPrefix against a fake Firestore]');
+  {
+    const doc = (key, iso, entries) => ({ value: logDoc(iso, entries), key, updatedAt: '2026-01-01' });
+    const fake = {
+      practice_playbook: { value: F.base()['practice:playbook'], key: 'practice:playbook' },
+      practice_log_2024_12_31: doc('practice:log:2024_12_31', '2024-12-31', [{ time: '09:00', practiceId: 'sc-break', source: 'app' }]),
+      practice_log_2026_10_01: { value: logDoc('2026-10-01', [{ time: '09:00', practiceId: 'sc-break', source: 'app' }]) }, // no key field
+      practice_logbook: { value: logDoc('x', [{ time: '1', practiceId: 'sc-break' }]), key: 'practice:logbook' },
+      practice_playbook_old: { value: '{}', key: 'practice:playbook.old' },
+      'kaizen3_tasks': { value: '[]', key: 'kaizen3:tasks' },
+    };
+    const ctx = await openPage({ fakeFirestore: fake, now: '2026-10-04T12:00:00' });
+    const { page } = ctx;
+    await page.waitForTimeout(3500);
+    const mark = await page.evaluate(() => window.__fakeCalls.length);
+    await page.getByRole('button', { name: 'Practice', exact: true }).click();
+    await page.getByRole('tab', { name: 'Learn' }).click();
+    await page.waitForFunction(() => { const r = document.querySelector('.pr-root'); return r && !r.innerText.includes('Counting reps') && r.innerText.includes('so far'); });
+    const t = await visibleText(page);
+    ok(t.includes('Reps of all time') && t.includes('2 reps so far · first rep 2024-12-31'), 'real listPrefix: counts a 2024 log and a doc with no key field; ignores practice:logbook');
+    const calls = await page.evaluate(m => window.__fakeCalls.slice(m), mark);
+    const queries = calls.filter(c => c[0] === 'query');
+    ok(queries.length >= 1 && queries.every(q => JSON.stringify(q[1]) === JSON.stringify([['>=', 'practice_log_'], ['<', 'practice_log_\uf8ff']])), 'Firestore query is the doc-ID range practice_log_ … practice_log_\\uf8ff');
+    ok(!calls.some(c => c[0] === 'getAll'), 'no whole-collection read from the Practice tab');
+    ok(calls.filter(c => c[0] === 'get' || c[0] === 'set').every(c => c[1].startsWith('practice_')), 'every single-doc read/write from the Practice tab is a practice_ doc');
+    ok(ctx.errors.length === 0, 'fake-firestore: no console errors' + (ctx.errors.length ? ' → ' + ctx.errors.join(' | ') : ''));
+    await ctx.browser.close();
   }
 
   console.log('\n[Progress]');

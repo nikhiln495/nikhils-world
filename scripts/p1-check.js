@@ -22,7 +22,9 @@ const BLOCK = [
 ];
 const isBlocked = (url) => !FONTS.test(url) && BLOCK.some(re => re.test(url));
 
-async function openPage({ seed = {}, now = null, proxy = null, offline = false, timezoneId = 'America/Anchorage' } = {}) {
+// fakeFirestore: { docId: {value, key?} } — instead of mocking window.storage, run the page's REAL
+// window.storage against an in-memory stand-in for the Firestore compat API (the real SDK stays blocked).
+async function openPage({ seed = {}, now = null, proxy = null, offline = false, timezoneId = 'America/Anchorage', noList = false, fakeFirestore = null } = {}) {
   const browser = await chromium.launch({
     proxy: process.env.HTTPS_PROXY ? { server: process.env.HTTPS_PROXY } : undefined,
   });
@@ -77,7 +79,7 @@ async function openPage({ seed = {}, now = null, proxy = null, offline = false, 
     return route.continue();
   });
 
-  await page.addInitScript(({ seed, now, offline }) => {
+  await page.addInitScript(({ seed, now, offline, noList, fakeFirestore }) => {
     if (now) {
       const fixed = new Date(now).getTime();
       const start = Date.now();
@@ -89,6 +91,36 @@ async function openPage({ seed = {}, now = null, proxy = null, offline = false, 
       window.Date = FakeDate;
     }
     if (offline) Object.defineProperty(navigator, 'onLine', { get: () => false });
+    if (fakeFirestore) {
+      const docs = new Map(Object.entries(fakeFirestore));
+      const calls = [];
+      const ID = '__name__';
+      const snapOf = (list) => ({ docs: list, forEach: (fn) => list.forEach(fn) });
+      const docSnap = (id) => ({ id, exists: docs.has(id), data: () => docs.get(id) });
+      const query = (conds) => ({
+        where: (f, op, v) => query([...conds, [f, op, v]]),
+        get: async () => {
+          calls.push(['query', conds.map(c => c.slice(1))]);
+          const ok = (id) => conds.every(([f, op, v]) => f !== ID || (op === '>=' ? id >= v : op === '<' ? id < v : false));
+          return snapOf([...docs.keys()].filter(ok).sort().map(docSnap));
+        },
+      });
+      const coll = {
+        doc: (id) => ({
+          get: async () => { calls.push(['get', id]); return docSnap(id); },
+          set: async (v) => { calls.push(['set', id]); docs.set(id, v); },
+        }),
+        where: (f, op, v) => query([[f, op, v]]),
+        get: async () => { calls.push(['getAll']); return snapOf([...docs.keys()].map(docSnap)); },
+      };
+      const db = { settings() {}, collection: () => coll };
+      const fs = () => db;
+      fs.FieldPath = { documentId: () => ID };
+      window.firebase = { apps: [], initializeApp() { this.apps.push({}); }, firestore: fs };
+      window.__fakeDocs = docs;
+      window.__fakeCalls = calls;
+      return;
+    }
     const mem = new Map(Object.entries(seed));
     const log = [];
     const mock = {
@@ -98,11 +130,15 @@ async function openPage({ seed = {}, now = null, proxy = null, offline = false, 
       exportAllDocs: async () => null,
       isCloudReady: () => false,
     };
+    if (!noList) mock.listPrefix = async (prefix) => {
+      log.push(['list', prefix]);
+      return [...mem.keys()].filter(k => k.startsWith(prefix)).map(k => ({ id: k.replace(/[:/.#$[\]]/g, '_'), key: k, value: mem.get(k) }));
+    };
     // The page's own `window.storage = {...}` assignment is ignored (non-writable).
     Object.defineProperty(window, 'storage', { get: () => mock, set: () => {}, configurable: false });
     window.__mem = mem;
     window.__storageLog = log;
-  }, { seed, now, offline });
+  }, { seed, now, offline, noList, fakeFirestore });
 
   await page.goto(ORIGIN + '/');
   await page.waitForFunction(() => document.querySelector('nav button'), null, { timeout: 60000 });
