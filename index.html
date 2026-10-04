@@ -2466,7 +2466,7 @@ const DOMAINS = [
 // ─────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────
-// SESSIONS PANEL — Fireflies sync + manual paste + foci analysis
+// SESSIONS PANEL — manual paste + foci analysis
 // ─────────────────────────────────────────────────────
 
 const SESSIONS_KEY = 'session-summaries';
@@ -2475,7 +2475,6 @@ const FOCI_KEY     = 'trajectory-foci';
 function SessionsPanel() {
   const [summaries,   setSummaries]   = useState([]);
   const [foci,        setFoci]        = useState(null);
-  const [syncing,     setSyncing]     = useState(false);
   const [analyzing,   setAnalyzing]   = useState(false);
   const [syncStatus,  setSyncStatus]  = useState('');
   const [pasteOpen,   setPasteOpen]   = useState(false);
@@ -2499,58 +2498,6 @@ function SessionsPanel() {
   const saveSummaries = async (next) => {
     setSummaries(next);
     try { await window.storage.set(SESSIONS_KEY, JSON.stringify(next)); } catch(e) {}
-  };
-
-  // ── Fireflies sync via Claude API + Fireflies MCP ──
-  const syncFireflies = async () => {
-    setSyncing(true);
-    setSyncStatus('Connecting to Fireflies…');
-    try {
-      const resp = await fetch(AI_PROXY_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: AI_MODEL,
-          max_tokens: 16000,
-          output_config: { effort: 'low' },
-          system: `You are a session summarizer. Use the Fireflies MCP to fetch recent transcripts.
-Search for transcripts mentioning "Shobha", "Brighton", or "therapy" in the last 60 days.
-For each found transcript, extract and return ONLY a JSON array (no other text) with objects:
-{
-  "id": "<fireflies_transcript_id>",
-  "date": "<YYYY-MM-DD>",
-  "type": "<Shobha|Brighton|other>",
-  "title": "<meeting title or inferred>",
-  "duration_min": <number or null>,
-  "key_themes": ["<theme1>","<theme2>","<theme3>"],
-  "body_sensations": "<any noted body/somatic observations>",
-  "key_insight": "<single most important insight from session>",
-  "assignment": "<any homework or practice assigned>",
-  "notable_quotes": ["<short direct quote if present>"]
-}
-Return maximum 15 most recent sessions. Return ONLY the JSON array, nothing else.`,
-          messages: [{ role: 'user', content: 'Fetch my recent therapy and somatic session transcripts from Fireflies and summarize them.' }],
-          mcp_servers: [{ type: 'url', url: 'https://api.fireflies.ai/mcp', name: 'fireflies' }]
-        })
-      });
-      const data = await resp.json();
-      // Extract text from response
-      const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
-      // Parse JSON from response
-      const jsonMatch = text.match(/\[[\s\S]*\]/);
-      if (!jsonMatch) throw new Error('No session data returned — check Fireflies connection');
-      const fetched = JSON.parse(jsonMatch[0]);
-      // Merge with existing, deduplicate by id
-      const existingIds = new Set(summaries.map(s => s.id));
-      const newOnes = fetched.filter(s => !existingIds.has(s.id));
-      const merged = [...newOnes, ...summaries].slice(0, 50);
-      await saveSummaries(merged);
-      setSyncStatus(`✅ Synced ${newOnes.length} new session(s). ${merged.length} total stored.`);
-    } catch(e) {
-      setSyncStatus(`❌ ${e.message}`);
-    }
-    setSyncing(false);
-    setTimeout(() => setSyncStatus(''), 6000);
   };
 
   // ── Manual paste (unrecorded Brighton or notes) ──
@@ -2579,7 +2526,7 @@ Return maximum 15 most recent sessions. Return ONLY the JSON array, nothing else
 
   // ── Multi-session foci analysis ──
   const analyzeFoci = async () => {
-    if (summaries.length === 0) { setSyncStatus('No sessions stored yet — sync or add one first.'); return; }
+    if (summaries.length === 0) { setSyncStatus('No sessions stored yet — add one first.'); return; }
     setAnalyzing(true);
     setSyncStatus('Analyzing patterns across sessions…');
     try {
@@ -2686,11 +2633,6 @@ Return 3-5 foci. Focus on what's genuinely active, not historical.`,
 
       {/* Action buttons */}
       <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-        <button onClick={syncFireflies} disabled={syncing} style={{
-          ...solidBtn, padding:'8px 14px', borderRadius:8, fontSize:12, opacity: syncing ? 0.6 : 1
-        }}>
-          {syncing ? '⏳ Syncing…' : '🔄 Sync Fireflies'}
-        </button>
         <button onClick={() => setPasteOpen(!pasteOpen)} style={{
           ...ghostBtn, padding:'8px 14px', borderRadius:8, fontSize:12
         }}>
@@ -2771,7 +2713,7 @@ Return 3-5 foci. Focus on what's genuinely active, not historical.`,
 
       {summaries.length === 0 && !foci && (
         <div style={{ textAlign:'center', padding:'30px 20px', color:'#9ca3af', fontSize:12, fontStyle:'italic' }}>
-          No sessions stored yet. Hit "Sync Fireflies" to pull your Shobha and Brighton sessions automatically, or paste notes manually for unrecorded Brighton sessions.
+          No sessions stored yet. Add notes manually for any Shobha or Brighton session.
         </div>
       )}
     </div>
