@@ -213,6 +213,63 @@
         return Object.values(out);
       },
 
+      // Every appdata doc with ALL its fields (archives included), for backups.
+      // Firestore Timestamps (and Dates) become ISO strings. null if Firestore can't be read.
+      exportRawDocs: async () => {
+        try { await window.__dbReady; } catch (_) {}
+        if (!db) return null;
+        // Only plain objects and arrays are walked; other Firestore types become something JSON-safe
+        // (a DocumentReference holds the whole Firestore instance and must not be walked).
+        const plain = (v) => {
+          if (v == null || typeof v !== 'object') return v;
+          if (v instanceof Date) return v.toISOString();
+          if (typeof v.toDate === 'function') { try { return v.toDate().toISOString(); } catch (_) { return null; } }
+          if (Array.isArray(v)) return v.map(plain);
+          const proto = Object.getPrototypeOf(v);
+          if (proto !== Object.prototype && proto !== null) {
+            if (typeof v.path === 'string') return v.path;
+            if (typeof v.latitude === 'number' && typeof v.longitude === 'number') return { latitude: v.latitude, longitude: v.longitude };
+            if (typeof v.toBase64 === 'function') { try { return v.toBase64(); } catch (_) { return null; } }
+            try { return JSON.parse(JSON.stringify(v)); } catch (_) { return String(v); }
+          }
+          const o = {};
+          for (const [k, x] of Object.entries(v)) o[k] = plain(x);
+          return o;
+        };
+        try {
+          const snap = await db.collection('appdata').get();
+          return snap.docs.map(doc => ({ id: doc.id, fields: plain(doc.data() || {}) }));
+        } catch (e) { return null; }
+      },
+
+      // Restore one doc by its Firestore doc ID. Writes the backed-up fields (minus updatedAt /
+      // migratedAt / restoredAt) plus updatedAt and restoredAt = now. The device copy in
+      // localStorage is updated only when this doc IS the doc for its key: archive docs share a
+      // key with the active doc and must not overwrite it. True only if the database write worked
+      // (or, with no database at all, the device copy was written).
+      setDoc: async (id, fields) => {
+        try { await window.__dbReady; } catch (_) {}
+        if (typeof id !== 'string' || !id || !fields || typeof fields !== 'object') return false;
+        const rest = { ...fields };
+        delete rest.updatedAt; delete rest.migratedAt; delete rest.restoredAt;
+        const now = new Date();
+        const isActive = typeof fields.key === 'string' && sanitiseKey(fields.key) === id;
+        let localOk = false;
+        if (isActive && typeof fields.value === 'string') {
+          try { localStorage.setItem(fields.key, fields.value); localOk = true; } catch (_) {}
+        }
+        if (db) {
+          try {
+            await db.collection('appdata').doc(id).set({ ...rest, updatedAt: now, restoredAt: now });
+            return true;
+          } catch (e) {
+            console.warn('Firestore restore failed for ' + id + ':', e);
+            return false;
+          }
+        }
+        return localOk;
+      },
+
       // Lets the SaveStatusPill display "Local-only" mode distinctly
       isCloudReady: () => !!window.__dbAvailable,
     };
@@ -7823,6 +7880,7 @@ const P_KEYS = {
   stuckMap:   'practice:stuck-map',
   today: (dayKey) => `practice:today:${dayKey}`,
   log:   (dayKey) => `practice:log:${dayKey}`,
+  asks:  (dayKey) => `practice:asks:${dayKey}`,
 };
 const P_STATUSES = ['homework','active','learning','reference','in-session','pending','open','setup','restart','new','not-working','paused'];
 const P_BY = 'Nikhil (app)';
@@ -7898,11 +7956,25 @@ function pAppendLog(entry, when = new Date()) {
   });
 }
 
-const pLastWakingLevel = (log) => {
-  const es = (log?.entries || []).filter(e => e.practiceId === 'waking-ladder' && typeof e.level === 'number');
-  return es.length ? es[es.length - 1].level : null;
+// Logs written outside the app may store a level as "4"; a numeric string counts as Number(level).
+const pLevel = (v) => {
+  const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v;
+  return typeof n === 'number' && Number.isFinite(n) ? n : null;
 };
-const pIsUp = (log) => (log?.entries || []).some(e => e.practiceId === 'waking-ladder' && typeof e.level === 'number' && e.level >= 4);
+// An entry's time as HH:MM, or '' when it has none (entries written outside the app may lack one).
+const pTimeOf = (e) => {
+  const m = typeof e?.time === 'string' ? e.time.trim().match(/^(\d{1,2}):(\d{2})/) : null;
+  return m && +m[1] < 24 && +m[2] < 60 ? `${pTwo(+m[1])}:${m[2]}` : '';
+};
+const pMinutes = (e) => { const t = pTimeOf(e); return t ? (+t.slice(0, 2)) * 60 + (+t.slice(3)) : null; };
+
+const pLastWakingLevel = (log) => {
+  const es = (log?.entries || []).filter(e => e?.practiceId === 'waking-ladder' && pLevel(e.level) != null);
+  return es.length ? pLevel(es[es.length - 1].level) : null;
+};
+const pIsUp = (log) => (log?.entries || []).some(e => e?.practiceId === 'waking-ladder' && pLevel(e.level) >= 4);
+
+const pHasPost4Rep = (log, pb) => (log?.entries || []).some(e => pFindPractice(pb, e?.practiceId)?.stage === 'post4');
 
 const pTrigger = (p) => (p?.now && String(p.now).trim()) ? p.now : (p?.when || '');
 const pFindPractice = (pb, id) => (pb?.practices || []).find(p => p.id === id) || null;
@@ -8069,7 +8141,8 @@ function PracticeCard({ p, name, why, trigger, firstStep, onStart, onLog }) {
 function TodayScreen({ data, onLog, onStart, onWaking, onAddUpdate }) {
   const { playbook, homework, homeworkMissing, today, todayMissing, todayError, todayLog } = data;
   const now = new Date();
-  const showWaking = now.getHours() < 12 && !pIsUp(todayLog);
+  // Only while he could still be waking up: 04:00–11:59, and not once he's up or has done an after-level-4 practice.
+  const showWaking = now.getHours() >= 4 && now.getHours() < 12 && !pIsUp(todayLog) && !pHasPost4Rep(todayLog, playbook);
   const todayCards = (today?.practices || []).filter(tp => {
     const p = pFindPractice(playbook, tp.id);
     return !p || pUsable(p);
@@ -8140,8 +8213,8 @@ function TodayScreen({ data, onLog, onStart, onWaking, onAddUpdate }) {
           <div style={pLabel}>Logged today ({entries.length})</div>
           {entries.map((e, i) => (
             <div key={i} style={{ fontSize: 13, color: PC.text, lineHeight: 1.7 }}>
-              <span style={{ color: PC.muted, fontFamily: pMono }}>{e.time}</span> {nameOf(e.practiceId)}
-              {typeof e.level === 'number' ? ` · level ${e.level}` : ''}
+              {pTimeOf(e) && <span style={{ color: PC.muted, fontFamily: pMono }}>{pTimeOf(e)} </span>}{nameOf(e.practiceId) || 'Entry'}
+              {pLevel(e.level) != null ? ` · level ${pLevel(e.level)}` : ''}
               {e.before != null || e.after != null ? ` · ${e.before ?? '–'} → ${e.after ?? '–'}` : ''}
               {e.note ? ` · ${e.note}` : ''}
             </div>
@@ -8296,7 +8369,7 @@ const P_VOICE = [
   '- Direct, warm, a little defiant. No toxic positivity.',
   "- Don't default to food as the fix.",
   "- Never suggest a practice that depends on another person. The one exception is Dr. Shobha's team's nightly call.",
-  '- Physio and grief tapping only after level 4 of the waking ladder.',
+  '- Physio and grief tapping never while he is still waking up in bed.',
 ].join('\n');
 
 const P_CHOOSE_TOOL = {
@@ -8322,7 +8395,7 @@ const pClock = (d = new Date()) => `${d.toLocaleDateString('en-US', { weekday: '
 
 const pContextLine = (log) => {
   const lvl = pLastWakingLevel(log);
-  const reps = (log?.entries || []).filter(e => e.practiceId !== 'waking-ladder' && e.practiceId !== 'forgot-log').map(e => {
+  const reps = (log?.entries || []).filter(e => e?.practiceId && e.practiceId !== 'waking-ladder' && e.practiceId !== 'forgot-log').map(e => {
     const r = (e.before != null || e.after != null) ? ` (before ${e.before ?? '-'}, after ${e.after ?? '-'})` : '';
     return `${e.practiceId}${r}`;
   });
@@ -8331,12 +8404,46 @@ const pContextLine = (log) => {
 
 const pOnline = () => (typeof navigator === 'undefined' || navigator.onLine !== false);
 
-// Returns the parsed JSON body; throws an Error describing what failed.
-async function pCallClaude({ system, text, tools, toolChoice }) {
+const P_ASK_KINDS = { 'stuck': 'Ask Claude', 'stuck-else': 'Something else', 'coach-me': 'Coach me', 'outside': 'Look outside', 'draft-shobha': 'Draft for Dr. Shobha' };
+
+// Appends one record of a Claude reply to practice:asks:<today>. Append-only; never throws; true if saved.
+async function pSaveAsk(ask, prompt, data, model) {
+  try {
+    const content = Array.isArray(data?.content) ? data.content : [];
+    const texts = content.filter(b => b && b.type === 'text');
+    const sources = [];
+    texts.forEach(b => (Array.isArray(b.citations) ? b.citations : []).forEach(c => {
+      if (!c || !(c.title || c.url) || sources.some(x => x.url === (c.url || null) && x.title === (c.title || null))) return;
+      sources.push({ title: c.title || null, url: c.url || null });
+    }));
+    const usage = {};
+    ['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'].forEach(k => {
+      if (data?.usage && data.usage[k] != null) usage[k] = data.usage[k];
+    });
+    const now = new Date();
+    const rec = {
+      time: pTimeHM(now), kind: ask?.kind || 'unknown', words: ask?.words ?? '', prompt,
+      text: texts.map(b => (typeof b.text === 'string' ? b.text : '')).join(''),
+      tools: content.filter(b => b && b.type === 'tool_use').map(b => ({ name: b.name, input: b.input ?? null })),
+      sources, model: data?.model || model, usage,
+    };
+    await pUpdate(P_KEYS.asks(pDayKey(now)), () => ({ date: pLocalISO(now), entries: [] }), (doc) => {
+      if (!Array.isArray(doc.entries)) doc.entries = [];
+      doc.entries.push(rec);
+      return doc;
+    });
+    return true;
+  } catch (_) { return false; }
+}
+
+// Returns { data, saved }: the parsed JSON body, and whether the reply was saved to today's answers
+// (saved before any checks on it). Throws an Error describing what failed; a failed call saves nothing.
+// The system prompt goes in one block with a cache breakpoint, so tools + system are cached.
+async function pCallClaude({ system, text, tools, toolChoice, ask }) {
   if (!pOnline()) throw new Error('This device is offline.');
   const url = window.AI_PROXY_URL, model = window.AI_MODEL;
   if (!url || !model) throw new Error('AI proxy settings not found.');
-  const body = { model, max_tokens: 16000, output_config: { effort: 'low' }, system };
+  const body = { model, max_tokens: 16000, output_config: { effort: 'low' }, system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }] };
   if (tools) body.tools = tools;
   if (toolChoice) body.tool_choice = toolChoice;
   body.messages = [{ role: 'user', content: text }];
@@ -8345,38 +8452,52 @@ async function pCallClaude({ system, text, tools, toolChoice }) {
     resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   } catch (e) { throw new Error(`Couldn't reach the AI proxy (${e?.message || 'network error'}).`); }
   if (resp.status !== 200) throw new Error(`The AI proxy answered ${resp.status}.`);
-  try { return await resp.json(); } catch (e) { throw new Error('The AI proxy sent something that is not JSON.'); }
+  let data;
+  try { data = await resp.json(); } catch (e) { throw new Error('The AI proxy sent something that is not JSON.'); }
+  const saved = await pSaveAsk(ask, text, data, model);
+  return { data, saved };
 }
 
+// An Error that also says whether the reply behind it was saved.
+const pAskError = (msg, saved) => Object.assign(new Error(msg), { saved });
+
 // Stuck layer b / Waking "Coach me": choose 1–3 practices. Filters are enforced here, not only in the prompt.
-async function pChoosePractices({ playbook, text, allow = () => true, lastLevel }) {
+// Returns { picks, saved }.
+async function pChoosePractices({ playbook, text, allow = () => true, ask }) {
   const system = `${P_VOICE}\n\nCall choose_practices with 1 to 3 ids from the library, each with a one-sentence reason in literal physical terms. Library:\n${pIndex(playbook, allow)}`;
-  const data = await pCallClaude({ system, text, tools: [P_CHOOSE_TOOL], toolChoice: { type: 'auto' } });
+  const { data, saved } = await pCallClaude({ system, text, tools: [P_CHOOSE_TOOL], toolChoice: { type: 'auto' }, ask });
   const block = (data?.content || []).find(b => b.type === 'tool_use' && b.name === 'choose_practices');
-  if (!block) throw new Error('Claude answered without choosing practices.');
+  if (!block) throw pAskError('Claude answered without choosing practices.', saved);
   const seen = new Set();
   const picks = (Array.isArray(block.input?.picks) ? block.input.picks : [])
     .filter(x => x && typeof x.id === 'string')
     .map(x => ({ id: x.id, why: typeof x.why === 'string' ? x.why : '', p: pFindPractice(playbook, x.id) }))
     .filter(x => x.p && x.p.status !== 'not-working' && allow(x.p))
-    .filter(x => x.p.stage !== 'post4' || (lastLevel != null && lastLevel >= 4))
     .filter(x => (seen.has(x.id) ? false : (seen.add(x.id), true)))
     .slice(0, 3);
-  if (!picks.length) throw new Error('None of the practices Claude picked can be used right now.');
-  return picks;
+  if (!picks.length) throw pAskError('None of the practices Claude picked can be used right now.', saved);
+  return { picks, saved };
 }
 
 // Stuck layer c: outside the playbook, with web search. Returns { text, steps, sources }.
 async function pLookOutside(words, log) {
   const system = `${P_VOICE}\n\nSearch the web, then answer with 3 to 6 numbered literal steps (1. 2. 3.). After the steps, name the sources you used.`;
-  const data = await pCallClaude({ system, text: `${words}\n${pContextLine(log)}`, tools: [P_WEB_TOOL], toolChoice: { type: 'auto' } });
+  const { data, saved } = await pCallClaude({ system, text: `${words}\n${pContextLine(log)}`, tools: [P_WEB_TOOL], toolChoice: { type: 'auto' }, ask: { kind: 'outside', words } });
   const texts = (data?.content || []).filter(b => b.type === 'text');
   const text = texts.map(b => b.text).join('').trim();
-  if (!text) throw new Error('Claude sent no steps back.');
+  if (!text) throw pAskError('Claude sent no steps back.', saved);
   const steps = text.split('\n').map(l => l.trim()).filter(l => /^\d+[.)]\s+/.test(l));
   const sources = [];
   texts.forEach(b => (b.citations || []).forEach(c => { const n = c.title || c.url; if (n && !sources.includes(n)) sources.push(n); }));
-  return { text, steps, sources };
+  return { text, steps, sources, saved };
+}
+
+// Shown under every answer from Claude.
+function PSaved({ saved }) {
+  if (saved === undefined) return null;
+  return saved
+    ? <div style={{ fontSize: 12, color: PC.muted, marginTop: 6 }}>Saved to today's answers.</div>
+    : <PNote msg="❌ This answer didn't save. Take a screenshot before you leave this screen." />;
 }
 
 // ─────────────────────────────────────────────────────
@@ -8501,7 +8622,7 @@ function PStepWidget({ w }) {
   return null;
 }
 
-function GuidedFlow({ practiceId, source, playbook, onSave, onClose }) {
+function GuidedFlow({ practiceId, source, note, playbook, onSave, onClose }) {
   const p = pFindPractice(playbook, practiceId);
   const [i, setI] = useState(-1); // -1 = before rating, steps.length = after rating
   const [before, setBefore] = useState(null);
@@ -8545,7 +8666,7 @@ function GuidedFlow({ practiceId, source, playbook, onSave, onClose }) {
           {i >= n && (
             <button style={pBtn('solid', { flex: 2 })} disabled={busy} onClick={async () => {
               setBusy(true);
-              const ok = await onSave({ practiceId: p.id, before: before ?? undefined, after: after ?? undefined, source });
+              const ok = await onSave({ practiceId: p.id, before: before ?? undefined, after: after ?? undefined, source, note: note || undefined });
               setBusy(false);
               if (ok) onClose();
             }}>Save rep</button>
@@ -8556,16 +8677,19 @@ function GuidedFlow({ practiceId, source, playbook, onSave, onClose }) {
   );
 }
 
-// Cards for Claude's picks.
+// Cards for Claude's picks. onStart(id, pick).
 function PPicks({ picks, onStart }) {
   return picks.map(x => (
     <div key={x.id} style={pCard({ borderLeft: `3px solid ${PC.accent}` })}>
       <div style={{ fontSize: 16, color: PC.text, fontWeight: 700, marginBottom: 4 }}>{x.p.name} <PStageTag p={x.p} /></div>
       {x.why && <div style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, marginBottom: 10 }}>{x.why}</div>}
-      <button style={pBtn('solid', { width: '100%' })} onClick={() => onStart(x.id)}>Start</button>
+      <button style={pBtn('solid', { width: '100%' })} onClick={() => onStart(x.id, x)}>Start</button>
     </div>
   ));
 }
+
+// Note on a rep started from one of Claude's picks.
+const pPickNote = (words, pick) => `Asked Claude: "${String(words || '').trim().slice(0, 240)}" | Claude: ${pick?.why || ''}`;
 
 // ─────────────────────────────────────────────────────
 // SCREEN 9 — WAKING UP
@@ -8596,6 +8720,17 @@ const pFirstPlanItem = (today, homework, playbook) => {
   return null;
 };
 
+// Last night's lights-out: the latest lights-out or bedtime-plan entry among yesterday's entries at
+// 18:00 or later and today's entries before 06:00 (log docs stay keyed by calendar date).
+const pLastLightsOut = (yesterdayLog, todayLog) => {
+  const isLO = (e) => e && (e.practiceId === 'lights-out' || e.practiceId === 'bedtime-plan') && pMinutes(e) != null;
+  const ys = (yesterdayLog?.entries || []).filter(e => isLO(e) && pMinutes(e) >= 18 * 60).map(e => [pMinutes(e), e]);
+  const ts = (todayLog?.entries || []).filter(e => isLO(e) && pMinutes(e) < 6 * 60).map(e => [24 * 60 + pMinutes(e), e]);
+  const all = [...ys, ...ts];
+  if (!all.length) return null;
+  return all.reduce((a, b) => (b[0] >= a[0] ? b : a))[1];
+};
+
 // Fixed rules from the spec, using the playbook (missing ids skipped).
 function pWakingSteps(where, blocks, playbook, today, homework) {
   const has = (id) => { const p = pFindPractice(playbook, id); return p && p.status !== 'not-working' && !pIsPhysioOrGrief(p) ? p : null; };
@@ -8619,24 +8754,27 @@ function pWakingSteps(where, blocks, playbook, today, homework) {
     if (has('passage-of-time')) out.push({ text: 'Count to 60 in your head. The clock stays hidden.', kind: 'count', from: 'passage-of-time' });
     if (feet) out.push(feet);
   } else if (where === 'standing') {
-    if (blocks.includes('dizzy')) out.push(dizzy);
+    if (blocks.includes('dizzy')) out.push({ text: 'Sit down on the nearest surface or hold something solid. 5 slow breaths, then stand up slowly with a hand on something.' });
     const first = pFirstPlanItem(today, homework, playbook);
     out.push({ text: first ? `First thing on today's plan: ${first.name}${first.firstStep ? `. ${pText(first.firstStep)}` : ''}` : 'Name the first thing you will do today, and do its first step.' });
   }
   return out;
 }
 
-// "Didn't work, try another": single steps from waking-stage practices (never physio, grief tapping or post4).
-// Not-working practices may lend a single step, never the whole practice.
+// "Didn't work, try another": a fixed list of single steps, in order. An entry is skipped when its
+// practice isn't in the playbook. A single step from a not-working practice is still allowed.
+const P_WAKING_ALTERNATES = [
+  { text: 'Prop yourself up on your elbows and stay there for 30 seconds.', from: 'seven-minute-waking' },
+  { text: 'Roll onto your side, then push yourself up to sitting.', from: 'seven-minute-waking' },
+  { text: "Take 5 voo breaths: on each out-breath, make a long, low 'voo' sound.", from: 'seven-minute-waking' },
+  { text: 'Move only your eyes: slowly left to right, then up and down.', from: 'seven-minute-waking' },
+  { text: 'Turn your head slowly to the left, then to the right.', from: 'seven-minute-waking' },
+  { text: 'Count down out loud: 5, 4, 3, 2, 1. Move on 1.', from: 'countdown' },
+  { text: "If you went back under: late is not skipped. Say one self-forgiveness line, then do the next step.", from: 'waking-ladder' },
+  { text: "Say out loud 'I stalled at ___' and fill in the blank.", from: 'sf-daily-stall' },
+];
 function pWakingAlternates(playbook) {
-  const out = [];
-  (playbook?.practices || []).forEach(p => {
-    if (!['pre4', 'stage4'].includes(p.stage) || pIsPhysioOrGrief(p)) return;
-    const steps = (p.steps || []).map(pText).filter(Boolean);
-    const pick = p.status === 'not-working' ? steps.slice(0, 1) : steps;
-    pick.forEach(t => out.push({ text: t, from: p.id }));
-  });
-  return out;
+  return P_WAKING_ALTERNATES.filter(a => pFindPractice(playbook, a.from));
 }
 
 function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, onStart, onClose }) {
@@ -8647,6 +8785,7 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
   const [queue, setQueue] = useState([]);
   const [idx, setIdx] = useState(0);
   const [tried, setTried] = useState([]);
+  const [noMore, setNoMore] = useState(false);
   const [coach, setCoach] = useState({ busy: false, err: '', picks: null });
 
   const answers = () => {
@@ -8659,7 +8798,7 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
   const begin = () => {
     const q = pWakingSteps(where, blocks, playbook, today, homework);
     setQueue(q.length ? q : [{ text: P_FEET }]);
-    setIdx(0); setTried([]); setStage('steps');
+    setIdx(0); setTried([]); setNoMore(false); setStage('steps');
   };
 
   const imUp = async () => {
@@ -8667,28 +8806,30 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
     if (ok) setStage('up');
   };
 
-  const startOver = () => { setWhere(null); setBlocks([]); setOther(''); setCoach({ busy: false, err: '', picks: null }); setStage('q1'); };
+  const startOver = () => { setWhere(null); setBlocks([]); setOther(''); setNoMore(false); setCoach({ busy: false, err: '', picks: null }); setStage('q1'); };
 
+  // Skips any alternate whose text was already shown (or is still queued) this run.
   const tryAnother = () => {
     const cur = queue[idx];
     const used = new Set([...tried, ...queue.map(s => s.text)]);
     const alt = pWakingAlternates(playbook).find(a => !used.has(a.text));
     setTried(t => [...t, cur.text]);
     if (alt) setQueue(q => q.map((s, k) => (k === idx ? alt : s)));
-    else if (idx < queue.length - 1) setIdx(idx + 1);
+    else setNoMore(true);
   };
 
   const coachMe = async () => {
     setCoach({ busy: true, err: '', picks: null });
-    const lo = [...(yesterdayLog?.entries || [])].reverse().find(e => e.practiceId === 'lights-out' || e.practiceId === 'bedtime-plan');
-    const text = `${answers()}\nContext: local time ${pClock()}${lo ? `; last night's lights-out: ${lo.time}` : ''}.`;
+    const lo = pLastLightsOut(yesterdayLog, todayLog);
+    const words = answers();
+    const text = `${words}\nContext: local time ${pClock()}${lo ? `; last night's lights-out: ${pTimeOf(lo)}` : ''}.`;
     try {
-      const picks = await pChoosePractices({
-        playbook, text, lastLevel: pLastWakingLevel(todayLog),
+      const { picks, saved } = await pChoosePractices({
+        playbook, text, ask: { kind: 'coach-me', words },
         allow: (p) => ['pre4', 'stage4', 'any'].includes(p.stage) && !pIsPhysioOrGrief(p),
       });
-      setCoach({ busy: false, err: '', picks });
-    } catch (e) { setCoach({ busy: false, err: e.message, picks: null }); }
+      setCoach({ busy: false, err: '', picks, saved, words });
+    } catch (e) { setCoach({ busy: false, err: e.message, picks: null, saved: e.saved }); }
   };
 
   const big = (extra = {}) => pBtn('ghost', { width: '100%', minHeight: 64, fontSize: 18, marginBottom: 10, textAlign: 'left', ...extra });
@@ -8726,7 +8867,15 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
         </div>
       )}
 
-      {stage === 'steps' && queue[idx] && (
+      {stage === 'steps' && noMore && (
+        <div>
+          <div style={{ fontSize: 26, fontWeight: 700, color: PC.text, marginBottom: 16 }}>No more alternates.</div>
+          <button style={pBtn('warn', { width: '100%', minHeight: 64, fontSize: 20, marginBottom: 10 })} onClick={imUp}>I'm up and moving</button>
+          <button style={pBtn('ghost', { width: '100%' })} onClick={startOver}>Not yet, start over</button>
+        </div>
+      )}
+
+      {stage === 'steps' && !noMore && queue[idx] && (
         <div>
           <div style={{ fontSize: 13, color: PC.muted, marginBottom: 8, fontFamily: pMono }}>Step {idx + 1} of {queue.length}</div>
           <div style={{ fontSize: 28, fontWeight: 700, color: PC.text, lineHeight: 1.35, marginBottom: 16 }}>{queue[idx].text}</div>
@@ -8751,8 +8900,8 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
           )}
           <button style={pBtn('ghost', { width: '100%' })} disabled={!online || coach.busy} onClick={coachMe}>{coach.busy ? 'Asking…' : 'Coach me'}</button>
           {!online && <div style={{ fontSize: 12, color: PC.muted, marginTop: 6 }}>Coach me needs the internet. The steps above still work offline.</div>}
-          {coach.err && <PNote msg={`❌ ${coach.err} The steps above still work.`} />}
-          {coach.picks && <div style={{ marginTop: 12 }}><PPicks picks={coach.picks} onStart={(id) => onStart(id, 'app-waking')} /></div>}
+          {coach.err && <><PNote msg={`❌ ${coach.err} The steps above still work.`} /><PSaved saved={coach.saved} /></>}
+          {coach.picks && <div style={{ marginTop: 12 }}><PPicks picks={coach.picks} onStart={(id, pick) => onStart(id, 'app-waking', pPickNote(coach.words, pick))} /><PSaved saved={coach.saved} /></div>}
         </div>
       )}
 
@@ -8795,6 +8944,60 @@ const P_STUCK_DEFAULT = [
 ];
 const pIsInBed = (s) => s.id === 'in-bed' || /^in bed\b/i.test(s.label || '');
 
+// Today's and yesterday's saved answers from Claude (practice:asks:<day>), newest first, max 12. Read-only.
+const P_EARLIER_MAX = 12;
+function EarlierAnswers({ playbook, tick }) {
+  const [open, setOpen] = useState(false);
+  const [st, setSt] = useState({ rows: [], errors: [] });
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const days = [['Yesterday', pDaysAgo(1)], ['Today', new Date()]];
+      const rows = [], errors = [];
+      for (let d = 0; d < days.length; d++) {
+        const [label, date] = days[d];
+        const r = await pRead(P_KEYS.asks(pDayKey(date)));
+        if (r.error) { errors.push(`${label}'s answers couldn't be read (${r.error}).`); continue; }
+        const es = Array.isArray(r.data?.entries) ? r.data.entries : [];
+        es.forEach((rec, i) => { if (rec && typeof rec === 'object') rows.push({ rec, label, d, i, m: pMinutes(rec) }); });
+      }
+      // Newest first: by day, then time (an entry without a time sorts last in its day), then order saved.
+      rows.sort((a, b) => (b.d - a.d) || ((b.m ?? -1) - (a.m ?? -1)) || (b.i - a.i));
+      if (live) setSt({ rows, errors });
+    })();
+    return () => { live = false; };
+  }, [tick]);
+
+  const shown = st.rows.slice(0, P_EARLIER_MAX);
+  const picksOf = (rec) => (Array.isArray(rec.tools) ? rec.tools : [])
+    .filter(t => t && t.name === 'choose_practices')
+    .flatMap(t => (Array.isArray(t.input?.picks) ? t.input.picks : []))
+    .filter(x => x && typeof x.id === 'string');
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <button aria-expanded={open} onClick={() => setOpen(!open)}
+        style={pBtn('ghost', { width: '100%', textAlign: 'left', background: open ? PC.accentDim : 'transparent' })}>Show earlier answers from Claude ({shown.length})</button>
+      {open && (
+        <div style={{ paddingTop: 8 }}>
+          {st.errors.map((e, i) => <PNote key={i} msg={`❌ ${e} Nothing was changed.`} />)}
+          {!shown.length && !st.errors.length && <div style={{ fontSize: 13, color: PC.muted }}>No answers saved today or yesterday.</div>}
+          {st.rows.length > shown.length && <div style={{ fontSize: 12, color: PC.muted, marginBottom: 8 }}>Showing the newest {shown.length} of {st.rows.length}.</div>}
+          {shown.map(({ rec, label }, k) => (
+            <div key={k} style={pCard({ marginBottom: 8 })}>
+              <div style={{ fontSize: 12, color: PC.muted, fontFamily: pMono, marginBottom: 6 }}>{label}{pTimeOf(rec) ? ` ${pTimeOf(rec)}` : ''} · {P_ASK_KINDS[rec.kind] || (typeof rec.kind === 'string' && rec.kind) || 'Claude'}</div>
+              {typeof rec.words === 'string' && rec.words.trim() && <div style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, marginBottom: 6 }}>You: {rec.words}</div>}
+              {picksOf(rec).map((x, j) => (
+                <div key={j} style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, marginBottom: 4 }}><strong>{pFindPractice(playbook, x.id)?.name || x.id}</strong>: {typeof x.why === 'string' ? x.why : ''}</div>
+              ))}
+              {typeof rec.text === 'string' && rec.text.trim() && <div style={{ fontSize: 13, color: PC.muted, lineHeight: 1.5, whiteSpace: 'pre-wrap', marginTop: 4 }}>{rec.text.trim()}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onWaking, onSaveProposal, onClose }) {
   const [open, setOpen] = useState(null);
   const [askText, setAskText] = useState('');
@@ -8802,25 +9005,28 @@ function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onW
   const [ask, setAsk] = useState({ busy: false, err: '', picks: null });
   const [out, setOut] = useState({ busy: false, err: '', res: null, saved: false });
   const askRef = useRef(null);
-  const lastLevel = pLastWakingLevel(todayLog);
+  const [asksTick, setAsksTick] = useState(0);
   const online = pOnline();
 
+  // Waking levels only matter while he's waking up: in-bed situations skip after-level-4 practices;
+  // every other situation (including ones with a minimum level) shows its practices at any time.
   const fromDoc = stuckMap && Array.isArray(stuckMap.situations);
   const situations = (fromDoc ? stuckMap.situations : P_STUCK_DEFAULT).map(s => ({
     ...s,
     items: (s.practices || []).map(id => pFindPractice(playbook, id))
-      .filter(p => p && p.status !== 'not-working' && (p.stage !== 'post4' || (lastLevel != null && lastLevel >= 4))),
-  })).filter(s => !(s.minLevel && !(lastLevel != null && lastLevel >= s.minLevel)) && (s.items.length || pIsInBed(s)));
+      .filter(p => p && p.status !== 'not-working' && !(pIsInBed(s) && p.stage === 'post4')),
+  })).filter(s => s.items.length || pIsInBed(s));
 
-  const runAsk = async (words) => {
+  const runAsk = async (words, kind = 'stuck') => {
     const w = (words ?? askText).trim();
     if (!w) return;
     setAskText(w);
     setAsk({ busy: true, err: '', picks: null });
     try {
-      const picks = await pChoosePractices({ playbook, text: `${w}\n${pContextLine(todayLog)}`, lastLevel });
-      setAsk({ busy: false, err: '', picks });
-    } catch (e) { setAsk({ busy: false, err: e.message, picks: null }); }
+      const { picks, saved } = await pChoosePractices({ playbook, text: `${w}\n${pContextLine(todayLog)}`, ask: { kind, words: w } });
+      setAsk({ busy: false, err: '', picks, saved, words: w });
+    } catch (e) { setAsk({ busy: false, err: e.message, picks: null, saved: e.saved }); }
+    setAsksTick(t => t + 1);
   };
 
   const runOutside = async () => {
@@ -8828,7 +9034,8 @@ function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onW
     if (!w) return;
     setOut({ busy: true, err: '', res: null, saved: false });
     try { setOut({ busy: false, err: '', res: await pLookOutside(w, todayLog), saved: false, words: w }); }
-    catch (e) { setOut({ busy: false, err: e.message, res: null, saved: false }); }
+    catch (e) { setOut({ busy: false, err: e.message, res: null, saved: false, askSaved: e.saved }); }
+    setAsksTick(t => t + 1);
   };
 
   return (
@@ -8868,7 +9075,7 @@ function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onW
           <div style={{ paddingTop: 8 }}>
             <textarea aria-label="Something else, in your words" rows={3} value={elseText} onChange={e => setElseText(e.target.value)} placeholder="In your words" style={{ ...pInput, minHeight: 80, marginBottom: 8, resize: 'vertical' }} />
             <button style={pBtn('solid', { width: '100%' })} disabled={!elseText.trim() || !online || ask.busy}
-              onClick={() => { runAsk(elseText); setTimeout(() => askRef.current?.scrollIntoView({ block: 'start' }), 0); }}>Ask Claude</button>
+              onClick={() => { runAsk(elseText, 'stuck-else'); setTimeout(() => askRef.current?.scrollIntoView({ block: 'start' }), 0); }}>Ask Claude</button>
           </div>
         )}
       </div>
@@ -8878,19 +9085,20 @@ function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onW
         <textarea aria-label="Ask Claude" rows={3} value={askText} onChange={e => setAskText(e.target.value)} placeholder="What's going on, in your words" style={{ ...pInput, minHeight: 80, marginBottom: 8, resize: 'vertical' }} />
         <button style={pBtn('solid', { width: '100%' })} disabled={!online || !askText.trim() || ask.busy || !playbook} onClick={() => runAsk()}>{ask.busy ? 'Asking…' : 'Pick practices for me'}</button>
         {!online && <div style={{ fontSize: 12, color: PC.muted, marginTop: 6 }}>Ask Claude needs the internet. The list above works offline.</div>}
-        {ask.err && <div style={{ marginTop: 10 }}><PNote msg={`❌ ${ask.err}`} /><div style={{ fontSize: 13, color: PC.muted }}>Pick from the list above instead; those practices work offline.</div></div>}
-        {ask.picks && <div style={{ marginTop: 12 }}><PPicks picks={ask.picks} onStart={(id) => onStart(id, 'app-stuck')} /></div>}
+        {ask.err && <div style={{ marginTop: 10 }}><PNote msg={`❌ ${ask.err}`} /><div style={{ fontSize: 13, color: PC.muted }}>Pick from the list above instead; those practices work offline.</div><PSaved saved={ask.saved} /></div>}
+        {ask.picks && <div style={{ marginTop: 12 }}><PPicks picks={ask.picks} onStart={(id, pick) => onStart(id, 'app-stuck', pPickNote(ask.words, pick))} /><PSaved saved={ask.saved} /></div>}
       </div>
 
       <div style={pCard()}>
         <div style={pLabel}>Look outside the playbook</div>
         <div style={{ fontSize: 13, color: PC.muted, marginBottom: 8 }}>Uses the words in the Ask Claude box and a web search. Results can be saved as a proposal for Gaps; they never go into the playbook.</div>
         <button style={pBtn('ghost', { width: '100%' })} disabled={!online || out.busy || !(askText.trim() || elseText.trim())} onClick={runOutside}>{out.busy ? 'Searching…' : 'Look outside the playbook'}</button>
-        {out.err && <div style={{ marginTop: 10 }}><PNote msg={`❌ ${out.err}`} /></div>}
+        {out.err && <div style={{ marginTop: 10 }}><PNote msg={`❌ ${out.err}`} /><PSaved saved={out.askSaved} /></div>}
         {out.res && (
           <div style={{ marginTop: 12 }}>
             <div style={{ fontSize: 14, color: PC.text, lineHeight: 1.6, whiteSpace: 'pre-wrap', marginBottom: 8 }}>{out.res.text}</div>
             {out.res.sources.length > 0 && <div style={{ fontSize: 12, color: PC.muted, marginBottom: 8 }}>Sources: {out.res.sources.join('; ')}</div>}
+            <div style={{ marginBottom: 8 }}><PSaved saved={out.res.saved} /></div>
             <button style={pBtn('solid', { width: '100%' })} disabled={out.saved} onClick={async () => {
               const options = [...(out.res.steps.length ? out.res.steps : [out.res.text]), ...out.res.sources.map(s => `Source: ${s}`)];
               const ok = await onSaveProposal(out.words, options);
@@ -8899,6 +9107,8 @@ function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onW
           </div>
         )}
       </div>
+
+      <EarlierAnswers playbook={playbook} tick={asksTick} />
 
       <div style={{ fontSize: 13, color: PC.muted, lineHeight: 1.6, borderTop: `1px solid ${PC.border}`, paddingTop: 12, marginTop: 8 }}>
         If thoughts of ending your life come with a plan or intent: call or text 988 (US) or Tele-MANAS 14416 (India), and tell Dr. Shobha.
@@ -9111,11 +9321,11 @@ function ShobhaScreen({ data, onAddQueue, onCover, onAddUpdate, flash }) {
     setDraft({ busy: true, err: '', text: '' });
     try {
       const system = `${P_VOICE}\n\nRewrite this WhatsApp message to Dr. Shobha so it reads naturally. Keep every item and its order, numbered 1, 2, 3 with no gaps, in plain sentences. No practice ids. Return only the message.`;
-      const data = await pCallClaude({ system, text: message });
+      const { data, saved } = await pCallClaude({ system, text: message, ask: { kind: 'draft-shobha', words: message } });
       const t = (data?.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
-      if (!t) throw new Error('Claude sent back no text.');
-      setDraft({ busy: false, err: '', text: pNoIds(t, playbook) });
-    } catch (e) { setDraft({ busy: false, err: e.message, text: '' }); }
+      if (!t) throw pAskError('Claude sent back no text.', saved);
+      setDraft({ busy: false, err: '', text: pNoIds(t, playbook), saved });
+    } catch (e) { setDraft({ busy: false, err: e.message, text: '', saved: e.saved }); }
   };
 
   return (
@@ -9128,11 +9338,12 @@ function ShobhaScreen({ data, onAddQueue, onCover, onAddUpdate, flash }) {
             <button style={pBtn('solid', { width: '100%', marginBottom: 8 })} onClick={() => copy(message)}>Copy WhatsApp message</button>
             <button style={pBtn('ghost', { width: '100%' })} disabled={!online || draft.busy} onClick={draftWithClaude}>{draft.busy ? 'Drafting…' : 'Draft with Claude'}</button>
             {!online && <div style={{ fontSize: 12, color: PC.muted, marginTop: 6 }}>Draft with Claude needs the internet. The message above works offline.</div>}
-            {draft.err && <div style={{ marginTop: 10 }}><PNote msg={`❌ ${draft.err}`} /></div>}
+            {draft.err && <div style={{ marginTop: 10 }}><PNote msg={`❌ ${draft.err}`} /><PSaved saved={draft.saved} /></div>}
             {draft.text && (
               <div style={{ marginTop: 10 }}>
                 <div style={{ fontSize: 14, color: PC.text, lineHeight: 1.6, whiteSpace: 'pre-wrap', background: '#0b0d12', borderRadius: 8, padding: 10, marginBottom: 8 }}>{draft.text}</div>
                 <button style={pBtn('solid', { width: '100%' })} onClick={() => copy(draft.text)}>Copy Claude's draft</button>
+                <PSaved saved={draft.saved} />
               </div>
             )}
           </>
@@ -9351,7 +9562,7 @@ function PracticeApp() {
       const doc = await pAppendLog(entry);
       setData(d => ({ ...d, todayLog: doc, todayLogError: null, dayKey: pDayKey() }));
       const name = pFindPractice(data.playbook, entry.practiceId)?.name || entry.practiceId;
-      flash(`✅ Logged: ${name}${typeof entry.level === 'number' ? ` · level ${entry.level}` : ''}`);
+      flash(`✅ Logged: ${name}${pLevel(entry.level) != null ? ` · level ${pLevel(entry.level)}` : ''}`);
       return true;
     } catch (e) {
       flash(`❌ ${e.message}`);
@@ -9446,12 +9657,12 @@ function PracticeApp() {
     } catch (e) { flash(`❌ ${e.message}`); return false; }
   };
 
-  const start = (id, source = 'app') => push({ type: 'flow', id, source });
+  const start = (id, source = 'app', note) => push({ type: 'flow', id, source, note });
   const top = stack[stack.length - 1];
 
   // Lower layers stay mounted (hidden) so going back keeps their state, e.g. Claude's picks on Stuck.
   const renderOverlay = (o) => {
-    if (o.type === 'flow') return <GuidedFlow practiceId={o.id} source={o.source} playbook={data.playbook} onSave={logRep} onClose={pop} />;
+    if (o.type === 'flow') return <GuidedFlow practiceId={o.id} source={o.source} note={o.note} playbook={data.playbook} onSave={logRep} onClose={pop} />;
     if (o.type === 'waking') return (
       <WakingUp playbook={data.playbook} today={data.today} homework={data.homework} todayLog={data.todayLog} yesterdayLog={data.yesterdayLog}
         onLog={logRep} onStart={start} onClose={pop} />
@@ -9609,6 +9820,92 @@ function PendingView({ glance, onJump }) {
   );
 }
 
+// ── BACKUPS ─────────────────────────────────────────────────────
+// A backup is every doc in the database (format 2). If the database can't be read, it falls back to
+// every key on this device except tokens and Firebase/internal keys.
+const NW_BACKUP_SKIP = /^(gdrive_token|firebase|__)|token/i;
+const NW_MULTIPART_MAX_BYTES = 4.5 * 1024 * 1024; // above this, Drive gets a resumable upload
+
+async function nwHash(str) {
+  try {
+    if (window.crypto?.subtle && window.TextEncoder) {
+      const buf = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+      return 'sha256:' + [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+  } catch (_) {}
+  // No SubtleCrypto (non-secure context): 53-bit cyrb53.
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 'cyrb53:' + (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
+}
+
+// Returns { backup: { format:2, timestamp, source, count, docs:[{id, fields}] }, fingerprint }.
+// docs are sorted by id, each doc once. fingerprint = hash of the docs JSON (no timestamp).
+async function nwGatherBackup() {
+  let raw = null;
+  try { raw = await window.storage?.exportRawDocs?.(); } catch (_) { raw = null; }
+  let source = 'firestore';
+  const byId = new Map();
+  if (Array.isArray(raw)) {
+    raw.forEach(d => { if (d && typeof d.id === 'string' && !byId.has(d.id)) byId.set(d.id, { id: d.id, fields: d.fields || {} }); });
+  } else {
+    source = 'this-device';
+    const keys = [];
+    try { for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i)); } catch (_) {}
+    keys.filter(k => typeof k === 'string' && !NW_BACKUP_SKIP.test(k)).sort().forEach(k => {
+      const id = sanitiseKey(k);
+      if (!byId.has(id)) byId.set(id, { id, fields: { key: k, value: localStorage.getItem(k) } });
+    });
+  }
+  const docs = [...byId.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const fingerprint = await nwHash(JSON.stringify(docs));
+  return { backup: { format: 2, timestamp: new Date().toISOString(), source, count: docs.length, docs }, fingerprint };
+}
+
+// "523 items · 1.24 MB", plus a note when only this device's copy was used.
+const nwBackupSummary = (backup, content) => {
+  const mb = (new Blob([content]).size / (1024 * 1024)).toFixed(2);
+  return `${backup.count} item${backup.count === 1 ? '' : 's'} · ${mb} MB` +
+    (backup.source === 'this-device' ? " · The database couldn't be read, so only this device's copy was used." : '');
+};
+
+// Restores a backup file. Format 2: each doc by its ID (window.storage.setDoc). Older files with a
+// {key: value} data map: window.storage.set per key, as before. Asks first.
+// Returns { cancelled } | { error } | { restored, failed: [ids], count }.
+async function nwRestoreBackup(d) {
+  const isV2 = !!d && d.format === 2 && Array.isArray(d.docs);
+  const isOld = !isV2 && !!d && d.data && typeof d.data === 'object' && !Array.isArray(d.data);
+  if (!isV2 && !isOld) return { error: 'Invalid backup file.' };
+  const count = isV2 ? d.docs.length : Object.keys(d.data).length;
+  const t = d.timestamp ? new Date(d.timestamp) : null;
+  const when = t && !isNaN(t) ? t.toLocaleString() : 'an unknown date';
+  if (!window.confirm(`Restore ${count} item${count === 1 ? '' : 's'} from the backup made ${when}? Each one replaces the current copy of that item.`)) return { cancelled: true };
+  const failed = [];
+  let restored = 0;
+  if (isV2) {
+    for (const doc of d.docs) {
+      const id = doc && typeof doc.id === 'string' ? doc.id : null;
+      let ok = false;
+      try { ok = !!id && !!doc.fields && typeof doc.fields === 'object' && (await window.storage.setDoc(id, doc.fields)) === true; } catch (_) { ok = false; }
+      if (ok) restored++; else failed.push(id || '(a doc with no id)');
+    }
+  } else {
+    for (const [k, v] of Object.entries(d.data)) {
+      let ok = false;
+      try { ok = !!(await window.storage.set(k, v)); } catch (_) { ok = false; }
+      if (ok) restored++; else failed.push(k);
+    }
+  }
+  return { restored, failed, count };
+}
+window.nwGatherBackup = nwGatherBackup;
+window.nwRestoreBackup = nwRestoreBackup;
+
 function App() {
   const [activeTab, setActiveTab] = useState('roulette');
   const [backupStatus, setBackupStatus] = useState('');
@@ -9648,12 +9945,8 @@ function App() {
     { id: 'system',   label: 'System',  Icon: Database    },
   ];
 
-  const STORAGE_KEYS = [
-    'kaizen3:projects','kaizen3:tasks','kaizen3:logs','kaizen4:logs','kaizen3:ping',
-    'nikhil-food-log-v1',
-    'creative-log-v2','creative-log','creative-streak','gatekeeper-name','creative-catch',
-    'apple-health-import','med-log-daily',
-  ];
+  // Fingerprint of the last backup uploaded to Drive this session; silent sync skips an unchanged one.
+  const lastUploadFp = useRef(null);
 
   // ── GOOGLE DRIVE OAUTH CLIENT ID ──────────────────────────────
   // Replace this with your OAuth 2.0 Web Client ID from GCP Console
@@ -9689,17 +9982,15 @@ function App() {
 
   const exportSystem = async () => {
     setBackupStatus('Gathering data...');
-    const backup = { timestamp: new Date().toISOString(), data: {} };
-    for (const key of STORAGE_KEYS) {
-      try { const r = await window.storage.get(key); if (r?.value) backup.data[key] = r.value; } catch(e) {}
-    }
-    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+    const { backup } = await nwGatherBackup();
+    const content = JSON.stringify(backup, null, 2);
+    const blob = new Blob([content], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'nikhil-system-backup-' + new Date().toISOString().slice(0,10) + '.json';
+    a.download = 'nikhil-system-backup-' + new Date().toISOString().slice(0,10) + (backup.source === 'this-device' ? '-this-device' : '') + '.json';
     a.click();
-    setBackupStatus('Backup downloaded ✅');
-    setTimeout(() => setBackupStatus(''), 4000);
+    setBackupStatus(`Backup downloaded ✅ · ${nwBackupSummary(backup, content)}`);
+    setTimeout(() => setBackupStatus(''), 8000);
     return backup;
   };
 
@@ -9720,13 +10011,13 @@ function App() {
       try {
         setStatus('Gathering data...');
 
-        // Build backup JSON
-        const backup = { timestamp: new Date().toISOString(), data: {} };
-        for (const key of STORAGE_KEYS) {
-          try { const r = await window.storage.get(key); if (r?.value) backup.data[key] = r.value; } catch(e) {}
-        }
+        // Build backup JSON (the whole database)
+        const { backup, fingerprint } = await nwGatherBackup();
+        if (silent && fingerprint === lastUploadFp.current) return true; // nothing changed since the last upload
         const content = JSON.stringify(backup, null, 2);
-        const filename = "nikhil-world-backup-" + new Date().toISOString().slice(0,10) + ".json";
+        const summary = nwBackupSummary(backup, content);
+        // A device-only copy gets its own name so it never replaces today's full backup.
+        const filename = "nikhil-world-backup-" + new Date().toISOString().slice(0,10) + (backup.source === 'this-device' ? '-this-device' : '') + ".json";
 
         setStatus('Finding/creating folder in Drive...');
 
@@ -9786,33 +10077,60 @@ function App() {
           }
         } catch(e) { /* best-effort */ }
 
-        // Upload file — manually construct multipart body to avoid Safari's
-        // broken FormData+Blob+fetch behavior (silently mangles the boundary).
         const meta = { name: filename, parents: [folderId] };
-        const boundary = 'nw_backup_boundary_' + Date.now();
-        const multipartBody =
-          '--' + boundary + '\r\n' +
-          'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
-          JSON.stringify(meta) + '\r\n' +
-          '--' + boundary + '\r\n' +
-          'Content-Type: application/json\r\n\r\n' +
-          content + '\r\n' +
-          '--' + boundary + '--';
+        let upload;
+        if (new Blob([content]).size <= NW_MULTIPART_MAX_BYTES) {
+          // Upload file — manually construct multipart body to avoid Safari's
+          // broken FormData+Blob+fetch behavior (silently mangles the boundary).
+          const boundary = 'nw_backup_boundary_' + Date.now();
+          const multipartBody =
+            '--' + boundary + '\r\n' +
+            'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+            JSON.stringify(meta) + '\r\n' +
+            '--' + boundary + '\r\n' +
+            'Content-Type: application/json\r\n\r\n' +
+            content + '\r\n' +
+            '--' + boundary + '--';
 
-        const upload = await fetch(
-          'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
-          {
+          upload = await fetch(
+            'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': `multipart/related; boundary="${boundary}"`
+              },
+              body: multipartBody
+            }
+          ).then(r => r.json());
+        } else {
+          // Large backup: resumable upload. Start a session with the metadata, then PUT the content
+          // to the session URL from the Location header.
+          const init = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
             method: 'POST',
             headers: {
               Authorization: `Bearer ${token}`,
-              'Content-Type': `multipart/related; boundary="${boundary}"`
+              'Content-Type': 'application/json; charset=UTF-8',
+              'X-Upload-Content-Type': 'application/json'
             },
-            body: multipartBody
+            body: JSON.stringify(meta)
+          });
+          if (init.status === 401) { clearCachedToken(); throw new Error('TOKEN_EXPIRED'); }
+          const sessionUrl = init.headers.get('Location');
+          if (!init.ok || !sessionUrl) {
+            upload = { error: { message: `Drive didn't start the large upload (HTTP ${init.status}${sessionUrl ? '' : ', no upload URL'}).` } };
+          } else {
+            upload = await fetch(sessionUrl, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: content
+            }).then(r => r.json());
           }
-        ).then(r => r.json());
+        }
 
         if (upload.id) {
-          setStatus(`✅ Synced to Drive → "${DRIVE_FOLDER_NAME}/${filename}"`);
+          lastUploadFp.current = fingerprint;
+          setStatus(`✅ Synced to Drive → "${DRIVE_FOLDER_NAME}/${filename}" · ${summary}`);
         } else {
           const errDetail = upload.error?.message || upload.error?.status || JSON.stringify(upload);
           setStatus('❌ Upload failed: ' + errDetail);
@@ -9877,13 +10195,15 @@ function App() {
     setBackupStatus('Restoring data...');
     const r = new FileReader();
     r.onload = async (ev) => {
+      let d;
+      try { d = JSON.parse(ev.target.result); } catch { setBackupStatus('Error reading file.'); return; }
       try {
-        const d = JSON.parse(ev.target.result);
-        if (d.data) {
-          for (const [k, v] of Object.entries(d.data)) await window.storage.set(k, v);
-          setBackupStatus('Restored! Refresh to reload data.');
-        } else { setBackupStatus('Error: Invalid backup file.'); }
-      } catch { setBackupStatus('Error reading file.'); }
+        const res = await nwRestoreBackup(d);
+        if (res.cancelled) setBackupStatus('Restore cancelled. Nothing was changed.');
+        else if (res.error) setBackupStatus('Error: ' + res.error);
+        else if (res.failed.length) setBackupStatus(`❌ Restored ${res.restored} of ${res.count}. These failed: ${res.failed.join(', ')}`);
+        else setBackupStatus(`Restored ${res.restored} item${res.restored === 1 ? '' : 's'}! Refresh to reload data.`);
+      } catch (err) { setBackupStatus('❌ Restore failed: ' + (err?.message || err)); }
     };
     r.readAsText(file);
     e.target.value = '';
@@ -9910,7 +10230,7 @@ function App() {
       <div style={{ ...paneStyle('system'), display: activeTab === 'system' ? 'flex' : 'none', flexDirection: 'column', padding: 24, color: '#eee', fontFamily: "'Space Mono', monospace" }}>
         <h2 style={{ fontSize: 22, color: '#FF6B6B', marginBottom: 16 }}>System Maintenance</h2>
         <p style={{ fontSize: 13, color: '#888', marginBottom: 24, lineHeight: 1.6 }}>
-          Pulls all raw data directly from browser storage. Run weekly and drop the file into Google Drive as "Elite Maintenance."
+          Backs up everything in the database, including the Practice tab and anything added later. Run weekly and drop the file into Google Drive as "Elite Maintenance."
         </p>
         <div style={{ background: '#1a1a1a', padding: 20, borderRadius: 12, border: '1px solid #333', marginBottom: 16 }}>
           <button onClick={exportSystem} style={{

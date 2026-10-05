@@ -43,6 +43,10 @@ const practices = [
   P('learn', 'compassion', 'Learn self-compassion', 'learning', 'any', 'Course practice', ['Read one page', 'Do the exercise']),
 ];
 
+// Not in the base playbook; scenarios add it when they need it (as not-working, to check that its
+// single steps can still be offered as waking alternates).
+const sevenMinute = P('seven-minute-waking', 'wake', 'Seven-minute waking', 'not-working', 'pre4', 'In bed after the alarm', ['Lie still for a minute', 'Do the whole seven-minute routine']);
+
 const playbook = {
   version: 7,
   rules: ['Nothing is deleted'],
@@ -93,4 +97,4 @@ const base = () => ({
   'practice:stuck-map': JSON.stringify(stuckMap),
 });
 
-module.exports = { playbook, homework, shobhaQueue, outsideMap, progress, stuckMap, todayDoc, base };
+module.exports = { sevenMinute, playbook, homework, shobhaQueue, outsideMap, progress, stuckMap, todayDoc, base };
