@@ -93,7 +93,9 @@ as Nikhil's own Google account.
 ## Tests
 
 5. **New screens get harness tests** (`scripts/p1-test.js` for screens, `scripts/storage-test.js` for
-   the storage layer, `scripts/backup-test.js` for backups and Drive, `scripts/sw-test.js` for offline).
+   the storage layer, `scripts/backup-test.js` for backups and Drive, `scripts/sw-test.js` for offline,
+   `scripts/notes-test.js` for drafts, notes, the Saved bar, the cost tracker and room on this device).
+   In `p1-test.js`, the Practice tab may read and write `practice:` and `notes:` keys and nothing else.
    Use the in-memory mock or the fake Firestore in `scripts/p1-check.js` (`openPage({ fakeFirestore })`
    runs the real `window.storage`). Never touch the live Firestore, its rules, the Cloud Functions or
    Google Drive from a test; mock every Google request.
@@ -105,3 +107,21 @@ as Nikhil's own Google account.
 ## Screens
 
 - Sized for a 390-px phone screen; plain, literal words; fewest taps.
+- **Every text input uses the drafts hook** (`window.useDraft(tab, id, initial)`, or `window.useDraftForm`
+  for a form; a flow in progress is one draft object). It saves about 1 s after typing stops into one small
+  doc per tab (`practice:drafts` for Practice, `drafts:<tab>` elsewhere), restores when the screen opens, and
+  `clear()` goes on submit. Search boxes and pickers that only filter what's shown are not drafts. Drafts and
+  notes docs merge across devices in the storage layer (never a conflict copy); see `docs/DATA-FORMAT.md`.
+- **Every log action uses the shared Saved / Add note / Undo bar** (`window.nwLog({ tab, what, scope, sig,
+  run })`, or `window.nwShowBar(...)` for a save that already happened). `run()` returns `{ where, undo,
+  addNote?, ref }`; the bar says "Saved" only for `'cloud'`. "Add note" goes on the entry when its shape has
+  a note field (`myNote` on Practice entries), otherwise to `notes:<YYYY_MM_DD>` with a `ref`. "Undo" removes
+  exactly that entry (for keys in `SEALED_LOG_KEYS`, whole items go through `window.storage.deleteItem`).
+  Disable the button while its save runs (`window.useBusy()`); a repeat of the same entry within 60 s shows
+  "Already logged · Log again".
+- **Every step screen gets "+ Note"** (`window.NwStepNote`, closed by default); step notes are saved on the
+  entry as `stepNotes: [{ step, text, note }]`.
+- A day's entries are shown, and sent to Claude, in time order (no time last) without reordering what's
+  stored (`window.nwByTime`).
+- The Note button (left of the status line, every tab) saves to `notes:<YYYY_MM_DD>`; a tab says where it is
+  with `window.nwSetContext(tab, { screen, practice, step })`.

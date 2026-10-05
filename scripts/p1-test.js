@@ -28,9 +28,11 @@ const visibleText = async (page) => pr(page).innerText();
 async function finish(ctx, label, { allowProxyFailure = false } = {}) {
   if (allowProxyFailure) ctx.errors = ctx.errors.filter(e => !/Failed to load resource.*cloudfunctions\.net\/anthropic/.test(e));
   const sets = await setsSince(ctx.page, ctx.mark);
-  ok(sets.every(k => k.startsWith('practice:')), `${label}: every write after opening Practice is a practice: key (${[...new Set(sets)].join(', ') || 'none'})`);
+  // The Practice tab touches practice: keys, and notes: (its Note button and the Saved bar's Add note), nothing else.
+  const mine = (k) => k.startsWith('practice:') || k.startsWith('notes:');
+  ok(sets.every(mine), `${label}: every write after opening Practice is a practice: or notes: key (${[...new Set(sets)].join(', ') || 'none'})`);
   const reads = await ctx.page.evaluate(i => window.__storageLog.slice(i).map(x => x[1]), ctx.mark);
-  ok(reads.every(k => k.startsWith('practice:')), `${label}: every read/write after opening Practice is a practice: key`);
+  ok(reads.every(mine), `${label}: every read/write after opening Practice is a practice: or notes: key`);
   ok(ctx.errors.length === 0, `${label}: no console errors${ctx.errors.length ? ' → ' + ctx.errors.join(' | ') : ''}`);
   await ctx.browser.close();
 }
@@ -296,7 +298,12 @@ async function step3() {
     t = await visibleText(page);
     ok(t.includes("First thing on today's plan: Self-compassion break"), "standing → first item of today's plan");
     await clickName(page, '✕ Close');
-    await clickName(page, 'Waking up'); await clickName(page, 'Eyes closed'); await clickName(page, 'Next');
+    // Waking up in progress is a draft: reopening it comes back to the same step.
+    await clickName(page, 'Waking up');
+    t = await visibleText(page);
+    ok(t.includes("First thing on today's plan: Self-compassion break"), 'closing and reopening Waking up restores the step it was on (draft)');
+    await clickName(page, 'Not yet, start over');
+    await clickName(page, 'Eyes closed'); await clickName(page, 'Next');
     const alts = [];
     for (let i = 0; i < 14; i++) {
       if (!(await page.getByRole('button', { name: "Didn't work, try another", exact: true }).count())) break;
@@ -790,7 +797,7 @@ async function step5() {
     const { page } = ctx;
     let t = await visibleText(page);
     ok(await page.getByRole('button', { name: 'Waking up', exact: true }).isVisible(), 'D2: 07:00, nothing logged → Waking up button');
-    ok(/LOGGED TODAY \(2\)\nSelf-compassion break\n00:40 Bedtime plan/i.test(t) && noNullish(t), 'D6: an entry with no time is listed without "null"/"undefined"');
+    ok(/LOGGED TODAY \(2\)[^\n]*\n00:40 Bedtime plan\nSelf-compassion break/i.test(t) && noNullish(t), 'D6 + 3b: entries in time order, the entry with no time last, without "null"/"undefined"');
     await clickName(page, 'Waking up'); await clickName(page, 'Eyes closed'); await clickName(page, 'Next');
     await clickName(page, 'Coach me'); await page.waitForTimeout(500);
     const call = ctx.proxyCalls[ctx.proxyCalls.length - 1];
@@ -808,7 +815,7 @@ async function step5() {
     await page.getByLabel('Ask Claude', { exact: true }).fill('test');
     await clickName(page, 'Pick practices for me'); await page.waitForTimeout(400);
     const c2 = ctx.proxyCalls[ctx.proxyCalls.length - 1].messages[0].content;
-    ok(noNullish(c2) && /logged today: sc-break, bedtime-plan, countdown\.$/.test(c2), 'D6: context line sent to Claude has no "null"/"undefined" with an entry missing its time → ' + JSON.stringify(c2.split('\n')[1]));
+    ok(noNullish(c2) && /logged today: bedtime-plan, countdown, sc-break\.$/.test(c2), 'D6 + 3b: context line in time order (no time last), sent to Claude has no "null"/"undefined" with an entry missing its time → ' + JSON.stringify(c2.split('\n')[1]));
     await finish(ctx, 'coach-lights-out');
   }
 
@@ -883,6 +890,8 @@ async function step5() {
     ok((await visibleText(page)).includes('Stay sitting, 5 slow breaths, then stand up slowly with a hand on something.'), 'D4: propped up + dizzy keeps the current text');
     await clickName(page, "Didn't work, try another"); // replaces the dizzy step; then start over for the full walk
     await clickName(page, '✕ Close'); await clickName(page, 'Waking up, one step at a time');
+    ok((await visibleText(page)).includes('Step 1 of'), 'reopening Waking up comes back to where it was (draft); "Start over" starts fresh');
+    await clickName(page, 'Start over');
     await clickName(page, 'Eyes open, lying down'); await clickName(page, 'Next');
     const alts = [];
     for (let i = 0; i < 12; i++) {
