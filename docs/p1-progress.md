@@ -10,6 +10,18 @@ All 4 steps are committed, plus one follow-up Nikhil asked for after reviewing: 
 
 **Build pass (after the Oct 4 review)** is committed on `claude/optimistic-darwin-qyqw7c` as a draft PR: every Claude answer is saved, prompt caching on the system block, backups cover the whole database, and the Practice fix pass. Nothing is merged.
 
+**Offline + opt-in sealing + automatic Drive backup** is on `claude/happy-keller-7go727` as a draft PR (see "Offline, sealing, Drive backup" below). Nothing is merged.
+
+## Offline, sealing, Drive backup (Oct 5)
+
+Branch: `claude/happy-keller-7go727`, draft PR. Precondition: main contains PR #14 (CLAUDE.md and docs/DATA-FORMAT.md exist; `grep -c "getAll" index.html` → 15). ✅
+
+| Part | What changed | How checked |
+|------|--------------|-------------|
+| 1. Opens without internet | `sw.js` (relative registration; page network first with a 3 s limit when a copy is stored; scripts, styles and fonts from other sites stored on first load, fonts found through their stylesheets; never Firestore, other Google APIs, accounts.google.com, cloudfunctions.net, firebaseio.com). Offline reads use this device's copy at once; device copies refreshed on every cloud read; older sealed history offline → one line "Older history loads when you're online". Running version on the System tab = hash of the page's scripts. `manifest.webmanifest`, `icons/`, Apple tags. CLAUDE.md: two addresses, kill switch, offline rule, pinned versions, no secrets. | `sw-test.js` at `/` and `/nikhils-world/` over localhost: open online → offline reload from the worker (0 server requests, no network wait), this device's data shown, save device-only, back online uploads; new index.html and sw.js reach the device on the next online open; nothing from Google APIs/accounts/cloudfunctions stored; manifest, icons, Apple tags; the kill switch from CLAUDE.md; `sw.js` rules checked directly. `storage-test.js 12`: offline reads in 0 ms, the history line, no overwrite of a newer cloud copy. |
+| 2. Sealing is opt-in | `SEALED_LOG_KEYS = ['kaizen4:logs']`; every other key is split when big; `get` returns the whole value; keys outside the list with old parts are folded back (whole value first, parts list dropped only after that write is confirmed; part docs untouched). Deletes: `deleteItem` / `restoreItem` / `deletedItems`, deleted markers in the active doc's `deleted` field (by date, by id, or by part + position + hash for items with no id). Kaizen Reflect: "Delete this day" (second tap) and "Deleted days" with Restore. No size banner for docs never written again; a banner at 1.5 MB for keys outside the list; System tab meter for this device's saved data (5 MB estimate, banner at 70%). | `storage-test.js` 3 (opt-in; sealing mechanics with a test-only list), 4, 6, 8 (1 MB `kaizen3:tasks` and `creative-catch`: whole, split, edited and deleted in the app), 9 (deletes in a sealed part and an old archive, in Reflect; parts unchanged; restore), 10 (fold-back), 11 (banners, meter) |
+| 3. Drive backup | Format 3 (`{ key, value, updatedAt }` per key = getAll; pretty-printed; restore of formats 2 and 3). Drive: upload → confirm (md5/size) → trash older copies with exactly the same name; oldest folder used; no folder or other file ever deleted. File names in the device's zone (`nikhil-world-backup-2026-10-04-AKDT.json`), `device-timezone` doc. `tools/drive-backup.gs` + `tools/appsscript.json` (runBackup, setupTrigger, 15 minutes), `docs/DRIVE-AUTO-BACKUP.md`. | `backup-test.js` 1 (fake Drive: failed and partial uploads touch nothing; a confirmed one trashes only the same name; folders, other names and UTC-named backups untouched; a zone change keeps both files), 2 (Anchorage AKDT/AKST, Kolkata IST, Kathmandu UTC+5:45, device-timezone), 3 (the script's merge = getAll for every key), 4 (runBackup with mocked Google services: masked list first, unchanged run writes nothing, device-timezone / America/Anchorage, md5 mismatch, Firestore 403, setupTrigger once). `p1-test.js 5` C: format 3 gather/restore, format 2 still restores, Download and Sync use format 3. |
+
 ## Build pass (Oct 4 review)
 
 | Part | What changed | How checked (`p1-test.js 5`) |
@@ -95,6 +107,8 @@ Console errors from the deliberately blocked requests are not counted; any other
 
 - Storage pass: `node scripts/harness.js` → api.anthropic.com in index.html: 0 · storage-layer check: ok · page load: no console errors · `p1-test.js all`: 323 passed, 0 failed (same as before the change) · `storage-test.js all`: 98 passed, 0 failed. Screenshots at 390×844 reviewed (Practice with the device-only banner and status line; System with the size table and an 87% banner). The live Firestore was not touched: every check ran against the in-memory mock or the fake Firestore.
 
+- Offline, sealing, Drive backup (Oct 5): `node scripts/harness.js` → see the PR for the final run (api.anthropic.com in index.html: 0 · storage-layer check: ok · page load: no console errors · `p1-test.js all` · `storage-test.js all` · `backup-test.js all` · `sw-test.js`). Screenshots at 390×844 reviewed (Reflect with "Tap again to delete this day" and "Deleted days (1)"; System with "This app", the device meter and the offline history line). The live Firestore, its rules, the Cloud Functions and Google Drive were not touched.
+
 ## Not checked
 
 - The real AI proxy was never called; every request went to a local fake. The request bodies were checked field by field, but the live proxy's replies (for example, whether it allows `web_search`) were not.
@@ -104,6 +118,16 @@ Console errors from the deliberately blocked requests are not counted; any other
 
 - Storage pass: the 15-second limit, offline detection and conflicts were checked against the fake Firestore, not the real SDK (whose offline behaviour may differ: it can hold a write and send it later, which is handled but only simulated). Two devices editing the same key at the same moment while one of them seals is last-writer-wins for the active doc, as before; nothing in a sealed part is lost, but a plain array without `id` fields could show an item twice in `getAll`. Kaizen's task list still loads with `get` (item 5): if `kaizen3:tasks` ever passed 800,000 bytes, its oldest tasks would move to a sealed part that the Tasks view doesn't show (they stay in `getAll`, the size table and backups; the 85% banner warns first).
 
+- Offline pass: not tried on a real phone or at the live addresses (both simulated over localhost). The Apps Script ran only in a Node sandbox with mocked Google services; the one-time setup in `docs/DRIVE-AUTO-BACKUP.md` is still to do on a laptop. A connection that is "online" but never answers still waits up to 15 seconds per read; offline reads are instant.
+
+## Keys the offline pass reads or writes
+
+- `kaizen4:logs`: its active doc gets a `deleted` field when a day in a part or old archive is deleted (Reflect); `kaizen3_logs`, `*_logs_archive_*`, `kaizen4_logs__part_*` read only.
+- `device-timezone`: new, written when the device's zone changes.
+- Backups read every key through `getAll`; a restore writes each key through `set`/`setExact`.
+- A key outside `SEALED_LOG_KEYS` that still has parts is rewritten whole on its next save (none expected).
+- This device: each key's copy (refreshed on reads), `__nw_cloud_seen`, `__nw_deleted`.
+
 ## Next step
 
-Nikhil reviews the draft PR for the storage pass. Nothing is merged.
+Nikhil reviews the draft PR for the offline pass, then does the Apps Script setup in `docs/DRIVE-AUTO-BACKUP.md`. Nothing is merged.

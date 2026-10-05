@@ -2,7 +2,10 @@
 // 1. storage-layer-check.js — no Firestore / localStorage writes outside the storage layer and token cache
 // 2. p1-check.js            — the page loads with no console errors
 // 3. p1-test.js all         — every screen's scenarios (Practice tab, backups)
-// 4. storage-test.js all    — honest saves, upload queue, seal and continue, split values, sizes, restore
+// 4. storage-test.js all    — honest saves, upload queue, opt-in sealing, deletes, fold-back, split values,
+//                             sizes and banners, the device meter, offline reads
+// 5. backup-test.js all     — backup format 3, safe Drive sync, local-time file names, the Apps Script
+// 6. sw-test.js             — opens offline at / and /nikhils-world/ (service worker, manifest, new deploys)
 // Plus: index.html must not call api.anthropic.com directly (everything goes through the AI proxy).
 // The live Firestore is never touched: every run uses an in-memory mock or fake Firestore.
 const { spawnSync } = require('child_process');
@@ -15,6 +18,8 @@ const steps = [
   ['page load', ['p1-check.js']],
   ['screen scenarios', ['p1-test.js', 'all']],
   ['storage layer', ['storage-test.js', 'all']],
+  ['backups and Drive', ['backup-test.js', 'all']],
+  ['offline (service worker)', ['sw-test.js']],
 ];
 const results = [];
 const html = fs.readFileSync(path.join(dir, '..', 'index.html'), 'utf8');
