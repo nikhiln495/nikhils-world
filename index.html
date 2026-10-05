@@ -54,6 +54,7 @@
     window.LucideReact = window.LucideReact || {};
     window.Recharts = window.Recharts || {};
 
+    // ══ NW-STORAGE-LAYER START ══════════════════════════════════════ (ends after window.storage)
     // ── Firebase init ──────────────────────────────────────────────
     const firebaseConfig = {
       apiKey: "AIzaSyA0dH-rzuO36KKokNa_azNh7mMHk2eQzrM",
@@ -101,178 +102,772 @@
       }, 150);
     });
 
-    // ── Storage API — Firestore with localStorage fallback ─────────
-    // Keys with colons/slashes are sanitised for Firestore doc IDs
+    // ── window.storage ───────────────────────────────────────────────
+    // window.storage (with the Firebase init above) is the only code in index.html that writes to Firestore or calls
+    // localStorage.setItem (the Drive token cache in App is the one other exception).
+    // scripts/storage-layer-check.js fails the harness if anything else does. Rules for new
+    // features: CLAUDE.md. How docs are stored: docs/DATA-FORMAT.md.
+    //
+    // Firestore rejects any doc over 1,048,576 bytes. No doc is ever written over SAFE (900,000):
+    //  • Growing values (an array, { entries: [...] }, or an object keyed by date) are SEALED: when a
+    //    write would take the active doc over 800,000 bytes, its oldest items move into read-only part
+    //    docs <id>__part_<n> (each written and confirmed first) until it is under 400,000 bytes.
+    //  • Any other value over SAFE is SPLIT across <id>__split_<gen>_<i> docs and put back together on read.
+    // set() says where a save landed: 'cloud' | 'device-only' | false. localStorage keeps a backup copy;
+    // device-only saves wait in a queue and go up when the device is back online or the app starts.
+    // Keys with colons/slashes are sanitised for Firestore doc IDs.
     function sanitiseKey(key) {
       return key.replace(/[:/\.#$\[\]]/g, '_');
     }
 
-    window.storage = {
-      get: async (key) => {
-        // Wait briefly for Firebase to finish initializing (resolves immediately if already done)
-        try { await window.__dbReady; } catch (_) {}
-        // Try Firestore first
-        if (db) {
+    (function () {
+      const COLL = 'appdata';
+      const LIMIT = 1048576;          // Firestore's hard limit per doc
+      const SAFE = 900000;            // nothing is written above this
+      const SEAL_AT = 800000;         // growing data: seal when the active doc would pass this
+      const SEAL_TO = 400000;         // ...moving the oldest items out until it is under this
+      const PART_MAX = 600000;        // each new sealed part holds at most this much
+      const PIECE_MAX = 700000;       // each piece of a split value
+      const WARN_AT = Math.round(SAFE * 0.85);
+      const CLOUD_TIMEOUT_MS = 15000; // a cloud write not settled by then counts as device-only
+      const Q_KEY = '__nw_upload_queue';
+      const LAST_KEY = '__nw_last_cloud_save';
+      const CONFLICTS_KEY = '__nw_conflicts';
+      const DISMISSED_KEY = '__nw_dismissed_sizes';
+      const NO_DB = "the cloud database didn't load (network or content blocker)";
+      // Docs from before this layer that hold older Kaizen daily logs; read as sealed parts of kaizen4:logs.
+      // localKeys: the device copy used when the cloud can't be read (as Kaizen did before).
+      const LEGACY_PARTS = { 'kaizen4:logs': { ids: ['kaizen3_logs'], prefixes: ['kaizen3_logs_archive_', 'kaizen4_logs_archive_'], localKeys: ['kaizen3:logs'] } };
+      const isLegacyPartId = (id) => id === 'kaizen3_logs' || /^kaizen[34]_logs_archive_/.test(id);
+      const isInternalId = (id) => /__part_\d+$|__split_|__conflict_/.test(id);
+      const isReadOnlyId = (id) => isInternalId(id) || isLegacyPartId(id);
+
+      // ── Sizes, in UTF-8 bytes, by Firestore's own rules ──
+      const enc = new TextEncoder();
+      const utf8 = (s) => enc.encode(String(s)).length;
+      const valBytes = (v) => {
+        if (v === null || v === undefined || typeof v === 'boolean') return 1;
+        if (typeof v === 'number') return 8;
+        if (typeof v === 'string') return utf8(v) + 1;
+        if (v instanceof Date || typeof v.toDate === 'function') return 8;
+        if (Array.isArray(v)) return v.reduce((s, x) => s + valBytes(x), 0);
+        if (typeof v === 'object') return Object.keys(v).reduce((s, k) => s + utf8(k) + 1 + valBytes(v[k]), 0);
+        return 8;
+      };
+      // Doc name (collection id + doc id, +1 each, +16) + every field name and value + 32.
+      const docBytes = (id, fields) => utf8(COLL) + 1 + utf8(id) + 1 + 16 + valBytes(fields || {}) + 32;
+      // Cuts a string into pieces of at most `max` UTF-8 bytes, never inside a surrogate pair.
+      const splitUtf8 = (s, max) => {
+        const out = [];
+        let start = 0, bytes = 0;
+        for (let i = 0; i < s.length; i++) {
+          const c = s.charCodeAt(i);
+          let b = 3, w = 1;
+          if (c < 0x80) b = 1;
+          else if (c < 0x800) b = 2;
+          else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) {
+            const d = s.charCodeAt(i + 1);
+            if (d >= 0xDC00 && d <= 0xDFFF) { b = 4; w = 2; }
+          }
+          if (bytes + b > max && i > start) { out.push(s.slice(start, i)); start = i; bytes = 0; }
+          bytes += b;
+          i += w - 1;
+        }
+        out.push(s.slice(start));
+        return out;
+      };
+
+      // ── State ──
+      const load = (k, dflt) => { try { const v = JSON.parse(localStorage.getItem(k) || 'null'); return v == null ? dflt : v; } catch (_) { return dflt; } };
+      const keep = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} };
+      let queue = load(Q_KEY, []).filter(e => e && typeof e.key === 'string' && typeof e.id === 'string');
+      let lastCloud = Number(load(LAST_KEY, 0)) || null;
+      let conflicts = load(CONFLICTS_KEY, []).filter(c => c && typeof c.id === 'string');
+      const dismissedSizes = load(DISMISSED_KEY, {});
+      const failed = new Map();     // id → { what, reason }: saved neither in the cloud nor on this device
+      const sizeWarn = new Map();   // id → { what, bytes, note }
+      const readIssues = new Map(); // id → { what, reason }
+      const held = new Map();       // id → firstAt: the cloud had a newer copy; saves stay on this device until reload
+      const metaCache = new Map();  // id → { parts, order, shape, split } as last read or written
+      const partCache = new Map();  // part id → { parsed, shape } (sealed parts never change)
+      const idxCache = new Map();   // id → { sig, idx }: what is already sealed, to strip from new writes
+      const legacyIds = new Map();  // key → legacy part ids found this session
+      const chains = new Map();     // id → promise: writes to one doc run one at a time
+      const listeners = new Set();
+      let flushing = null, flushAgain = false;
+
+      const ready = async () => { try { await window.__dbReady; } catch (_) {} };
+      const isOffline = () => typeof navigator !== 'undefined' && navigator.onLine === false;
+      const nwErr = (reason) => Object.assign(new Error(reason), { nwReason: reason });
+      const inQueue = (id) => queue.some(e => e.id === id);
+      const localGet = (key) => { try { return localStorage.getItem(key); } catch (_) { return null; } };
+      const saveQueue = () => keep(Q_KEY, queue);
+      const serial = (id, fn) => {
+        const run = (chains.get(id) || Promise.resolve()).then(fn, fn);
+        chains.set(id, run.catch(() => {}));
+        return run;
+      };
+      const msOf = (t) => {
+        if (t == null) return null;
+        if (typeof t === 'number') return t;
+        if (t instanceof Date) return t.getTime();
+        if (typeof t.toMillis === 'function') return t.toMillis();
+        if (typeof t.toDate === 'function') return t.toDate().getTime();
+        if (typeof t.seconds === 'number') return t.seconds * 1000;
+        const n = Date.parse(t);
+        return isNaN(n) ? null : n;
+      };
+      const reasonOf = (e) => {
+        if (e && e.nwReason) return e.nwReason;
+        if (e && e.nwTimeout) return "the cloud didn't answer within 15 seconds";
+        const code = e && e.code ? String(e.code) + ': ' : '';
+        return 'the cloud rejected it (' + code + String((e && e.message) || e || 'unknown error').slice(0, 160) + ')';
+      };
+
+      // ── What a key is, in words (for banners) ──
+      const WHAT = [
+        [/^kaizen4:logs$/, 'Kaizen daily log'], [/^kaizen3:tasks$/, 'Kaizen tasks'], [/^kaizen3:projects$/, 'Kaizen projects'],
+        [/^kaizen3:ping$/, 'Kaizen connection check'], [/^kaizen3:seeded$/, 'Kaizen first-run flag'],
+        [/^nikhil-food-log-v1$/, 'Food log'], [/^med-log-daily$/, 'Medication log'], [/^apple-health-import$/, 'Health import'],
+        [/^transition-log$/, 'Transition log'], [/^session-summaries$/, 'Session notes'], [/^trajectory-foci$/, 'Session foci'],
+        [/^creative-log(-v2)?$/, 'Creative log'], [/^creative-catch$/, 'Creative catch list'], [/^creative-streak$/, 'Creative streak'],
+        [/^gatekeeper-name$/, 'Gatekeeper name'], [/^trajectory-bigpicture$/, 'Big picture note'], [/^body-needs$/, 'Body needs'],
+        [/^practice:log:(\d{4})_(\d\d)_(\d\d)$/, m => `Practice log for ${m[1]}-${m[2]}-${m[3]}`],
+        [/^practice:asks:(\d{4})_(\d\d)_(\d\d)$/, m => `Claude answers for ${m[1]}-${m[2]}-${m[3]}`],
+        [/^practice:playbook$/, 'Practice playbook'], [/^practice:homework$/, 'Practice homework'],
+        [/^practice:shobha-queue$/, 'Dr. Shobha queue'], [/^practice:outside-map$/, 'Gaps list'],
+      ];
+      const whatOf = (key) => {
+        for (const [re, l] of WHAT) { const m = re.exec(key); if (m) return typeof l === 'function' ? l(m) : l; }
+        return `"${key}"`;
+      };
+      const kindOf = (id, f) => {
+        f = f || {};
+        if (f.splitOf || /__split_/.test(id)) return 'piece of a split value';
+        if (f.conflictOf || /__conflict_/.test(id)) return 'conflict copy';
+        if (isLegacyPartId(id)) return 'sealed part (old Kaizen archive)';
+        if (f.sealed || /__part_\d+$/.test(id)) return 'sealed part';
+        if (f.split) return 'split value (points to its pieces)';
+        if (Array.isArray(f.parts) && f.parts.length) return 'active doc (has sealed parts)';
+        return 'doc';
+      };
+
+      // ── Banners and the status line ──
+      const banners = () => {
+        const out = [];
+        if (queue.length) {
+          const e = queue.reduce((a, b) => (b.at >= a.at ? b : a));
+          out.push({ id: 'device-only', kind: 'device-only', text: `${e.what} saved on this device only, not in the cloud. Reason: ${e.reason}.` });
+        }
+        failed.forEach((f, id) => out.push({ id: 'failed:' + id, kind: 'failed', dismissable: true, text: `${f.what} was not saved, not in the cloud and not on this device. Reason: ${f.reason}.` }));
+        conflicts.forEach(c => out.push({ id: 'conflict:' + c.id, kind: 'conflict', dismissable: true, text: `${c.what}: the cloud had a newer copy, so it was kept. This device's version was saved separately as ${c.id}. Reload the app to see the cloud copy.` }));
+        sizeWarn.forEach((w, id) => {
+          if (dismissedSizes[id] === w.bytes) return;
+          out.push({ id: 'size:' + id, kind: 'size', dismissable: true, text: `${w.what} (doc ${id}) is at ${Math.round(w.bytes / SAFE * 100)}% of the safe size: ${w.bytes.toLocaleString('en-US')} of ${SAFE.toLocaleString('en-US')} bytes. ${w.note}` });
+        });
+        readIssues.forEach((r, id) => out.push({ id: 'read:' + id, kind: 'read', dismissable: true, text: `Older parts of ${r.what} couldn't be read, so some of its history may be missing from the screen. Nothing was deleted. Reason: ${r.reason}.` }));
+        return out;
+      };
+      const snapshot = () => ({
+        waiting: queue.length,
+        failedCount: failed.size,
+        queue: queue.map(e => ({ key: e.key, what: e.what, reason: e.reason, at: e.at })),
+        lastCloudSave: lastCloud,
+        banners: banners(),
+      });
+      const emit = () => { const s = snapshot(); listeners.forEach(fn => { try { fn(s); } catch (_) {} }); };
+      const fail = (id, what, reason) => { failed.set(id, { what, reason }); emit(); };
+      const issue = (id, key, reason) => { readIssues.set(id, { what: whatOf(key), reason }); emit(); };
+      const markCloud = () => { lastCloud = Date.now(); keep(LAST_KEY, lastCloud); emit(); };
+      const measure = (id, f) => {
+        const bytes = docBytes(id, f);
+        if (bytes >= WARN_AT) {
+          const key = typeof f.key === 'string' ? f.key : id;
+          const ro = isReadOnlyId(id) || f.sealed || f.splitOf || f.conflictOf;
+          let grows = false;
+          if (!ro && typeof f.value === 'string') { try { grows = !!shapeOf(JSON.parse(f.value)); } catch (_) {} }
+          const note = ro ? 'It is read-only and is never written again.'
+            : grows ? 'Its oldest entries move to a sealed part automatically at 800,000 bytes.'
+            : 'It is split into pieces automatically above 900,000 bytes.';
+          sizeWarn.set(id, { what: whatOf(key) + (ro ? ' (stored copy)' : ''), bytes, note });
+          emit();
+        } else if (sizeWarn.has(id)) { sizeWarn.delete(id); emit(); }
+        return bytes;
+      };
+      const enqueue = (e) => {
+        queue = queue.filter(x => x.id !== e.id).concat([e]);
+        saveQueue();
+        emit();
+      };
+      const dropEntry = (e) => { queue = queue.filter(x => x !== e); saveQueue(); emit(); };
+
+      // ── Firestore, always with the 15-second limit ──
+      const ref = (id) => db.collection(COLL).doc(id);
+      const timed = (p, id) => {
+        let t;
+        p.catch(() => {});
+        const limit = new Promise((_, rej) => { t = setTimeout(() => rej(Object.assign(new Error('timeout'), { nwTimeout: true, raw: p, rawId: id })), CLOUD_TIMEOUT_MS); });
+        return Promise.race([p, limit]).finally(() => clearTimeout(t));
+      };
+      const put = (id, data) => timed(ref(id).set(data), id);
+      const del = (id) => { try { ref(id).delete().catch(() => {}); } catch (_) {} };
+      const readRaw = async (id) => {
+        if (isOffline()) throw nwErr('the device is offline');
+        const s = await timed(ref(id).get(), id);
+        return s.exists ? (s.data() || {}) : null;
+      };
+      const queryPrefix = async (prefix) => {
+        if (isOffline()) throw nwErr('the device is offline');
+        const f = firebase.firestore.FieldPath.documentId();
+        const s = await timed(db.collection(COLL).where(f, '>=', prefix).where(f, '<', prefix + '').get(), prefix);
+        return s.docs.map(d => ({ id: d.id, fields: d.data() || {} }));
+      };
+      const metaOf = (f) => ({
+        parts: f && Array.isArray(f.parts) ? f.parts : [],
+        order: (f && f.order) || null, shape: (f && f.shape) || null, split: (f && f.split) || null,
+      });
+
+      // A split value: the main doc's `split` lists its pieces in order.
+      const assemble = async (id, f) => {
+        const sp = f && f.split;
+        if (!sp) return f ? f.value : null;
+        const ids = Array.isArray(sp.pieces) ? sp.pieces : [];
+        const docs = await Promise.all(ids.map(readRaw));
+        if (!ids.length || ids.length !== sp.count) throw nwErr(`${id} lists ${ids.length} of ${sp.count} pieces`);
+        docs.forEach((d, i) => {
+          if (!d || d.splitOf !== id || d.gen !== sp.gen || d.index !== i || typeof d.value !== 'string') throw nwErr(`piece ${i + 1} of ${ids.length} of ${id} is missing`);
+        });
+        return docs.map(d => d.value).join('');
+      };
+
+      // Writes one doc. Over SAFE, its text value goes into new pieces first (each confirmed), then the
+      // doc is pointed at them, then the old pieces are deleted — a failed save never leaves a mix.
+      const writeDoc = async (id, fields, prevSplit) => {
+        let main = fields;
+        const fresh = [];
+        if (docBytes(id, fields) > SAFE) {
+          if (typeof fields.value !== 'string') throw nwErr(`${id} is over ${SAFE} bytes and has no text value to split`);
+          const chunks = splitUtf8(fields.value, PIECE_MAX);
+          const gen = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
           try {
-            const snap = await db.collection('appdata').doc(sanitiseKey(key)).get();
-            if (snap.exists) return { value: snap.data().value };
-            // Key not in Firestore yet — check localStorage for migration
-            const local = localStorage.getItem(key);
-            if (local !== null) {
-              // Migrate to Firestore silently
-              db.collection('appdata').doc(sanitiseKey(key)).set({ value: local, key, migratedAt: new Date() }).catch(()=>{});
-              return { value: local };
+            for (let i = 0; i < chunks.length; i++) {
+              const pid = `${id}__split_${gen}_${i}`;
+              const pf = { key: typeof fields.key === 'string' ? fields.key : null, splitOf: id, gen, index: i, count: chunks.length, value: chunks[i] };
+              fresh.push(pid);
+              await put(pid, pf);
+              measure(pid, pf);
             }
-            return null;
-          } catch(e) {
-            console.warn('Firestore get failed, using localStorage:', e);
-          }
+          } catch (e) { fresh.forEach(del); throw e; }
+          main = Object.assign({}, fields, { value: null, split: { gen, count: chunks.length, pieces: fresh, bytes: utf8(fields.value) } });
+          if (docBytes(id, main) > SAFE) { fresh.forEach(del); throw nwErr(`${id} is over ${SAFE} bytes even without its text value`); }
+          try { await put(id, main); }
+          catch (e) { if (!e.nwTimeout) fresh.forEach(del); throw e; } // a write that timed out may still land; keep its pieces
+        } else {
+          await put(id, main);
         }
-        // Fallback: localStorage
-        try {
-          const v = localStorage.getItem(key);
-          return v !== null ? { value: v } : null;
-        } catch(e) { return null; }
-      },
+        measure(id, main);
+        const stay = new Set(fresh.concat(main.split && Array.isArray(main.split.pieces) ? main.split.pieces : []));
+        if (prevSplit && Array.isArray(prevSplit.pieces)) prevSplit.pieces.filter(p => !stay.has(p)).forEach(del);
+        return main;
+      };
 
-      set: async (key, value) => {
-        try { await window.__dbReady; } catch (_) {}
-        // Always write to localStorage (belt). Then try Firestore (suspenders).
-        let localOk = false;
-        try { localStorage.setItem(key, value); localOk = true; } catch(_) {}
-        if (db) {
-          try {
-            await db.collection('appdata').doc(sanitiseKey(key)).set({
-              value,
-              key,
-              updatedAt: new Date()
-            });
-            return true;
-          } catch(e) {
-            console.warn('Firestore set failed, using localStorage only:', e);
-          }
+      // ── Growing data: shapes, sealing, merging ──
+      const DATE_KEY = /^\d{4}[-_]\d{2}[-_]\d{2}/;
+      const shapeOf = (v) => {
+        if (Array.isArray(v)) return 'array';
+        if (v && typeof v === 'object') {
+          if (Array.isArray(v.entries)) return 'entries';
+          const ks = Object.keys(v);
+          if (ks.length && ks.every(k => DATE_KEY.test(k))) return 'dated';
         }
-        return localOk;
-      },
-
-      // Convenience: bulk export all appdata keys from Firestore
-      exportAll: async () => {
-        try { await window.__dbReady; } catch (_) {}
-        if (!db) return null;
-        try {
-          const snap = await db.collection('appdata').get();
-          const out = {};
-          snap.forEach(doc => { out[doc.data().key || doc.id] = doc.data().value; });
-          return out;
-        } catch(e) { return null; }
-      },
-
-      // Like exportAll, but returns every doc individually keyed by its Firestore
-      // doc ID rather than its `key` field. Needed because multiple docs can
-      // legitimately share the same `key` field (e.g. dated log archives) —
-      // exportAll's {key: value} map would silently collapse those onto one entry.
-      exportAllDocs: async () => {
-        try { await window.__dbReady; } catch (_) {}
-        if (!db) return null;
-        try {
-          const snap = await db.collection('appdata').get();
-          return snap.docs.map(doc => ({ id: doc.id, key: doc.data().key || doc.id, value: doc.data().value }));
-        } catch(e) { return null; }
-      },
-
-      // Every doc whose key starts with `prefix` (e.g. "practice:log:"), and nothing else:
-      // Firestore is queried on the doc-ID range of the sanitised prefix. Keys only in
-      // localStorage (written while Firestore was unreachable) are included too; the
-      // Firestore copy wins when both exist. Returns null if Firestore is up but the query fails.
-      listPrefix: async (prefix) => {
-        try { await window.__dbReady; } catch (_) {}
-        const out = {};
-        try {
-          for (let i = 0; i < localStorage.length; i++) {
-            const k = localStorage.key(i);
-            if (k && k.startsWith(prefix)) out[k] = { id: sanitiseKey(k), key: k, value: localStorage.getItem(k) };
-          }
-        } catch (_) {}
-        if (db) {
-          try {
-            const start = sanitiseKey(prefix);
-            const idField = firebase.firestore.FieldPath.documentId();
-            const snap = await db.collection('appdata').where(idField, '>=', start).where(idField, '<', start + '').get();
-            snap.forEach(doc => {
-              const d = doc.data() || {};
-              const k = d.key || doc.id;
-              const localKey = Object.keys(out).find(lk => out[lk].id === doc.id);
-              if (localKey) delete out[localKey];
-              out[k] = { id: doc.id, key: k, value: d.value };
-            });
-          } catch (e) {
-            console.warn('Firestore prefix list failed:', e);
-            return null;
-          }
+        return null;
+      };
+      const parse = (s) => { try { return JSON.parse(s); } catch (_) { return undefined; } };
+      const itemsOf = (shape, v) => (shape === 'array' ? v : v.entries);
+      const TIME_FIELDS = ['date', 'at', 'ts', 'timestamp', 'createdAt', 'created', 'savedAt', 'when', 'time'];
+      const itemTime = (it) => {
+        if (!it || typeof it !== 'object') return null;
+        for (const f of TIME_FIELDS) {
+          const v = it[f];
+          const t = typeof v === 'number' ? v : typeof v === 'string' ? Date.parse(v) : NaN;
+          if (!isNaN(t)) return t;
         }
-        return Object.values(out);
-      },
-
-      // Every appdata doc with ALL its fields (archives included), for backups.
-      // Firestore Timestamps (and Dates) become ISO strings. null if Firestore can't be read.
-      exportRawDocs: async () => {
-        try { await window.__dbReady; } catch (_) {}
-        if (!db) return null;
-        // Only plain objects and arrays are walked; other Firestore types become something JSON-safe
-        // (a DocumentReference holds the whole Firestore instance and must not be walked).
-        const plain = (v) => {
-          if (v == null || typeof v !== 'object') return v;
-          if (v instanceof Date) return v.toISOString();
-          if (typeof v.toDate === 'function') { try { return v.toDate().toISOString(); } catch (_) { return null; } }
-          if (Array.isArray(v)) return v.map(plain);
-          const proto = Object.getPrototypeOf(v);
-          if (proto !== Object.prototype && proto !== null) {
-            if (typeof v.path === 'string') return v.path;
-            if (typeof v.latitude === 'number' && typeof v.longitude === 'number') return { latitude: v.latitude, longitude: v.longitude };
-            if (typeof v.toBase64 === 'function') { try { return v.toBase64(); } catch (_) { return null; } }
-            try { return JSON.parse(JSON.stringify(v)); } catch (_) { return String(v); }
+        return null;
+      };
+      // Arrays are oldest first unless their first and last items carry dates saying otherwise.
+      const guessOrder = (items) => {
+        if (items.length < 2) return 'oldest-first';
+        const a = itemTime(items[0]), b = itemTime(items[items.length - 1]);
+        return a != null && b != null && a > b ? 'newest-first' : 'oldest-first';
+      };
+      // Items oldest first, each with its JSON and byte size.
+      const unitsOf = (shape, v, order) => {
+        if (shape === 'dated') return Object.keys(v).sort().map(k => { const json = JSON.stringify(v[k]); return { k, item: v[k], json, bytes: utf8(JSON.stringify(k)) + 1 + utf8(json) }; });
+        const items = itemsOf(shape, v);
+        return (order === 'newest-first' ? items.slice().reverse() : items).map(item => { const json = JSON.stringify(item); return { item, json, bytes: utf8(json) }; });
+      };
+      const build = (shape, units, order, rest) => {
+        if (shape === 'dated') { const o = {}; units.forEach(u => { o[u.k] = u.item; }); return o; }
+        const items = units.map(u => u.item);
+        if (order === 'newest-first') items.reverse();
+        return shape === 'array' ? items : Object.assign({}, rest, { entries: items });
+      };
+      const partFrom = async (pid, f) => {
+        const parsed = parse(await assemble(pid, f));
+        if (parsed === undefined) throw nwErr(`sealed part ${pid} is not valid JSON`);
+        const empty = parsed && typeof parsed === 'object' && !Array.isArray(parsed) && !Object.keys(parsed).length;
+        return { parsed, shape: shapeOf(parsed) || (empty ? 'empty' : null), n: Number(f.n) || 0, order: f.order || null };
+      };
+      // Every sealed part of `id`, oldest first: old Kaizen archives (by doc ID), then the parts the
+      // active doc lists, by number. Sealed parts never change, so each is read once per session.
+      const loadParts = async (key, id, fields) => {
+        const ids = [];
+        const legacy = LEGACY_PARTS[key];
+        if (legacy) {
+          if (!legacyIds.has(key)) {
+            const found = [];
+            for (const lid of legacy.ids) { const f = await readRaw(lid); if (f) found.push({ id: lid, fields: f }); }
+            for (const pre of legacy.prefixes) found.push(...(await queryPrefix(pre)).filter(d => !d.fields.splitOf && !isInternalId(d.id)));
+            for (const d of found) { measure(d.id, d.fields); if (!partCache.has(d.id)) partCache.set(d.id, await partFrom(d.id, d.fields)); }
+            legacyIds.set(key, found.map(d => d.id).sort());
           }
+          ids.push(...legacyIds.get(key));
+        }
+        const rec = (fields && Array.isArray(fields.parts) ? fields.parts : []).filter(p => p && typeof p.id === 'string')
+          .slice().sort((a, b) => (Number(a.n) || 0) - (Number(b.n) || 0));
+        await Promise.all(rec.map(async (p) => {
+          if (partCache.has(p.id)) return;
+          const f = await readRaw(p.id);
+          if (!f) throw nwErr(`sealed part ${p.id} is missing`);
+          measure(p.id, f);
+          partCache.set(p.id, await partFrom(p.id, f));
+        }));
+        rec.forEach(p => ids.push(p.id));
+        return ids.map(pid => Object.assign({ id: pid }, partCache.get(pid)));
+      };
+      const indexFor = (id, parts) => {
+        const sig = parts.map(p => p.id).join('|');
+        const c = idxCache.get(id);
+        if (c && c.sig === sig) return c.idx;
+        const first = parts.find(p => p.shape && p.shape !== 'empty');
+        let idx = null;
+        if (first) {
+          idx = { shape: first.shape, dated: new Map(), counts: new Map() };
+          parts.forEach(p => {
+            if (p.shape !== idx.shape) return;
+            if (idx.shape === 'dated') Object.keys(p.parsed).forEach(k => idx.dated.set(k, JSON.stringify(p.parsed[k])));
+            else itemsOf(idx.shape, p.parsed).forEach(it => { const j = JSON.stringify(it); idx.counts.set(j, (idx.counts.get(j) || 0) + 1); });
+          });
+        }
+        idxCache.set(id, { sig, idx });
+        return idx;
+      };
+      // Drops items a write repeats unchanged from a sealed part (a feature may save its whole history back).
+      const strip = (shape, v, idx) => {
+        if (shape === 'dated') { const o = {}; Object.keys(v).forEach(k => { if (idx.dated.get(k) !== JSON.stringify(v[k])) o[k] = v[k]; }); return o; }
+        const counts = new Map(idx.counts);
+        const fresh = (it) => { const j = JSON.stringify(it); const c = counts.get(j); if (c) { counts.set(j, c - 1); return false; } return true; };
+        return shape === 'array' ? v.filter(fresh) : Object.assign({}, v, { entries: v.entries.filter(fresh) });
+      };
+      // Sealed parts first (oldest first), then the active doc. Items with the same `id` (arrays) or
+      // the same date (dated objects) keep the newest copy.
+      const merge = (shape, parts, active, order) => {
+        const ps = parts.filter(p => p.shape === shape);
+        if (shape === 'dated') {
+          const all = {};
+          ps.forEach(p => Object.assign(all, p.parsed));
+          if (active) Object.assign(all, active);
           const o = {};
-          for (const [k, x] of Object.entries(v)) o[k] = plain(x);
+          Object.keys(all).sort().forEach(k => { o[k] = all[k]; });
           return o;
-        };
-        try {
-          const snap = await db.collection('appdata').get();
-          return snap.docs.map(doc => ({ id: doc.id, fields: plain(doc.data() || {}) }));
-        } catch (e) { return null; }
-      },
-
-      // Restore one doc by its Firestore doc ID. Writes the backed-up fields (minus updatedAt /
-      // migratedAt / restoredAt) plus updatedAt and restoredAt = now. The device copy in
-      // localStorage is updated only when this doc IS the doc for its key: archive docs share a
-      // key with the active doc and must not overwrite it. True only if the database write worked
-      // (or, with no database at all, the device copy was written).
-      setDoc: async (id, fields) => {
-        try { await window.__dbReady; } catch (_) {}
-        if (typeof id !== 'string' || !id || !fields || typeof fields !== 'object') return false;
-        const rest = { ...fields };
-        delete rest.updatedAt; delete rest.migratedAt; delete rest.restoredAt;
-        const now = new Date();
-        const isActive = typeof fields.key === 'string' && sanitiseKey(fields.key) === id;
-        let localOk = false;
-        if (isActive && typeof fields.value === 'string') {
-          try { localStorage.setItem(fields.key, fields.value); localOk = true; } catch (_) {}
         }
+        const chron = [];
+        const add = (items) => (order === 'newest-first' ? items.slice().reverse() : items).forEach(it => chron.push(it));
+        ps.forEach(p => add(itemsOf(shape, p.parsed)));
+        if (active) add(itemsOf(shape, active));
+        const pos = new Map(), out = [];
+        chron.forEach(it => {
+          const k = it && typeof it === 'object' && (typeof it.id === 'string' || typeof it.id === 'number') ? 'id:' + it.id : null;
+          if (k && pos.has(k)) { out[pos.get(k)] = it; return; }
+          if (k) pos.set(k, out.length);
+          out.push(it);
+        });
+        if (order === 'newest-first') out.reverse();
+        return shape === 'array' ? out : Object.assign({}, active || {}, { entries: out });
+      };
+      const withParts = (f, m) => {
+        if (m.parts.length) { f.parts = m.parts; f.order = m.order || 'oldest-first'; if (m.shape) f.shape = m.shape; }
+        return f;
+      };
+      // Moves the oldest items into new sealed parts. Each part is written and confirmed before the
+      // active doc is touched; returns the trimmed active doc with its parts list, written in one go.
+      const seal = async (key, id, shape, parsed, at) => {
+        const fresh = metaOf(await readRaw(id)); // the newest parts list, in case another device sealed
+        const asIs = () => withParts({ key, value: JSON.stringify(parsed), updatedAt: new Date(at) }, fresh);
+        if (fresh.shape && fresh.shape !== shape) return asIs();
+        const order = shape === 'dated' ? 'oldest-first' : (fresh.order || guessOrder(itemsOf(shape, parsed)));
+        const units = unitsOf(shape, parsed, order);
+        const rest = {};
+        if (shape === 'entries') Object.keys(parsed).forEach(k => { if (k !== 'entries') rest[k] = parsed[k]; });
+        const wrap = shape === 'entries' ? utf8(JSON.stringify(Object.assign({}, rest, { entries: [] }))) : 2;
+        const spare = { id: id + '__part_000', n: 0, count: 0, rangeKind: 'index', from: '0000-00-00', to: '0000-00-00', bytes: 0 };
+        const base = docBytes(id, { key, value: '', updatedAt: new Date(at), parts: fresh.parts.concat([spare, spare]), order, shape });
+        let total = units.reduce((s, u) => s + u.bytes, 0) + Math.max(0, units.length - 1) + wrap;
+        let cut = 0;
+        while (units.length - cut > 1 && base + total >= SEAL_TO) { total -= units[cut].bytes + 1; cut++; }
+        if (!cut) return asIs();
+        const groups = [];
+        let g = [], gb = 0;
+        units.slice(0, cut).forEach(u => {
+          if (g.length && gb + u.bytes + 1 > PART_MAX) { groups.push(g); g = []; gb = 0; }
+          g.push(u); gb += u.bytes + 1;
+        });
+        if (g.length) groups.push(g);
+        let n = fresh.parts.reduce((m, p) => Math.max(m, Number(p.n) || 0), 0) + 1;
+        let offset = fresh.parts.reduce((s, p) => s + (Number(p.count) || 0), 0);
+        const parts = fresh.parts.slice();
+        for (const grp of groups) {
+          while (await readRaw(`${id}__part_${n}`)) n++; // never reuse a part's ID
+          const pid = `${id}__part_${n}`;
+          const pv = build(shape, grp, order, {});
+          const range = shape === 'dated'
+            ? { rangeKind: 'date', from: grp[0].k, to: grp[grp.length - 1].k }
+            : { rangeKind: 'index', from: offset, to: offset + grp.length - 1 };
+          const pf = Object.assign({ key, value: JSON.stringify(pv), sealed: true, partOf: id, n, shape, order, count: grp.length }, range, { sealedAt: new Date() });
+          try { await writeDoc(pid, pf, null); }
+          catch (e) { del(pid); throw e; }
+          partCache.set(pid, { parsed: pv, shape, n, order });
+          parts.push(Object.assign({ id: pid, n, count: grp.length }, range, { bytes: utf8(pf.value) }));
+          offset += grp.length;
+          n++;
+        }
+        idxCache.delete(id);
+        return { key, value: JSON.stringify(build(shape, units.slice(cut), order, rest)), updatedAt: new Date(at), parts, order, shape };
+      };
+
+      // One save to the cloud: strip what is already sealed, seal if it grew past SEAL_AT,
+      // split if it is still over SAFE. Throws if the cloud didn't take it.
+      const cloudWrite = async (key, id, value, at) => {
+        let meta = metaCache.get(id);
+        if (!meta) meta = metaOf(await readRaw(id));
+        metaCache.delete(id); // unknown until this write settles
+        const legacy = !!LEGACY_PARTS[key];
+        let fields = withParts({ key, value, updatedAt: new Date(at) }, meta);
+        let parsed, shape = null;
+        if (meta.parts.length || legacy || docBytes(id, fields) > SEAL_AT) {
+          parsed = parse(value);
+          shape = parsed === undefined ? null : shapeOf(parsed);
+        }
+        if (shape && (meta.parts.length || legacy)) {
+          const idx = indexFor(id, await loadParts(key, id, { parts: meta.parts }));
+          if (idx && idx.shape === shape) {
+            parsed = strip(shape, parsed, idx);
+            fields.value = JSON.stringify(parsed);
+          }
+        }
+        if (shape && docBytes(id, fields) > SEAL_AT) fields = await seal(key, id, shape, parsed, at);
+        const written = await writeDoc(id, fields, meta.split);
+        metaCache.set(id, metaOf(written));
+        return written;
+      };
+
+      // The active doc for a key: this device's copy if it is waiting to upload, else the cloud's.
+      const readActive = async (key) => {
+        await ready();
+        const id = sanitiseKey(key);
+        if (inQueue(id) && flushing) { try { await flushing; } catch (_) {} }
+        if (inQueue(id)) { const v = localGet(key); if (v !== null) return { value: v, fields: null }; }
         if (db) {
           try {
-            await db.collection('appdata').doc(id).set({ ...rest, updatedAt: now, restoredAt: now });
-            return true;
+            const f = await readRaw(id);
+            if (f) {
+              metaCache.set(id, metaOf(f));
+              measure(id, f);
+              try { return { value: await assemble(id, f), fields: f }; }
+              catch (e) {
+                // Never report a split value as missing: a feature would start over and overwrite it.
+                console.warn('Reading the pieces of ' + id + ' failed:', e);
+                const v = localGet(key);
+                if (v !== null) return { value: v, fields: f };
+                throw Object.assign(nwErr(`the pieces of ${id} couldn't be read (${reasonOf(e)})`), { nwFatal: true });
+              }
+            }
+            metaCache.set(id, metaOf(null));
+            const local = localGet(key);
+            // Key only on this device (saved before the cloud was reachable): copy it up quietly.
+            if (local !== null && !isReadOnlyId(id)) serial(id, () => cloudWrite(key, id, local, Date.now())).catch(() => {});
+            return { value: local, fields: null };
           } catch (e) {
-            console.warn('Firestore restore failed for ' + id + ':', e);
+            if (e && e.nwFatal) throw e;
+            console.warn("Firestore get failed, using this device's copy:", e);
+          }
+        }
+        return { value: localGet(key), fields: null };
+      };
+
+      const uploadOne = async (id) => {
+        const e = queue.find(x => x.id === id);
+        if (!e) return true;
+        const value = localGet(e.key);
+        if (value === null) { dropEntry(e); return true; }
+        const why = (err) => { e.reason = reasonOf(err); saveQueue(); emit(); return false; };
+        let cloud;
+        try { cloud = await readRaw(id); } catch (err) { return why(err); }
+        const cloudAt = msOf(cloud && cloud.updatedAt);
+        const now = Date.now();
+        if (cloud && cloudAt != null && cloudAt > e.firstAt) {
+          // The cloud changed after this device's copy did: keep the cloud's, save this device's beside it.
+          const cid = `${id}__conflict_${new Date(now).toISOString().replace(/[:.]/g, '_')}`;
+          try { await writeDoc(cid, { key: e.key, value, conflictOf: id, deviceSavedAt: new Date(e.at), cloudUpdatedAt: new Date(cloudAt), savedAt: new Date(now) }, null); }
+          catch (err) { return why(err); }
+          held.set(id, e.firstAt);
+          conflicts = conflicts.concat([{ id: cid, key: e.key, what: e.what, at: now }]);
+          keep(CONFLICTS_KEY, conflicts);
+          dropEntry(e);
+          return true;
+        }
+        metaCache.set(id, metaOf(cloud));
+        try { await cloudWrite(e.key, id, value, now); }
+        catch (err) { metaCache.delete(id); return why(err); }
+        failed.delete(id);
+        dropEntry(e);
+        markCloud();
+        return true;
+      };
+      // Uploads device-only saves in the order they were made; stops at the first that can't go up.
+      const flushOnce = async () => {
+        for (const e of queue.slice()) {
+          if (!db || isOffline()) return;
+          if (held.has(e.id)) continue;
+          if (!(await serial(e.id, () => uploadOne(e.id)))) return;
+        }
+      };
+      const flush = () => {
+        if (flushing) { flushAgain = true; return flushing; }
+        flushing = (async () => { do { flushAgain = false; await flushOnce(); } while (flushAgain); })()
+          .catch(e => console.warn('Uploading device-only saves stopped:', e))
+          .then(() => { flushing = null; emit(); });
+        return flushing;
+      };
+      window.__dbReady.then(() => { emit(); if (queue.length) flush(); });
+      window.addEventListener('online', () => { if (queue.length) flush(); });
+
+      window.storage = {
+        get: async (key) => {
+          const a = await readActive(key);
+          return a.value !== null && a.value !== undefined ? { value: a.value } : null;
+        },
+
+        // Sealed parts + the active doc, merged oldest first. Same as get() for a key with no parts.
+        getAll: async (key) => {
+          const id = sanitiseKey(key);
+          const a = await readActive(key);
+          const plain = a.value !== null && a.value !== undefined ? { value: a.value } : null;
+          const cached = (metaCache.get(id) || metaOf(null)).parts;
+          const listed = (a.fields && Array.isArray(a.fields.parts) && a.fields.parts.length) || cached.length;
+          if (!listed && !LEGACY_PARTS[key]) return plain;
+          // Old Kaizen archive copies on this device, for when the cloud can't be read.
+          const localParts = () => ((LEGACY_PARTS[key] || {}).localKeys || []).map(k => {
+            const p = parse(localGet(k));
+            return p && typeof p === 'object' ? { id: sanitiseKey(k), parsed: p, shape: shapeOf(p) || 'empty' } : null;
+          }).filter(Boolean);
+          let parts;
+          if (!db) { issue(id, key, NO_DB); parts = localParts(); }
+          else {
+            try {
+              parts = await loadParts(key, id, a.fields || { parts: cached });
+              if (readIssues.has(id)) { readIssues.delete(id); emit(); }
+            } catch (e) {
+              console.warn('Reading the sealed parts of ' + key + ' failed:', e);
+              issue(id, key, reasonOf(e));
+              parts = localParts();
+            }
+          }
+          if (!parts.length) return plain;
+          const active = plain ? parse(plain.value) : null;
+          const shape = (active != null && shapeOf(active)) || (a.fields && a.fields.shape) || (parts.find(p => p.shape && p.shape !== 'empty') || {}).shape;
+          if (!shape || shape === 'empty') return plain;
+          const isEmptyObj = (v) => v && typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length;
+          if (active === undefined || (active != null && shapeOf(active) !== shape && !(isEmptyObj(active) && shape === 'dated'))) {
+            issue(id, key, 'the newest part is in a different format from the older parts');
+            return plain;
+          }
+          if (parts.some(p => p.shape !== shape && p.shape !== 'empty')) issue(id, key, 'some older parts are in a different format');
+          const order = (a.fields && a.fields.order) || (parts.find(p => p.shape === shape && p.order) || {}).order || 'oldest-first';
+          return { value: JSON.stringify(merge(shape, parts, active, order)), parts: parts.length };
+        },
+
+        // Returns 'cloud' (the cloud has it), 'device-only' (only this device has it; it uploads later)
+        // or false (nothing was stored). opts.restore lets a backup restore write a read-only doc.
+        set: async (key, value, opts) => {
+          opts = opts || {};
+          await ready();
+          if (typeof key !== 'string' || !key) return false;
+          if (typeof value !== 'string') value = String(value);
+          const id = sanitiseKey(key);
+          const what = opts.what || whatOf(key);
+          if (isReadOnlyId(id) && !opts.restore) {
+            console.warn('Refused to write ' + id + ': sealed parts are read-only.');
+            fail(id, what, 'it is a sealed part, which is read-only');
             return false;
           }
-        }
-        return localOk;
-      },
+          return serial(id, async () => {
+            const at = Date.now();
+            let localOk = false;
+            try { localStorage.setItem(key, value); localOk = true; } catch (_) {}
+            const deviceOnly = (reason, firstAt) => {
+              if (!localOk) { fail(id, what, reason + ", and this device's storage is full"); return false; }
+              failed.delete(id);
+              enqueue({ key, id, at, firstAt, reason, what });
+              return 'device-only';
+            };
+            if (held.has(id)) return deviceOnly('a newer copy is in the cloud from another device. Reload the app to see it', held.get(id));
+            const q = queue.find(e => e.id === id);
+            if (q) {
+              const r = deviceOnly(isOffline() ? 'the device is offline' : !db ? NO_DB : 'an earlier save of it is still waiting to upload', q.firstAt);
+              if (db && !isOffline()) setTimeout(flush, 0);
+              return r;
+            }
+            if (!db) return deviceOnly(NO_DB, at);
+            if (isOffline()) return deviceOnly('the device is offline', at);
+            try {
+              await cloudWrite(key, id, value, at);
+            } catch (e) {
+              console.warn('Cloud save failed for ' + key + ':', e);
+              metaCache.delete(id);
+              const r = deviceOnly(reasonOf(e), at);
+              // A write that timed out can still land later; if nothing newer was saved, it is in the cloud.
+              if (r && e && e.nwTimeout && e.rawId === id && e.raw) e.raw.then(() => {
+                const qe = queue.find(x => x.id === id);
+                if (qe && qe.at === at) { dropEntry(qe); markCloud(); }
+              }, () => {});
+              return r;
+            }
+            if (!localOk) { try { localStorage.removeItem(key); } catch (_) {} } // a stale device copy; the cloud has the new one
+            failed.delete(id);
+            markCloud();
+            return 'cloud';
+          });
+        },
 
-      // Lets the SaveStatusPill display "Local-only" mode distinctly
-      isCloudReady: () => !!window.__dbAvailable,
-    };
+        // Every doc whose key starts with `prefix` (e.g. "practice:log:"), and nothing else: Firestore is
+        // queried on the doc-ID range of the sanitised prefix. Keys only on this device are included; the
+        // cloud copy wins unless this device's copy is waiting to upload. Each value is the key's whole
+        // history (sealed parts included). Returns null if Firestore is up but the query fails.
+        listPrefix: async (prefix) => {
+          await ready();
+          const out = {};
+          try {
+            for (let i = 0; i < localStorage.length; i++) {
+              const k = localStorage.key(i);
+              if (k && k.startsWith(prefix)) out[k] = { id: sanitiseKey(k), key: k, value: localStorage.getItem(k) };
+            }
+          } catch (_) {}
+          if (db) {
+            try {
+              const docs = await queryPrefix(sanitiseKey(prefix));
+              for (const d of docs) {
+                const f = d.fields;
+                if (isInternalId(d.id) || f.sealed || f.splitOf || f.conflictOf) continue;
+                const k = typeof f.key === 'string' ? f.key : d.id;
+                const localKey = Object.keys(out).find(lk => out[lk].id === d.id);
+                if (localKey && inQueue(d.id)) continue;
+                if (localKey) delete out[localKey];
+                metaCache.set(d.id, metaOf(f));
+                measure(d.id, f);
+                let value = await assemble(d.id, f);
+                if (Array.isArray(f.parts) && f.parts.length) { const all = await window.storage.getAll(k); if (all) value = all.value; }
+                out[k] = { id: d.id, key: k, value };
+              }
+            } catch (e) {
+              console.warn('Firestore prefix list failed:', e);
+              return null;
+            }
+          }
+          return Object.values(out);
+        },
+
+        // Every appdata doc with ALL its fields (sealed parts, pieces and conflict copies included), for
+        // backups and the size table. Firestore Timestamps (and Dates) become ISO strings. null if unreadable.
+        exportRawDocs: async () => {
+          await ready();
+          if (!db) return null;
+          // Only plain objects and arrays are walked; other Firestore types become something JSON-safe
+          // (a DocumentReference holds the whole Firestore instance and must not be walked).
+          const plain = (v) => {
+            if (v == null || typeof v !== 'object') return v;
+            if (v instanceof Date) return v.toISOString();
+            if (typeof v.toDate === 'function') { try { return v.toDate().toISOString(); } catch (_) { return null; } }
+            if (Array.isArray(v)) return v.map(plain);
+            const proto = Object.getPrototypeOf(v);
+            if (proto !== Object.prototype && proto !== null) {
+              if (typeof v.path === 'string') return v.path;
+              if (typeof v.latitude === 'number' && typeof v.longitude === 'number') return { latitude: v.latitude, longitude: v.longitude };
+              if (typeof v.toBase64 === 'function') { try { return v.toBase64(); } catch (_) { return null; } }
+              try { return JSON.parse(JSON.stringify(v)); } catch (_) { return String(v); }
+            }
+            const o = {};
+            for (const [k, x] of Object.entries(v)) o[k] = plain(x);
+            return o;
+          };
+          try {
+            const snap = await db.collection(COLL).get();
+            return snap.docs.map(doc => ({ id: doc.id, fields: plain(doc.data() || {}) }));
+          } catch (e) { return null; }
+        },
+
+        // Restore one doc by its Firestore doc ID (sealed parts and pieces included). Writes the backed-up
+        // fields (minus updatedAt / migratedAt / restoredAt) plus updatedAt and restoredAt = now. The device
+        // copy in localStorage is updated only when this doc IS the doc for its key: sealed parts and old
+        // archives share a key with the active doc and must not overwrite it. True only if the database
+        // write worked (or, with no database at all, the device copy was written).
+        setDoc: async (id, fields) => {
+          await ready();
+          if (typeof id !== 'string' || !id || !fields || typeof fields !== 'object') return false;
+          const rest = Object.assign({}, fields);
+          delete rest.updatedAt; delete rest.migratedAt; delete rest.restoredAt;
+          const now = new Date();
+          const isActive = typeof fields.key === 'string' && sanitiseKey(fields.key) === id;
+          let localOk = false;
+          if (isActive && typeof fields.value === 'string') {
+            try { localStorage.setItem(fields.key, fields.value); localOk = true; } catch (_) {}
+          }
+          if (!db) return localOk;
+          return serial(id, async () => {
+            try {
+              let prev = null;
+              try { prev = metaOf(await readRaw(id)).split; } catch (_) {}
+              await writeDoc(id, Object.assign(rest, { updatedAt: now, restoredAt: now }), prev);
+              metaCache.delete(id); partCache.delete(id); idxCache.clear(); legacyIds.clear();
+              if (isActive) { const e = queue.find(x => x.id === id); if (e) dropEntry(e); failed.delete(id); }
+              return true;
+            } catch (e) {
+              console.warn('Firestore restore failed for ' + id + ':', e);
+              return false;
+            }
+          });
+        },
+
+        // Lets the SaveStatusPill display "Local-only" mode distinctly
+        isCloudReady: () => !!window.__dbAvailable,
+
+        // Save state for the banners and the status line on every tab.
+        status: () => snapshot(),
+        subscribe: (fn) => { listeners.add(fn); try { fn(snapshot()); } catch (_) {} return () => listeners.delete(fn); },
+        dismiss: (bannerId) => {
+          const [kind, ...r] = String(bannerId).split(':');
+          const id = r.join(':');
+          if (kind === 'failed') failed.delete(id);
+          if (kind === 'read') readIssues.delete(id);
+          if (kind === 'conflict') { conflicts = conflicts.filter(c => c.id !== id); keep(CONFLICTS_KEY, conflicts); }
+          if (kind === 'size' && sizeWarn.has(id)) { dismissedSizes[id] = sizeWarn.get(id).bytes; keep(DISMISSED_KEY, dismissedSizes); }
+          emit();
+        },
+        flush: () => flush(),
+        docBytes, kindOf, LIMIT, SAFE,
+      };
+    })();
+    // ══ NW-STORAGE-LAYER END ════════════════════════════════════════
   </script>
 
   <!-- ─────────────────────────────────────────────────────────────
@@ -287,12 +882,14 @@ const { useState: __useState, useEffect: __useEffect, useRef: __useRef, useCallb
 
 // ── Save Status Pill ───────────────────────────────────────────
 function SaveStatusPill({ state }) {
-  // state: 'idle' | 'saving' | 'saved' | 'error' | 'offline' | 'booting' | 'localonly'
+  // state: 'idle' | 'saving' | 'saved' | 'device' | 'error' | 'offline' | 'booting' | 'localonly'
+  // 'saved' = the cloud has it; 'device' = only this device has it (it uploads later).
   const map = {
     booting:   { label: 'Connecting…',  color: '#9ca3af', bg: 'rgba(156,163,175,0.15)', dot: '#9ca3af' },
     offline:   { label: 'Session only', color: '#a16207', bg: 'rgba(161,98,7,0.15)',  dot: '#a16207' },
     saving:    { label: 'Saving…',      color: '#9ca3af', bg: 'rgba(156,163,175,0.15)', dot: '#9ca3af' },
     saved:     { label: 'Saved',        color: '#3d5a3d', bg: 'rgba(61,90,61,0.15)',   dot: '#3d5a3d' },
+    device:    { label: 'This device only', color: '#a16207', bg: 'rgba(161,98,7,0.15)', dot: '#a16207' },
     error:     { label: 'Save failed',  color: '#b91c1c', bg: 'rgba(185,28,28,0.15)',  dot: '#b91c1c' },
     idle:      { label: 'Auto-save on', color: '#3d5a3d', bg: 'rgba(61,90,61,0.10)',   dot: '#3d5a3d' },
     localonly: { label: '🔒 Local-only',color: '#a16207', bg: 'rgba(161,98,7,0.15)',  dot: '#a16207' },
@@ -317,8 +914,9 @@ function SaveStatusPill({ state }) {
 }
 
 // ── Hook: useDebouncedPersist ──────────────────────────────────
-// Returns [value, setValue, status]. Auto-loads from window.storage on mount;
-// auto-saves debounced (350ms) after every setValue. Mirrors Kaizen's pattern.
+// Returns [value, setValue, status]. Auto-loads the whole history (window.storage.getAll) on mount;
+// auto-saves debounced (350ms) after every setValue. Mirrors Kaizen's pattern. If the load fails,
+// nothing is saved over the stored copy (status 'error').
 function useDebouncedPersist(key, initialValue) {
   const [value, setValueRaw] = __useState(initialValue);
   const [status, setStatus] = __useState('booting'); // booting → idle/localonly
@@ -333,16 +931,15 @@ function useDebouncedPersist(key, initialValue) {
         try { await window.__dbReady; } catch (_) {}
         const cloudOK = window.storage?.isCloudReady?.() ?? true;
 
-        const result = await window.storage.get(key);
+        const result = await (window.storage.getAll || window.storage.get)(key);
         if (cancel) return;
         if (result?.value) {
           try { setValueRaw(JSON.parse(result.value)); } catch { setValueRaw(result.value); }
         }
         setStatus(cloudOK ? 'idle' : 'localonly');
+        setLoaded(true);
       } catch {
-        if (!cancel) setStatus('localonly');
-      } finally {
-        if (!cancel) setLoaded(true);
+        if (!cancel) setStatus('error');
       }
     })();
     return () => { cancel = true; };
@@ -352,15 +949,15 @@ function useDebouncedPersist(key, initialValue) {
     setValueRaw(prev => {
       const v = typeof next === 'function' ? next(prev) : next;
       if (!loaded) return v;
-      const cloudOK = window.storage?.isCloudReady?.() ?? true;
       setStatus('saving');
       clearTimeout(timerRef.current);
       timerRef.current = setTimeout(async () => {
         try {
-          const ok = await window.storage.set(key, JSON.stringify(v));
-          if (!ok) { setStatus('error'); return; }
-          setStatus(cloudOK ? 'saved' : 'localonly');
-          if (cloudOK) setTimeout(() => setStatus('idle'), 1500);
+          const where = await window.storage.set(key, JSON.stringify(v));
+          if (!where) { setStatus('error'); return; }
+          if (where !== 'cloud') { setStatus('device'); return; }
+          setStatus('saved');
+          setTimeout(() => setStatus('idle'), 1500);
         } catch {
           setStatus('error');
         }
@@ -381,12 +978,13 @@ function useGlanceData() {
 
   const refresh = __useCallback(async () => {
     try {
+      const read = (k) => (window.storage.getAll || window.storage.get)(k); // whole history, read-only
       const [foodRaw, kaizenTasksRaw, kaizenProjectsRaw, medsRaw, healthRaw] = await Promise.all([
-        window.storage.get('nikhil-food-log-v1'),
-        window.storage.get('kaizen3:tasks'),
-        window.storage.get('kaizen3:projects'),
-        window.storage.get('med-log-daily'),
-        window.storage.get('apple-health-import'),
+        read('nikhil-food-log-v1'),
+        read('kaizen3:tasks'),
+        read('kaizen3:projects'),
+        read('med-log-daily'),
+        read('apple-health-import'),
       ]);
 
       const food     = foodRaw?.value     ? JSON.parse(foodRaw.value)     : {};
@@ -786,7 +1384,55 @@ function TodayStrip({ data, onPendingClick, theme = 'dark' }) {
 }
 
 // Expose
+// ── Save state on every tab (from window.storage.subscribe) ────
+function useNwSaveState() {
+  const [s, setS] = __useState(() => window.storage?.status?.() || null);
+  __useEffect(() => (window.storage?.subscribe ? window.storage.subscribe(setS) : undefined), []);
+  return s;
+}
+const nwClock = (ms) => {
+  const d = new Date(ms), now = new Date();
+  const t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return d.toDateString() === now.toDateString() ? t : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${t}`;
+};
+// Device-only saves, saves that failed, conflict copies, docs near the size limit. One banner each.
+function NwStorageBanners() {
+  const s = useNwSaveState();
+  if (!s || !s.banners?.length) return null;
+  const tone = { 'device-only': ['#2a1f05', '#fbbf24'], failed: ['#2a0b0b', '#fca5a5'], conflict: ['#2a1f05', '#fbbf24'], size: ['#1f1a05', '#fde68a'], read: ['#1f1a05', '#fde68a'] };
+  return (
+    <div data-nw-banners style={{ flexShrink: 0, maxHeight: '40vh', overflowY: 'auto', position: 'relative', zIndex: 9998 }}>
+      {s.banners.map(b => {
+        const [bg, fg] = tone[b.kind] || tone.size;
+        return (
+          <div key={b.id} role="alert" data-nw-banner={b.kind} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '9px 16px', background: bg, color: fg, borderBottom: '1px solid #3a3a3a', fontSize: 13, lineHeight: 1.45, fontFamily: "'DM Sans', system-ui, sans-serif" }}>
+            <span style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>{b.text}</span>
+            {b.dismissable && (
+              <button onClick={() => window.storage.dismiss(b.id)} style={{ flexShrink: 0, minWidth: 44, minHeight: 32, background: 'transparent', color: fg, border: `1px solid ${fg}`, borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>OK</button>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+// "All saved · last cloud save <time>" or "<n> waiting to upload".
+function NwSaveStatusLine() {
+  const s = useNwSaveState();
+  if (!s) return null;
+  const text = s.waiting ? `${s.waiting} waiting to upload`
+    : s.failedCount ? `${s.failedCount} not saved — see the message at the top`
+    : s.lastCloudSave ? `All saved · last cloud save ${nwClock(s.lastCloudSave)}` : 'All saved';
+  return (
+    <div data-nw-status role="status" style={{ flexShrink: 0, textAlign: 'center', fontSize: 11, padding: '4px 16px', color: s.waiting || s.failedCount ? '#fbbf24' : '#9ca3af', background: '#141414', borderTop: '1px solid #262626', fontFamily: "'Space Mono', monospace" }}>
+      {text}
+    </div>
+  );
+}
+
 window.SaveStatusPill = SaveStatusPill;
+window.NwStorageBanners = NwStorageBanners;
+window.NwSaveStatusLine = NwSaveStatusLine;
 window.useDebouncedPersist = useDebouncedPersist;
 window.useGlanceData = useGlanceData;
 window.TodayStrip = TodayStrip;
@@ -953,8 +1599,7 @@ const uid = () => Math.random().toString(36).slice(2,9);
 const SK = {
   projects    : 'kaizen3:projects',
   tasks       : 'kaizen3:tasks',
-  logs        : 'kaizen4:logs',
-  logsArchive : 'kaizen3:logs',
+  logs        : 'kaizen4:logs', // older days: sealed parts, incl. the old kaizen3:logs and *_logs_archive_* docs
   ping        : 'kaizen3:ping',
 };
 
@@ -973,77 +1618,21 @@ async function storageGet(key) {
   } catch { return null; }
 }
 
+// 'cloud' | 'device-only' | false — where the save landed (see window.storage.set).
 async function storageSet(key, value) {
   try {
-    await window.storage.set(key, JSON.stringify(value));
-    return true;
+    return await window.storage.set(key, JSON.stringify(value));
   } catch { return false; }
 }
 
-// ── Logs durability: rollover threshold + archive discovery ──────────
-// Firestore's hard per-document limit is 1,048,576 chars. Keep the active
-// `kaizen4:logs` doc well under that so a silent write rejection (which is
-// what happened 2026-07-02) can't recur.
-const LOGS_SAFE_THRESHOLD = 800000; // chars
-const LOGS_KEEP_RECENT_DAYS = 7;
-
-// Find every appdata doc that holds an archived slice of daily logs — the
-// legacy `kaizen3:logs` freeze, plus any dated rollover archive (see
-// rolloverLogsIfNeeded below) — and merge them into one object. Archive docs
-// are identified by DOC ID pattern, not by the `key` field: the 2026-07-06
-// manual rescue doc stores key:'kaizen4:logs' (same as the active doc),
-// while auto-created archives (below) store their own doc ID as `key` —
-// so `key` can't reliably distinguish an archive from the active doc, but
-// the `_archive_` naming convention in the doc ID always can. Matching by
-// `key` alone is exactly how exportAll()'s {key: value} map silently
-// collapses a same-keyed archive onto the active entry — the bug this fixes.
-async function loadAllArchives() {
-  const merged = {};
-  const docs = await window.storage.exportAllDocs?.();
-  if (docs) {
-    const archiveDocs = docs.filter(d =>
-      d.id === 'kaizen3_logs' || d.key === SK.logsArchive ||
-      (typeof d.id === 'string' && /^kaizen[34]_logs_archive_/.test(d.id))
-    );
-    for (const d of archiveDocs) {
-      try {
-        const parsed = d.value ? JSON.parse(d.value) : null;
-        if (parsed) Object.assign(merged, parsed);
-      } catch {}
-    }
-    return merged;
-  }
-  // exportAllDocs unavailable (offline / localStorage fallback) — fall back
-  // to the one archive doc the app has always known about.
-  const legacy = await storageGet(SK.logsArchive);
-  if (legacy) Object.assign(merged, legacy);
-  return merged;
-}
-
-// If the active logs doc is approaching Firestore's size limit, move all but
-// the most recent LOGS_KEEP_RECENT_DAYS days into a new dated archive doc.
-// The active doc is only ever trimmed AFTER the archive write is confirmed —
-// never on an unconfirmed write, which is how the 2026-07-02 data loss
-// happened in the first place.
-async function rolloverLogsIfNeeded(activeLogs) {
-  if (JSON.stringify(activeLogs).length <= LOGS_SAFE_THRESHOLD) return null;
-
-  const dateKeys = Object.keys(activeLogs).sort();
-  if (dateKeys.length <= LOGS_KEEP_RECENT_DAYS) return null; // nothing old enough to move
-
-  const moveKeys = dateKeys.slice(0, -LOGS_KEEP_RECENT_DAYS);
-  const keepKeys = dateKeys.slice(-LOGS_KEEP_RECENT_DAYS);
-  const moved = {}; moveKeys.forEach(k => { moved[k] = activeLogs[k]; });
-  const kept  = {}; keepKeys.forEach(k => { kept[k]  = activeLogs[k]; });
-
-  const archiveDocId = `kaizen4_logs_archive_${todayISO()}`;
-  const archiveWriteOk = await storageSet(archiveDocId, moved);
-  if (!archiveWriteOk) return { ok: false };
-
-  const trimWriteOk = await storageSet(SK.logs, kept);
-  if (!trimWriteOk) return { ok: false }; // archive saved, active doc untouched — safe, just retry next boot
-
-  return { ok: true, kept, moved };
+// The whole history of a key: sealed parts + the active doc. For the daily log this includes the
+// old kaizen3:logs doc and every kaizen3/kaizen4 *_logs_archive_* doc, read in place as sealed parts.
+// Growth is handled by window.storage itself (seal and continue), so Kaizen no longer rolls over.
+async function storageGetAll(key) {
+  try {
+    const r = await (window.storage.getAll || window.storage.get)(key);
+    return r?.value ? JSON.parse(r.value) : null;
+  } catch { return null; }
 }
 
 // ─────────────────────────────────────────────────────
@@ -1059,7 +1648,7 @@ function KaizenApp() {
 
   // 'booting' | 'active' | 'offline'
   const [storeSt,   setStoreSt]   = useState('booting');
-  // 'idle' | 'saving' | 'saved' | 'error'
+  // 'idle' | 'saving' | 'saved' (cloud) | 'device' (this device only) | 'error'
   const [saveSt,    setSaveSt]    = useState('idle');
   const [loaded,    setLoaded]    = useState(false);
   const [notice,    setNotice]    = useState(null);
@@ -1076,11 +1665,11 @@ function KaizenApp() {
       const ok = await testStorage();
       setStoreSt(ok ? 'active' : 'offline');
       if (ok) {
-        const [p,t,l,archives] = await Promise.all([
+        const [p,t,l,history] = await Promise.all([
           storageGet(SK.projects),
           storageGet(SK.tasks),
           storageGet(SK.logs),
-          loadAllArchives(),
+          storageGetAll(SK.logs),
         ]);
         let seeded = null;
         try { const r = await window.storage.get('kaizen3:seeded'); seeded = r?.value; } catch {}
@@ -1138,25 +1727,11 @@ function KaizenApp() {
             if (needsMigration) await storageSet(SK.tasks, migrated);
           }
         }
-        // Auto-rollover: if the active logs doc is approaching Firestore's
-        // 1 MiB limit, move older days into a new dated archive doc before
-        // trimming the active one. Runs once per boot; never trims unless
-        // the archive write is confirmed first (see rolloverLogsIfNeeded).
-        if (l) {
-          const rollover = await rolloverLogsIfNeeded(l);
-          if (rollover?.ok) {
-            setLogsRaw(rollover.kept);
-            setArchiveLogs({ ...archives, ...rollover.moved });
-          } else {
-            setLogsRaw(l);
-            setArchiveLogs(archives);
-            if (rollover && rollover.ok === false) {
-              setSaveFailure({ message: "Auto-archive of older daily logs failed — the active log is near Firestore's size limit. Reload and check, or export a backup." });
-            }
-          }
-        } else {
-          setArchiveLogs(archives);
-        }
+        // Logs: `logs` is the active doc (the only one Kaizen writes); `archiveLogs` is the whole
+        // history. When the active doc grows past 800,000 bytes, window.storage moves its oldest
+        // days into a sealed part on save (part written first, then the active doc trimmed).
+        if (l) setLogsRaw(l);
+        setArchiveLogs(history || {});
       }
       setLoaded(true);
     })();
@@ -1168,21 +1743,16 @@ function KaizenApp() {
     setSaveSt('saving');
     clearTimeout(saveTimers.current[key]);
     saveTimers.current[key] = setTimeout(async () => {
-      const ok = await storageSet(key, value);
-      setSaveSt(ok ? 'saved' : 'error');
-      if (ok) {
+      const where = await storageSet(key, value);
+      setSaveSt(where === 'cloud' ? 'saved' : where ? 'device' : 'error');
+      if (where === 'cloud') {
         setTimeout(() => setSaveSt('idle'), 1500);
         return;
       }
-      // A failed write is invisible if we only rely on the debounced status
-      // pill — this banner stays until the user dismisses it (no timer).
-      let size = 0;
-      try { size = JSON.stringify(value).length; } catch {}
-      const likelyFull = key === SK.logs && size > 1000000;
-      setSaveFailure({
-        message: likelyFull
-          ? "A save didn't go through. Your latest entry may not be stored. The daily log is full and needs archiving — reload and check, or export a backup. (Auto-rollover is meant to prevent this; if you're seeing it, the rollover write itself likely failed too.)"
-          : "A save didn't go through. Your latest entry may not be stored. Reload and check, or export a backup."
+      // Device-only: the banner on every tab says so, and it uploads later. Nothing stored: this
+      // banner stays until the user dismisses it (no timer).
+      if (!where) setSaveFailure({
+        message: "A save didn't go through. Your latest entry may not be stored. Reload and check, or export a backup."
       });
     }, 350);
   };
@@ -1192,7 +1762,7 @@ function KaizenApp() {
   const setTasks    = v => { setTasksRaw(v);    persist(SK.tasks,    v); };
   const setLogs     = v => { setLogsRaw(v);     persist(SK.logs,     v); };
 
-  // ── Logs: merge frozen archive (kaizen3) with active store (kaizen4) for reads ──
+  // ── Logs: whole history (sealed parts + active) with in-memory edits on top, for reads ──
   const mergedLogs = useMemo(() => ({...archiveLogs, ...logs}), [archiveLogs, logs]);
 
   // Safe write: read base from the merged view, but persist only to the active
@@ -1270,6 +1840,7 @@ function KaizenApp() {
     if (saveSt==='saving')   return <Pill icon={<RefreshCw size={11} style={{animation:'spin 1s linear infinite'}}/>} label="Saving…" color="#6b6660"/>;
     if (saveSt==='error')    return <Pill icon={<WifiOff size={11}/>} label="Save failed" color="#b91c1c"/>;
     if (saveSt==='saved')    return <Pill icon={<CheckCircle2 size={11}/>} label="Saved" color="#3d5a3d"/>;
+    if (saveSt==='device')   return <Pill icon={<WifiOff size={11}/>} label="This device only" color="#a16207"/>;
     return <Pill icon={<Wifi size={11}/>} label="Auto-saving on" color="#3d5a3d"/>;
   };
 
@@ -1635,6 +2206,7 @@ function TransitionTimer() {
   const [elapsed, setElapsed] = useState(0);
   const [paused, setPaused]   = useState(false);
   const [saved, setSaved]     = useState(false);
+  const [savedWhere, setSavedWhere] = useState(null); // 'cloud' | 'device-only' | false
   const [allEntries, setAllEntries] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
   const [stuckTool, setStuckTool] = useState(null); // null | 'A' | 'B' | 'C'
@@ -1646,7 +2218,7 @@ function TransitionTimer() {
   useEffect(() => {
     (async () => {
       try {
-        const r = await window.storage.get('transition-log');
+        const r = await window.storage.getAll('transition-log');
         if (r?.value) {
           const parsed = JSON.parse(r.value);
           if (Array.isArray(parsed)) { setAllEntries(parsed); setLevel(suggestLevel(parsed)); }
@@ -1706,8 +2278,10 @@ function TransitionTimer() {
       paused: extra.paused || paused || false,
     };
     const next = [entry, ...allEntries].slice(0, 500);
-    setAllEntries(next); setElapsed(secs); setSaved(true); setPhase('done');
-    try { await window.storage.set('transition-log', JSON.stringify(next)); } catch(e) {}
+    setAllEntries(next); setElapsed(secs); setSaved(true); setPhase('done'); setSavedWhere(null);
+    let where = false;
+    try { where = await window.storage.set('transition-log', JSON.stringify(next)); } catch(e) {}
+    setSavedWhere(where);
   };
 
   const reset = () => {
@@ -1918,7 +2492,11 @@ function TransitionTimer() {
 
           {saved && (
             <div style={{display:'flex',gap:10,alignItems:'center',marginTop:10}}>
-              <span style={{fontSize:12,color:'#6b6660',flex:1}}>Logged{whatMoved?` — "${whatMoved}"`:''}. The Reduction will see this tonight.</span>
+              <span style={{fontSize:12,color:savedWhere===false?'#b91c1c':'#6b6660',flex:1}}>{savedWhere===false
+                ? `Not saved${whatMoved?` — "${whatMoved}"`:''}. Nothing was stored; try again.`
+                : savedWhere==='device-only'
+                ? `Logged on this device only, not in the cloud yet${whatMoved?` — "${whatMoved}"`:''}. It uploads when the cloud is reachable.`
+                : `Logged${whatMoved?` — "${whatMoved}"`:''}. The Reduction will see this tonight.`}</span>
               <button onClick={reset} style={{...ghostBtn,borderRadius:8,padding:'5px 10px',fontSize:11}}>New</button>
             </div>
           )}
@@ -2576,7 +3154,7 @@ function SessionsPanel() {
   useEffect(() => {
     (async () => {
       try {
-        const s = await window.storage.get(SESSIONS_KEY);
+        const s = await window.storage.getAll(SESSIONS_KEY);
         if (s?.value) setSummaries(JSON.parse(s.value));
       } catch(e) {}
       try {
@@ -2586,9 +3164,10 @@ function SessionsPanel() {
     })();
   }, []);
 
+  // 'cloud' | 'device-only' | false
   const saveSummaries = async (next) => {
     setSummaries(next);
-    try { await window.storage.set(SESSIONS_KEY, JSON.stringify(next)); } catch(e) {}
+    try { return await window.storage.set(SESSIONS_KEY, JSON.stringify(next)); } catch(e) { return false; }
   };
 
   // ── Manual paste (unrecorded Brighton or notes) ──
@@ -2608,10 +3187,11 @@ function SessionsPanel() {
       manual: true,
     };
     const next = [entry, ...summaries].slice(0, 50);
-    await saveSummaries(next);
+    const where = await saveSummaries(next);
+    if (!where) { setSyncStatus("❌ Session notes weren't saved. Nothing was stored; try again."); return; }
     setPasteText('');
     setPasteOpen(false);
-    setSyncStatus('✅ Session notes saved.');
+    setSyncStatus(where === 'cloud' ? '✅ Session notes saved.' : '⚠️ Session notes saved on this device only, not in the cloud yet.');
     setTimeout(() => setSyncStatus(''), 3000);
   };
 
@@ -2665,8 +3245,9 @@ Return 3-5 foci. Focus on what's genuinely active, not historical.`,
       const result = JSON.parse(jsonMatch[0]);
       result.updated_at = new Date().toISOString().slice(0,10);
       setFoci(result);
-      try { await window.storage.set(FOCI_KEY, JSON.stringify(result)); } catch(e) {}
-      setSyncStatus(`✅ Foci updated from ${summaries.length} sessions.`);
+      let where = false;
+      try { where = await window.storage.set(FOCI_KEY, JSON.stringify(result)); } catch(e) {}
+      setSyncStatus(`✅ Foci updated from ${summaries.length} sessions.` + (where === 'cloud' ? '' : where ? ' Saved on this device only, not in the cloud yet.' : " Not saved; it's only on this screen."));
     } catch(e) {
       setSyncStatus(`❌ ${e.message}`);
     }
@@ -2828,7 +3409,7 @@ function TrajectoryView({ logs, updateLog, tasks }) {
         if (r?.value) setBigPicture(r.value);
       } catch(e) {}
       try {
-        const c = await window.storage.get('creative-catch');
+        const c = await window.storage.getAll('creative-catch');
         if (c?.value) setCatchEntries(JSON.parse(c.value));
       } catch(e) {}
     })();
@@ -2836,9 +3417,10 @@ function TrajectoryView({ logs, updateLog, tasks }) {
 
   const saveBigPicture = async (val) => {
     setBigPicture(val);
-    try { await window.storage.set('trajectory-bigpicture', val); } catch(e) {}
-    setBpSaved(true);
-    setTimeout(() => setBpSaved(false), 1500);
+    let where = false;
+    try { where = await window.storage.set('trajectory-bigpicture', val); } catch(e) {}
+    setBpSaved(where === 'cloud' ? 'cloud' : where ? 'device' : 'failed');
+    if (where === 'cloud') setTimeout(() => setBpSaved(false), 1500);
   };
 
   // ── Build win data across all logged days ──────────
@@ -2923,7 +3505,9 @@ function TrajectoryView({ logs, updateLog, tasks }) {
       <div className="card" style={{ padding:20 }}>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
           <div style={{ ...sectionLabel, fontSize:11 }}>What am I building toward?</div>
-          {bpSaved && <span style={{ fontSize:10, color:'#3d5a3d' }}>✓ saved</span>}
+          {bpSaved === 'cloud' && <span style={{ fontSize:10, color:'#3d5a3d' }}>✓ saved</span>}
+          {bpSaved === 'device' && <span style={{ fontSize:10, color:'#a16207' }}>saved on this device only</span>}
+          {bpSaved === 'failed' && <span style={{ fontSize:10, color:'#b91c1c' }}>not saved</span>}
         </div>
         <textarea
           value={bigPicture}
@@ -5710,7 +6294,7 @@ const LiveTab = ({ healthImport = {}, setHealthImport, medLog = {}, setMedLog })
   useEffect(() => {
     (async () => {
       try {
-        const r = await window.storage.get('nikhil-food-log-v1');
+        const r = await window.storage.getAll('nikhil-food-log-v1');
         if (r?.value) setFoodLog(JSON.parse(r.value));
       } catch {}
     })();
@@ -6944,7 +7528,7 @@ function CreativeRoulette() {
       // Load from BOTH keys and merge (dedup by date)
       for (const key of ["creative-log-v2", "creative-log"]) {
         try {
-          const r = await window.storage.get(key);
+          const r = await window.storage.getAll(key);
           if (r?.value) {
             const parsed = JSON.parse(r.value);
             const normalized = parsed.map(e => ({
@@ -6988,7 +7572,7 @@ function CreativeRoulette() {
         if (g?.value) setGatekeeperName(g.value);
       } catch(e) {}
       try {
-        const c = await window.storage.get("creative-catch");
+        const c = await window.storage.getAll("creative-catch");
         if (c?.value) setCatchEntries(JSON.parse(c.value));
       } catch(e) {}
       setSaveStatus('idle');
@@ -7002,18 +7586,22 @@ function CreativeRoulette() {
     let ok1 = false, ok2 = false;
     try { ok1 = await window.storage.set("creative-log-v2", data); } catch(e) {}
     try { ok2 = await window.storage.set("creative-log", data); } catch(e) {}
-    setSaveStatus(ok1 || ok2 ? 'saved' : 'error');
-    setTimeout(() => setSaveStatus('idle'), 1500);
+    // 'saved' only when the cloud has it; 'device' when only this device does (it uploads later).
+    const st = ok1 === 'cloud' && ok2 === 'cloud' ? 'saved' : ok1 || ok2 ? 'device' : 'error';
+    setSaveStatus(st);
+    if (st === 'saved') setTimeout(() => setSaveStatus('idle'), 1500);
   }, []);
 
   const saveCatchEntries = useCallback(async (newEntries) => {
     setCatchEntries(newEntries);
     setSaveStatus('saving');
+    let st = 'error';
     try {
-      const ok = await window.storage.set("creative-catch", JSON.stringify(newEntries));
-      setSaveStatus(ok ? 'saved' : 'error');
-    } catch { setSaveStatus('error'); }
-    setTimeout(() => setSaveStatus('idle'), 1500);
+      const where = await window.storage.set("creative-catch", JSON.stringify(newEntries));
+      st = where === 'cloud' ? 'saved' : where ? 'device' : 'error';
+    } catch { st = 'error'; }
+    setSaveStatus(st);
+    if (st === 'saved') setTimeout(() => setSaveStatus('idle'), 1500);
   }, []);
 
   const today = new Date();
@@ -7898,10 +8486,11 @@ const pCheckKey = (key) => {
 };
 
 // Returns { data, missing, error }. "missing" = no doc; "error" = doc exists but unreadable / read failed.
+// Reads the whole history (sealed parts included) through window.storage.getAll.
 async function pRead(key) {
   pCheckKey(key);
   try {
-    const r = await window.storage.get(key);
+    const r = await (window.storage.getAll || window.storage.get)(key);
     if (!r || r.value == null || r.value === '') return { data: null, missing: true, error: null };
     try { return { data: JSON.parse(r.value), missing: false, error: null }; }
     catch (e) { return { data: null, missing: false, error: 'unreadable (not valid JSON)' }; }
@@ -7910,12 +8499,19 @@ async function pRead(key) {
   }
 }
 
+// Returns 'cloud' or 'device-only' (only this device has it; it uploads later). Throws if nothing was stored.
 async function pWrite(key, obj) {
   pCheckKey(key);
-  const ok = await window.storage.set(key, JSON.stringify(obj));
-  if (!ok) throw new Error('Save failed — nothing was stored. Try again.');
-  return true;
+  const where = await window.storage.set(key, JSON.stringify(obj));
+  if (!where) throw new Error('Save failed — nothing was stored. Try again.');
+  return where;
 }
+
+// Where each doc returned by pUpdate was saved, for the message after it.
+const pWhere = new WeakMap();
+const pSavedMsg = (doc, msg) => (pWhere.get(doc) === 'device-only'
+  ? `⚠️ ${msg} — on this device only, not in the cloud yet`
+  : `✅ ${msg}`);
 
 // All writes go through one queue so two quick taps never race each other.
 let __pQueue = Promise.resolve();
@@ -7937,7 +8533,8 @@ function pUpdate(key, makeEmpty, mutate) {
       if (!base) throw new Error(`${key} doesn't exist yet; not creating it from the app.`);
     }
     const next = mutate(JSON.parse(JSON.stringify(base)));
-    await pWrite(key, next);
+    const where = await pWrite(key, next);
+    if (next && typeof next === 'object') pWhere.set(next, where);
     return next;
   });
 }
@@ -8406,7 +9003,8 @@ const pOnline = () => (typeof navigator === 'undefined' || navigator.onLine !== 
 
 const P_ASK_KINDS = { 'stuck': 'Ask Claude', 'stuck-else': 'Something else', 'coach-me': 'Coach me', 'outside': 'Look outside', 'draft-shobha': 'Draft for Dr. Shobha' };
 
-// Appends one record of a Claude reply to practice:asks:<today>. Append-only; never throws; true if saved.
+// Appends one record of a Claude reply to practice:asks:<today>. Append-only; never throws.
+// Returns 'cloud', 'device-only' or false (not saved).
 async function pSaveAsk(ask, prompt, data, model) {
   try {
     const content = Array.isArray(data?.content) ? data.content : [];
@@ -8427,12 +9025,12 @@ async function pSaveAsk(ask, prompt, data, model) {
       tools: content.filter(b => b && b.type === 'tool_use').map(b => ({ name: b.name, input: b.input ?? null })),
       sources, model: data?.model || model, usage,
     };
-    await pUpdate(P_KEYS.asks(pDayKey(now)), () => ({ date: pLocalISO(now), entries: [] }), (doc) => {
+    const doc = await pUpdate(P_KEYS.asks(pDayKey(now)), () => ({ date: pLocalISO(now), entries: [] }), (doc) => {
       if (!Array.isArray(doc.entries)) doc.entries = [];
       doc.entries.push(rec);
       return doc;
     });
-    return true;
+    return pWhere.get(doc) || 'cloud';
   } catch (_) { return false; }
 }
 
@@ -8495,6 +9093,7 @@ async function pLookOutside(words, log) {
 // Shown under every answer from Claude.
 function PSaved({ saved }) {
   if (saved === undefined) return null;
+  if (saved === 'device-only') return <div style={{ fontSize: 12, color: PC.muted, marginTop: 6 }}>Saved to today's answers on this device only, not in the cloud yet.</div>;
   return saved
     ? <div style={{ fontSize: 12, color: PC.muted, marginTop: 6 }}>Saved to today's answers.</div>
     : <PNote msg="❌ This answer didn't save. Take a screenshot before you leave this screen." />;
@@ -9562,7 +10161,7 @@ function PracticeApp() {
       const doc = await pAppendLog(entry);
       setData(d => ({ ...d, todayLog: doc, todayLogError: null, dayKey: pDayKey() }));
       const name = pFindPractice(data.playbook, entry.practiceId)?.name || entry.practiceId;
-      flash(`✅ Logged: ${name}${pLevel(entry.level) != null ? ` · level ${pLevel(entry.level)}` : ''}`);
+      flash(pSavedMsg(doc, `Logged: ${name}${pLevel(entry.level) != null ? ` · level ${pLevel(entry.level)}` : ''}`));
       return true;
     } catch (e) {
       flash(`❌ ${e.message}`);
@@ -9582,7 +10181,7 @@ function PracticeApp() {
         return doc;
       });
       setData(d => ({ ...d, playbook: pb }));
-      flash(`✅ Status changed to ${to}`);
+      flash(pSavedMsg(pb, `Status changed to ${to}`));
       return true;
     } catch (e) { flash(`❌ ${e.message}`); return false; }
   };
@@ -9597,7 +10196,7 @@ function PracticeApp() {
         return doc;
       });
       setData(d => ({ ...d, homework: hw }));
-      flash('✅ Update added');
+      flash(pSavedMsg(hw, 'Update added'));
       return true;
     } catch (e) { flash(`❌ ${e.message}`); return false; }
   };
@@ -9605,12 +10204,12 @@ function PracticeApp() {
   // Stuck layer c: append a proposal to the outside map (never to the playbook).
   const saveProposal = async (theme, options) => {
     try {
-      await pUpdate(P_KEYS.outside, () => ({ items: [] }), (doc) => {
+      const saved = await pUpdate(P_KEYS.outside, () => ({ items: [] }), (doc) => {
         doc.items = Array.isArray(doc.items) ? doc.items : [];
         doc.items.push({ theme, since: pLocalISO(), owners: [], options });
         return doc;
       }).then(doc => { setData(d => ({ ...d, outside: doc, outsideMissing: false })); return doc; });
-      flash('✅ Saved to Gaps as a proposal');
+      flash(pSavedMsg(saved, 'Saved to Gaps as a proposal'));
       return true;
     } catch (e) { flash(`❌ ${e.message}`); return false; }
   };
@@ -9623,7 +10222,7 @@ function PracticeApp() {
         return d;
       });
       setData(d => ({ ...d, queue: doc, queueMissing: false }));
-      flash('✅ Added to the queue');
+      flash(pSavedMsg(doc, 'Added to the queue'));
       return true;
     } catch (e) { flash(`❌ ${e.message}`); return false; }
   };
@@ -9639,7 +10238,7 @@ function PracticeApp() {
         return d;
       });
       setData(d => ({ ...d, queue: doc }));
-      flash('✅ Marked covered');
+      flash(pSavedMsg(doc, 'Marked covered'));
       return true;
     } catch (e) { flash(`❌ ${e.message}`); return false; }
   };
@@ -9652,7 +10251,7 @@ function PracticeApp() {
         return d;
       });
       setData(d => ({ ...d, outside: doc, outsideMissing: false }));
-      flash('✅ Gap added');
+      flash(pSavedMsg(doc, 'Gap added'));
       return true;
     } catch (e) { flash(`❌ ${e.message}`); return false; }
   };
@@ -9874,9 +10473,10 @@ const nwBackupSummary = (backup, content) => {
     (backup.source === 'this-device' ? " · The database couldn't be read, so only this device's copy was used." : '');
 };
 
-// Restores a backup file. Format 2: each doc by its ID (window.storage.setDoc). Older files with a
-// {key: value} data map: window.storage.set per key, as before. Asks first.
-// Returns { cancelled } | { error } | { restored, failed: [ids], count }.
+// Restores a backup file. Format 2: each doc by its ID (window.storage.setDoc), pieces of split values
+// and sealed parts first, so a doc never points at pieces that aren't back yet. Older files with a
+// {key: value} data map: window.storage.set per key (allowed to write read-only docs). Asks first.
+// Returns { cancelled } | { error } | { restored, failed: [ids], deviceOnly: [keys], count }.
 async function nwRestoreBackup(d) {
   const isV2 = !!d && d.format === 2 && Array.isArray(d.docs);
   const isOld = !isV2 && !!d && d.data && typeof d.data === 'object' && !Array.isArray(d.data);
@@ -9885,10 +10485,12 @@ async function nwRestoreBackup(d) {
   const t = d.timestamp ? new Date(d.timestamp) : null;
   const when = t && !isNaN(t) ? t.toLocaleString() : 'an unknown date';
   if (!window.confirm(`Restore ${count} item${count === 1 ? '' : 's'} from the backup made ${when}? Each one replaces the current copy of that item.`)) return { cancelled: true };
-  const failed = [];
+  const failed = [], deviceOnly = [];
   let restored = 0;
   if (isV2) {
-    for (const doc of d.docs) {
+    const rank = (doc) => { const f = (doc && doc.fields) || {}; return f.splitOf ? 0 : f.sealed ? 1 : 2; };
+    const ordered = d.docs.map((doc, i) => ({ doc, i })).sort((a, b) => rank(a.doc) - rank(b.doc) || a.i - b.i).map(x => x.doc);
+    for (const doc of ordered) {
       const id = doc && typeof doc.id === 'string' ? doc.id : null;
       let ok = false;
       try { ok = !!id && !!doc.fields && typeof doc.fields === 'object' && (await window.storage.setDoc(id, doc.fields)) === true; } catch (_) { ok = false; }
@@ -9896,15 +10498,61 @@ async function nwRestoreBackup(d) {
     }
   } else {
     for (const [k, v] of Object.entries(d.data)) {
-      let ok = false;
-      try { ok = !!(await window.storage.set(k, v)); } catch (_) { ok = false; }
-      if (ok) restored++; else failed.push(k);
+      let where = false;
+      try { where = await window.storage.set(k, v, { restore: true }); } catch (_) { where = false; }
+      if (where === 'device-only') deviceOnly.push(k);
+      if (where) restored++; else failed.push(k);
     }
   }
-  return { restored, failed, count };
+  return { restored, failed, deviceOnly, count };
 }
 window.nwGatherBackup = nwGatherBackup;
 window.nwRestoreBackup = nwRestoreBackup;
+
+// System tab: every doc and part with its size as a % of Firestore's 1,048,576-byte limit, largest first.
+function NwDocSizes({ active }) {
+  const [st, setSt] = useState({ busy: false, rows: null, err: '' });
+  const asked = useRef(false);
+  const load = async () => {
+    setSt({ busy: true, rows: null, err: '' });
+    let raw = null;
+    try { raw = await window.storage?.exportRawDocs?.(); } catch (_) { raw = null; }
+    if (!Array.isArray(raw)) { setSt({ busy: false, rows: null, err: "The database couldn't be read, so the sizes can't be shown." }); return; }
+    const limit = window.storage?.LIMIT || 1048576;
+    const bytesOf = window.storage?.docBytes || ((id, f) => new Blob([id + JSON.stringify(f)]).size);
+    const rows = raw.map(d => {
+      const bytes = bytesOf(d.id, d.fields);
+      return { id: d.id, kind: window.storage?.kindOf ? window.storage.kindOf(d.id, d.fields) : '', bytes, pct: bytes / limit * 100 };
+    }).sort((a, b) => b.bytes - a.bytes || (a.id < b.id ? -1 : 1));
+    setSt({ busy: false, rows, err: '' });
+  };
+  useEffect(() => { if (active && !asked.current) { asked.current = true; load(); } }, [active]);
+  const cell = { padding: '6px 4px', borderBottom: '1px solid #2a2a2a', verticalAlign: 'top' };
+  return (
+    <div style={{ background: '#1a1a1a', padding: 16, borderRadius: 12, border: '1px solid #333', marginTop: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <div style={{ flex: 1, color: '#aaa', fontSize: 11, letterSpacing: 1 }}>DOC SIZES (LIMIT 1,048,576 BYTES)</div>
+        <button onClick={load} disabled={st.busy} style={{ background: 'transparent', color: '#4ECDC4', border: '1px solid #4ECDC4', borderRadius: 6, padding: '6px 10px', fontSize: 11, fontFamily: 'inherit', cursor: 'pointer' }}>{st.busy ? 'Reading…' : 'Refresh'}</button>
+      </div>
+      <div style={{ fontSize: 11, color: '#888', marginBottom: 8, lineHeight: 1.5 }}>No doc is written above 900,000 bytes (86%). Growing data moves its oldest entries to sealed parts; anything else is split into pieces.</div>
+      {st.err && <div style={{ fontSize: 12, color: '#fca5a5' }}>{st.err}</div>}
+      {st.rows && (
+        <table data-nw-sizes style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, tableLayout: 'fixed' }}>
+          <thead><tr style={{ color: '#888', textAlign: 'left' }}><th style={cell}>Doc</th><th style={{ ...cell, width: 64, textAlign: 'right' }}>Size</th><th style={{ ...cell, width: 64, textAlign: 'right' }}>% of limit</th></tr></thead>
+          <tbody>
+            {st.rows.map(r => (
+              <tr key={r.id} style={{ color: r.bytes >= 765000 ? '#fbbf24' : '#ddd' }}>
+                <td style={{ ...cell, overflowWrap: 'anywhere' }}>{r.id}{r.kind && r.kind !== 'doc' ? <div style={{ color: '#888', fontSize: 10 }}>{r.kind}</div> : null}</td>
+                <td style={{ ...cell, textAlign: 'right' }}>{r.bytes >= 1024 ? `${Math.round(r.bytes / 1024)} KB` : `${r.bytes} B`}</td>
+                <td style={{ ...cell, textAlign: 'right' }}>{r.pct.toFixed(1)}%</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
 
 function App() {
   const [activeTab, setActiveTab] = useState('roulette');
@@ -9954,6 +10602,7 @@ function App() {
   const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
   const DRIVE_FOLDER_NAME = "Nikhil's World Backups";
 
+  // ══ NW-TOKEN-CACHE START ══ (the only localStorage write outside the storage layer)
   // ── TOKEN PERSISTENCE ─────────────────────────────────────────
   // Caches the Drive OAuth access token in localStorage so the iPad PWA
   // doesn't prompt for Google auth on every sync. Token lifetime is ~1hr.
@@ -9979,6 +10628,7 @@ function App() {
   const clearCachedToken = () => {
     try { localStorage.removeItem(TOKEN_KEY); } catch {}
   };
+  // ══ NW-TOKEN-CACHE END ══
 
   const exportSystem = async () => {
     setBackupStatus('Gathering data...');
@@ -10202,6 +10852,7 @@ function App() {
         if (res.cancelled) setBackupStatus('Restore cancelled. Nothing was changed.');
         else if (res.error) setBackupStatus('Error: ' + res.error);
         else if (res.failed.length) setBackupStatus(`❌ Restored ${res.restored} of ${res.count}. These failed: ${res.failed.join(', ')}`);
+        else if (res.deviceOnly?.length) setBackupStatus(`⚠️ Restored ${res.restored} item${res.restored === 1 ? '' : 's'}, but these are on this device only, not in the cloud yet: ${res.deviceOnly.join(', ')}. Refresh to reload data.`);
         else setBackupStatus(`Restored ${res.restored} item${res.restored === 1 ? '' : 's'}! Refresh to reload data.`);
       } catch (err) { setBackupStatus('❌ Restore failed: ' + (err?.message || err)); }
     };
@@ -10216,6 +10867,8 @@ function App() {
 
   return (
     <div style={{ background: '#0f0f0f', height: '100vh', width: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+
+      {window.NwStorageBanners && <window.NwStorageBanners />}
 
       <div style={paneStyle('roulette')}><CreativeRoulette /></div>
       <div style={paneStyle('kaizen')}><KaizenApp /></div>
@@ -10296,7 +10949,7 @@ function App() {
                 // Validate: should have date keys like "2026-..."
                 const dateKeys = Object.keys(paste).filter(k => /^\d{4}-\d{2}-\d{2}$/.test(k));
                 if (dateKeys.length === 0) throw new Error('No date entries found (expected keys like "2026-04-27")');
-                window.storage.get('nikhil-food-log-v1').then(existing => {
+                (window.storage.getAll || window.storage.get)('nikhil-food-log-v1').then(existing => {
                   const base = existing?.value ? JSON.parse(existing.value) : {};
                   // Non-destructive per-date merge: pasted fields win, but fields the
                   // paste omits (e.g. meals/health when only backfilling `nutrients`)
@@ -10307,9 +10960,12 @@ function App() {
                       ? { ...base[dk], ...paste[dk] }
                       : paste[dk];
                   }
-                  window.storage.set('nikhil-food-log-v1', JSON.stringify(merged)).then(() => {
+                  window.storage.set('nikhil-food-log-v1', JSON.stringify(merged)).then((where) => {
+                    if (!where) { setBackupStatus("❌ Merge not saved. Nothing was stored; try again."); return; }
                     document.getElementById('foodlog-paste-area').value = '';
-                    setBackupStatus(`✅ Merged ${dateKeys.length} date(s) into food log. Refresh Fuel tab.`);
+                    setBackupStatus(where === 'cloud'
+                      ? `✅ Merged ${dateKeys.length} date(s) into food log. Refresh Fuel tab.`
+                      : `⚠️ Merged ${dateKeys.length} date(s) into food log on this device only, not in the cloud yet. Refresh Fuel tab.`);
                     setTimeout(() => setBackupStatus(''), 5000);
                   });
                 });
@@ -10325,7 +10981,10 @@ function App() {
             {backupStatus}
           </div>
         )}
+        <NwDocSizes active={activeTab === 'system'} />
       </div>
+
+      {window.NwSaveStatusLine && <window.NwSaveStatusLine />}
 
       <nav style={{ background: '#1a1a1a', borderTop: '1px solid #333', paddingBottom: 'env(safe-area-inset-bottom)', flexShrink: 0, position: 'relative', zIndex: 9999 }}>
         <div style={{ maxWidth: 720, margin: '0 auto', display: 'flex' }}>

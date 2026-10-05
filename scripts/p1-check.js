@@ -24,6 +24,10 @@ const isBlocked = (url) => !FONTS.test(url) && BLOCK.some(re => re.test(url));
 
 // fakeFirestore: { docId: {value, key?} } — instead of mocking window.storage, run the page's REAL
 // window.storage against an in-memory stand-in for the Firestore compat API (the real SDK stays blocked).
+// In that mode the page also gets window.__fakeFail = (op, id, data) => null | 'reject' | 'hang' | Error
+// (set by a test) to make a cloud write or read fail, never settle, or (a Promise) land only when that
+// Promise resolves; and window.__fakeOrder, the order
+// of every write ('set id' / 'delete id').
 async function openPage({ seed = {}, now = null, proxy = null, offline = false, timezoneId = 'America/Anchorage', noList = false, fakeFirestore = null } = {}) {
   const browser = await chromium.launch({
     proxy: process.env.HTTPS_PROXY ? { server: process.env.HTTPS_PROXY } : undefined,
@@ -94,6 +98,17 @@ async function openPage({ seed = {}, now = null, proxy = null, offline = false, 
     if (fakeFirestore) {
       const docs = new Map(Object.entries(fakeFirestore));
       const calls = [];
+      const order = [];
+      window.__fakeFail = null;
+      // A test can make one op fail ('reject' or an Error) or never settle ('hang').
+      const gate = (op, id, data, apply) => {
+        const f = typeof window.__fakeFail === 'function' ? window.__fakeFail(op, id, data) : null;
+        if (f === 'hang') return new Promise(() => {});
+        if (f && typeof f.then === 'function') return f.then(() => apply());
+        if (f === 'reject') return Promise.reject(Object.assign(new Error('Document exceeds the maximum size'), { code: 'invalid-argument' }));
+        if (f instanceof Error) return Promise.reject(f);
+        return null;
+      };
       const ID = '__name__';
       const snapOf = (list) => ({ docs: list, forEach: (fn) => list.forEach(fn) });
       const docSnap = (id) => ({ id, exists: docs.has(id), data: () => docs.get(id) });
@@ -107,8 +122,21 @@ async function openPage({ seed = {}, now = null, proxy = null, offline = false, 
       });
       const coll = {
         doc: (id) => ({
-          get: async () => { calls.push(['get', id]); return docSnap(id); },
-          set: async (v) => { calls.push(['set', id]); docs.set(id, v); },
+          get: () => { calls.push(['get', id]); return gate('get', id) || Promise.resolve(docSnap(id)); },
+          // Stored as given (Dates stay Dates), like the SDK; merge isn't used by the app.
+          set: (v) => {
+            calls.push(['set', id]);
+            const apply = () => { order.push('set ' + id); docs.set(id, v); };
+            const g = gate('set', id, v, apply);
+            if (g) return g;
+            try { apply(); } catch (e) { return Promise.reject(e); }
+            return Promise.resolve();
+          },
+          delete: () => {
+            calls.push(['delete', id]);
+            const apply = () => { order.push('delete ' + id); docs.delete(id); };
+            return gate('delete', id, null, apply) || (apply(), Promise.resolve());
+          },
         }),
         where: (f, op, v) => query([[f, op, v]]),
         get: async () => { calls.push(['getAll']); return snapOf([...docs.keys()].map(docSnap)); },
@@ -119,13 +147,15 @@ async function openPage({ seed = {}, now = null, proxy = null, offline = false, 
       window.firebase = { apps: [], initializeApp() { this.apps.push({}); }, firestore: fs };
       window.__fakeDocs = docs;
       window.__fakeCalls = calls;
+      window.__fakeOrder = order;
       return;
     }
     const mem = new Map(Object.entries(seed));
     const log = [];
     const mock = {
       get: async (key) => { log.push(['get', key]); return mem.has(key) ? { value: mem.get(key) } : null; },
-      set: async (key, value) => { log.push(['set', key]); mem.set(key, value); return true; },
+      getAll: async (key) => { log.push(['get', key]); return mem.has(key) ? { value: mem.get(key) } : null; },
+      set: async (key, value) => { log.push(['set', key]); mem.set(key, value); return 'cloud'; },
       exportAll: async () => null,
       exportAllDocs: async () => null,
       isCloudReady: () => false,

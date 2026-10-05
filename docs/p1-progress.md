@@ -6,6 +6,8 @@ Branch: `claude/kind-shannon-6i3pkk` (steps 1–4, merged in PR #12). Build pass
 
 All 4 steps are committed, plus one follow-up Nikhil asked for after reviewing: Learn counts reps of all time, and Waking up logs him as up when he taps "I'm up and moving".
 
+**Storage pass** is on `claude/youthful-lamport-5w0r7u` as a draft PR (see "Storage pass" below): honest saves, an upload queue, seal-and-continue, split values, a size table, CLAUDE.md and docs/DATA-FORMAT.md.
+
 **Build pass (after the Oct 4 review)** is committed on `claude/optimistic-darwin-qyqw7c` as a draft PR: every Claude answer is saved, prompt caching on the system block, backups cover the whole database, and the Practice fix pass. Nothing is merged.
 
 ## Build pass (Oct 4 review)
@@ -16,6 +18,18 @@ All 4 steps are committed, plus one follow-up Nikhil asked for after reviewing: 
 | B. Prompt caching | `system: [{type:'text', text, cache_control:{type:'ephemeral'}}]`; no top-level caching, no beta header. Older tests now read `call.system[0].text`. | exact block shape; request still has only the spec fields |
 | C. Whole-database backups | `window.storage.exportRawDocs()` (every doc, all fields, Timestamps → ISO, null on failure) and `window.storage.setDoc(id, fields)` (restore by ID; localStorage mirror only when `sanitiseKey(fields.key) === id`). Top-level `nwGatherBackup()` → `{backup:{format:2, timestamp, source, count, docs}, fingerprint}`, falling back to this device's keys minus `/^(gdrive_token\|firebase\|__)\|token/i`. Download Backup and Sync to Drive both use it (`STORAGE_KEYS` deleted); silent sync skips an unchanged fingerprint; multipart up to 4.5 MB, resumable above. `nwRestoreBackup(d)` confirms first, restores format 2 by ID and old `data` maps by key, reports failures by id. | real `window.storage` against the fake Firestore: every doc incl. an archive, an unknown doc and an extra field; Timestamps/Dates → ISO; same docs → same fingerprint, changed doc → different; restore by ID with fresh `updatedAt`/`restoredAt`; restoring an archive leaves the active key's device copy alone; cancel writes nothing; failures by id; old-format file; Download Backup file + status; Sync to Drive against a faked Drive API (multipart under 4.5 MB, resumable POST + PUT over it); fallback excludes the token and Firebase/internal keys and says "only this device's copy" |
 | D. Fix pass | Waking levels only while waking up: in-bed Stuck situations skip post4, others show it any time (minimum-level situations too); post4 filter removed from Ask Claude; voice rule reworded; Waking up button only 04:00–11:59 and hidden after level ≥ 4 or a post4 rep; fixed alternates list ending in "No more alternates."; new standing + dizzy step; Coach me lights-out window (yesterday ≥ 18:00, today < 06:00); numeric-string levels; entries with no time. | 15:00 with no level (non-bed keeps post4, in-bed drops it, Ask Claude keeps a post4 pick, grief shown); button at 01:00 / 04:00 / 13:00 / after a post4 rep / after level "4"; level "4" in the log and context line; seven-minute-waking as not-working walks the full list in order; standing + dizzy; 00:40 bedtime-plan with the clock at 07:00; an entry with no time on Today and in the context line |
+
+## Storage pass (no save lost to the size limit; honest saves)
+
+Branch: `claude/youthful-lamport-5w0r7u`, draft PR. Precondition: main contains PR #13 (`grep -c "exportRawDocs" index.html` → 2). ✅
+
+| Part | What changed | How checked (`storage-test.js`) |
+|------|--------------|------------------|
+| 1. Honest saves | `window.storage.set` returns `'cloud' \| 'device-only' \| false`; a cloud write not settled in 15 s counts as device-only. localStorage stays the backup copy. Every caller updated: `useDebouncedPersist` (Fuel, Vitals) and Kaizen pills show "This device only"; Practice messages, Claude-answer note, transition log, session notes, foci, big-picture note, creative log/catch, food merge and old-format restore say "on this device only" instead of "saved". One banner on every tab: "<what> saved on this device only, not in the cloud. Reason: <reason>." | rejected write → Practice message and Kaizen pill don't say saved; exact banner text; banner + status line on all 7 tabs; set returns `'device-only'`/`'cloud'`; still pending at 14 s, device-only at 15.0 s; a timed-out write that lands later leaves the queue; offline → device-only at once; cloud rejected + device full → `false` and a "not saved" banner; device full but cloud OK → `'cloud'`, stale device copy removed |
+| 2. Upload queue + status line | `__nw_upload_queue` (latest value per key, in save order) uploads on `online` and at app start. Before each upload the cloud copy is read: if it changed after this device's copy, it is kept and the device version goes to `<id>__conflict_<timestamp>` with a banner; later saves of that key stay on the device until reload. Status line on every tab: "All saved · last cloud save <time>" / "<n> waiting to upload". | order q:b → q:c → q:a; newer cloud copy untouched, conflict copy fields; banner clears when the queue empties; status line both forms; held key after a conflict; reload → queue uploads at start, a newer cloud copy wins there too |
+| 3. Nothing hits the limit | Every write measured in UTF-8 bytes by Firestore's rules. **Seal and continue** (array, `{entries}`, date-keyed): over 800,000 bytes the oldest items go to `<id>__part_<n>` (written and confirmed first) until the active doc is under 400,000; trim + parts list in one write; sealed parts read-only except restore; items repeated unchanged from a part are dropped on save. `storage.getAll(key)` merges parts + active; history screens use it. **Split** any other value over 900,000 bytes into `<id>__split_<gen>_<i>` (new pieces, then pointer, then delete old). Banner at ≥ 85% of 900,000 on any doc. Kaizen's `rolloverLogsIfNeeded`/`loadAllArchives` removed; `kaizen3_logs`, `kaizen3_logs_archive_*`, `kaizen4_logs_archive_*` read in place as sealed parts. System tab: size table (every doc and part, % of 1,048,576, largest first). `docs/DATA-FORMAT.md`. | each shape: part written before trim, active < 400,000, part fields + range, getAll exact, whole history saved back seals nothing twice, set refuses the part; newest-first array; 2.4 MB import → 4 parts ≤ 650,000; 87% banner; Kaizen Reflect shows all three kinds of old archive + active; a Kaizen edit writes only `kaizen4_logs`; Kaizen's own save seals an 860 KB log; split 950 KB with emoji round-trips exactly; failed piece / failed pointer write → old value intact, new pieces removed; size table complete, sorted, fits 390 px; backup holds every part and piece; restore writes pieces/parts first, values exact afterwards |
+| 4. Rules | `CLAUDE.md`; `scripts/storage-layer-check.js` fails on `db.collection(...)`/Firestore writes or `localStorage.setItem` outside `NW-STORAGE-LAYER` and `NW-TOKEN-CACHE`; `scripts/harness.js` runs everything. | real file passes; injected `.set`, `.delete` and `setItem` fail; inside the token cache passes; missing marker fails |
+| 5. Kaizen task loading | unchanged (`storageGet(SK.tasks)` and its status-field rewrite) | — |
 
 ## Precondition
 
@@ -53,8 +67,11 @@ All go through `pRead` / `pWrite`, which throw on any key not starting with `pra
 ## How checks are run
 
 ```
+NODE_PATH=$(npm root -g) node scripts/harness.js      # everything below, plus the api.anthropic.com check
 NODE_PATH=$(npm root -g) node scripts/p1-check.js     # page load, nav, console errors
-NODE_PATH=$(npm root -g) node scripts/p1-test.js all  # all scenarios (or 2 / 3 / 4 for one step)
+NODE_PATH=$(npm root -g) node scripts/p1-test.js all  # all scenarios (or 2 / 3 / 4 / 5 for one step)
+NODE_PATH=$(npm root -g) node scripts/storage-test.js all  # storage layer (or 1–7 for one part)
+node scripts/storage-layer-check.js                   # no Firestore/localStorage writes outside the layer
 ```
 
 The harness loads index.html in headless Chromium with:
@@ -76,6 +93,8 @@ Console errors from the deliberately blocked requests are not counted; any other
 
 - Build pass: `p1-test.js all` → 323 passed, 0 failed (steps 2–5). `p1-check.js` → console errors: none. `grep -c "api.anthropic.com" index.html` → 0. The live Firestore was not touched: backups and restores ran only against the harness's in-memory fake Firestore, and Drive only against a faked Drive API.
 
+- Storage pass: `node scripts/harness.js` → api.anthropic.com in index.html: 0 · storage-layer check: ok · page load: no console errors · `p1-test.js all`: 323 passed, 0 failed (same as before the change) · `storage-test.js all`: 98 passed, 0 failed. Screenshots at 390×844 reviewed (Practice with the device-only banner and status line; System with the size table and an 87% banner). The live Firestore was not touched: every check ran against the in-memory mock or the fake Firestore.
+
 ## Not checked
 
 - The real AI proxy was never called; every request went to a local fake. The request bodies were checked field by field, but the live proxy's replies (for example, whether it allows `web_search`) were not.
@@ -83,6 +102,8 @@ Console errors from the deliberately blocked requests are not counted; any other
 
 - Build pass: silent Drive sync skipping an unchanged fingerprint wasn't exercised (it runs on a 5-minute timer in the App shell); manual syncs were. Resumable upload was checked against a fake Drive API, not real Drive (in particular, that Drive's CORS response exposes the `Location` header to the browser). `exportRawDocs` was checked with Date objects and objects with `toDate()`, not the real Firestore SDK's Timestamp class.
 
+- Storage pass: the 15-second limit, offline detection and conflicts were checked against the fake Firestore, not the real SDK (whose offline behaviour may differ: it can hold a write and send it later, which is handled but only simulated). Two devices editing the same key at the same moment while one of them seals is last-writer-wins for the active doc, as before; nothing in a sealed part is lost, but a plain array without `id` fields could show an item twice in `getAll`. Kaizen's task list still loads with `get` (item 5): if `kaizen3:tasks` ever passed 800,000 bytes, its oldest tasks would move to a sealed part that the Tasks view doesn't show (they stay in `getAll`, the size table and backups; the 85% banner warns first).
+
 ## Next step
 
-Nikhil reviews the draft PR. Nothing is left in the spec to build.
+Nikhil reviews the draft PR for the storage pass. Nothing is merged.
