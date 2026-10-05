@@ -180,6 +180,7 @@ async function step2() {
 }
 
 
+const sysText = (call) => (Array.isArray(call?.system) && call.system[0] ? call.system[0].text : '');
 const toolUse = (picks) => ({ status: 200, json: { content: [{ type: 'text', text: 'ok' }, { type: 'tool_use', id: 't1', name: 'choose_practices', input: { picks } }] } });
 const clickName = (page, name, exact = true) => page.getByRole('button', { name, exact }).first().click();
 async function stepsThrough(page) { // collect step texts in the waking flow, stopping on the last step
@@ -298,12 +299,18 @@ async function step3() {
     await clickName(page, 'Waking up'); await clickName(page, 'Eyes closed'); await clickName(page, 'Next');
     const alts = [];
     for (let i = 0; i < 14; i++) {
+      if (!(await page.getByRole('button', { name: "Didn't work, try another", exact: true }).count())) break;
       await clickName(page, "Didn't work, try another");
       const m = (await visibleText(page)).match(/Step \d+ of \d+\n+([^\n]+)/);
       if (m) alts.push(m[1]);
     }
-    ok(alts.some(a => a === 'Stay propped on your elbows for 30 seconds') && !alts.includes('Then sit up'), "not-working practice lends one single step, never the whole practice");
+    // No seven-minute-waking in these fixtures; countdown is already queued, so only two alternates are left.
+    ok(JSON.stringify(alts) === JSON.stringify(['If you went back under: late is not skipped. Say one self-forgiveness line, then do the next step.', "Say out loud 'I stalled at ___' and fill in the blank."]), 'alternates: fixed list, missing ids and queued text skipped → ' + JSON.stringify(alts));
     ok(!alts.some(a => /Tap the side|Stand still and feel|Kneel on a mat/.test(a)), 'no grief tapping, physio or post4 steps in alternates');
+    t = await visibleText(page);
+    ok(t.includes('No more alternates.') && (await page.getByRole('button', { name: "I'm up and moving", exact: true }).count()) === 1 && (await page.getByRole('button', { name: 'Not yet, start over', exact: true }).count()) === 1, 'list runs out → "No more alternates." with I\'m up and moving + Not yet, start over');
+    await clickName(page, 'Not yet, start over');
+    await clickName(page, 'Eyes closed'); await clickName(page, 'Next');
     // Coach me
     await clickName(page, 'Coach me');
     await page.waitForTimeout(500);
@@ -312,7 +319,7 @@ async function step3() {
     ok(call && call.model === 'claude-sonnet-5-5' && call.max_tokens === 16000 && call.output_config.effort === 'low' && call.tools[0].name === 'choose_practices' && call.tool_choice.type === 'auto', 'Coach me uses the Stuck layer-b call shape');
     ok(Object.keys(call).sort().join(',') === 'max_tokens,messages,model,output_config,system,tool_choice,tools', 'request has only the spec fields');
     ok(/Where: Eyes closed/.test(call.messages[0].content) && /Context: local time/.test(call.messages[0].content), 'TEXT = answers + local time');
-    ok(!/task-drop-reset|grief-release|fall-practice|elbow-prop/.test(call.system) && /countdown \| Countdown 5-4-3-2-1 \| stage:any/.test(call.system), 'index restricted to pre4/stage4/any, no not-working');
+    ok(!/task-drop-reset|grief-release|fall-practice|elbow-prop/.test(sysText(call)) && /countdown \| Countdown 5-4-3-2-1 \| stage:any/.test(sysText(call)), 'index restricted to pre4/stage4/any, no not-working');
     ok(t.includes('Count out loud and sit up on 1.') && !t.includes('post4') && !t.includes('not working'), 'picks filtered in code (post4, not-working, grief dropped)');
     await clickName(page, "I'm up and moving");
     await page.waitForTimeout(300);
@@ -330,14 +337,14 @@ async function step3() {
   {
     const pb = JSON.parse(F.base()['practice:playbook']);
     pb.practices = pb.practices.filter(p => !['passage-of-time', 'countdown'].includes(p.id));
-    pb.practices.find(p => p.id === 'waking-ladder').steps = ['Stay on your side for 30 seconds'];
+    pb.practices.push(F.sevenMinute);
     const ctx = await openPractice({ seed: { ...F.base(), 'practice:playbook': JSON.stringify(pb) }, now: '2026-10-04T07:10:00' });
     await clickName(ctx.page, 'Waking up'); await clickName(ctx.page, 'Eyes closed'); await clickName(ctx.page, 'Next');
     let t = await visibleText(ctx.page);
     ok(t.includes('Step 1 of 1') && t.includes('Sit up and put your feet on the floor.'), 'missing passage-of-time / countdown ids are skipped');
     await clickName(ctx.page, "Didn't work, try another");
     t = await visibleText(ctx.page);
-    ok(t.includes('Stay on your side for 30 seconds') && t.includes('0:30'), 'step naming 30 seconds gets a timer');
+    ok(t.includes('Prop yourself up on your elbows and stay there for 30 seconds.') && t.includes('0:30'), 'seven-minute-waking (not-working) lends its single step first; a step naming 30 seconds gets a timer');
     ok(!(await ctx.page.getByRole('button', { name: 'Done, next', exact: true }).count()) && (await ctx.page.getByRole('button', { name: "I'm up and moving", exact: true }).count()) === 1, "last step: \"I'm up and moving\" replaces \"Done, next\" (one button, no duplicate)");
     ok(!(await mem(ctx.page, 'practice:log:2026_10_04')), 'nothing logged before tapping it');
     await clickName(ctx.page, "I'm up and moving");
@@ -351,7 +358,7 @@ async function step3() {
 
   console.log('\n[Stuck: stuck-map doc]');
   {
-    let reply = toolUse([{ id: 'task-drop-reset', why: 'post4 before level 4' }, { id: 'elbow-prop', why: 'nw' }, { id: 'nope', why: 'x' }, { id: 'thought-stop', why: 'Say stop out loud and look at three things in the room.' }, { id: 'sc-break', why: 'Hand on chest, three sentences.' }, { id: 'one-word', why: 'Write one word.' }]);
+    let reply = toolUse([{ id: 'thought-stop', why: 'Say stop out loud and look at three things in the room.' }, { id: 'task-drop-reset', why: 'Stand still, then name the next task.' }, { id: 'elbow-prop', why: 'nw' }, { id: 'nope', why: 'x' }, { id: 'sc-break', why: 'Hand on chest, three sentences.' }, { id: 'one-word', why: 'Write one word.' }]);
     const seed = { ...F.base(), 'practice:log:2026_10_04': JSON.stringify({ date: '2026-10-04', entries: [{ time: '08:00', practiceId: 'waking-ladder', level: 2, source: 'app' }, { time: '08:30', practiceId: 'sc-break', before: 7, after: 4, source: 'app' }] }) };
     const ctx = await openPractice({ seed, now: '2026-10-04T09:00:00', proxy: async () => reply });
     const { page } = ctx;
@@ -369,7 +376,7 @@ async function step3() {
     ok(i1 > 0 && i2 > i1 && !t.includes('Elbow prop'), 'stored order kept; missing id and not-working skipped');
     await clickName(page, 'Up but frozen');
     t = await visibleText(page);
-    ok(t.includes('Countdown') && !t.includes('Task-drop reset'), 'post4 practice hidden while last waking level < 4');
+    ok(t.includes('Countdown') && t.includes('Task-drop reset'), 'not in bed: post4 practice shown even though the last waking level is 2');
     await clickName(page, 'In bed, not past level 4');
     await clickName(page, 'Waking up, one step at a time');
     ok((await visibleText(page)).includes('Where are you?'), 'Stuck → in bed → Waking up');
@@ -382,17 +389,18 @@ async function step3() {
     const call = ctx.proxyCalls[ctx.proxyCalls.length - 1];
     ok(call.model === 'claude-sonnet-5-5' && call.max_tokens === 16000 && call.output_config.effort === 'low' && call.tool_choice.type === 'auto' && call.tools.length === 1 && call.tools[0].name === 'choose_practices' && call.tools[0].description === 'Choose 1 to 3 practices from the library.', 'Ask Claude request matches the spec');
     ok(Object.keys(call).sort().join(',') === 'max_tokens,messages,model,output_config,system,tool_choice,tools', 'request has only the spec fields');
-    ok(call.system.includes('Call choose_practices with 1 to 3 ids from the library, each with a one-sentence reason in literal physical terms. Library:') && call.system.includes('ten-percent-intercept | 10% intercept | stage:any | when:First sign of bracing in jaw or shoulders') && call.system.includes('task-drop-reset | Task-drop reset | stage:post4 | when:Up but frozen') && !call.system.includes('elbow-prop') && /vessel/.test(call.system), 'SYSTEM = voice rules + instruction + INDEX (now over when, no not-working)');
-    const lines = call.system.split('Library:\n')[1].split('\n');
+    const sys = sysText(call);
+    ok(sys.includes('Call choose_practices with 1 to 3 ids from the library, each with a one-sentence reason in literal physical terms. Library:') && sys.includes('ten-percent-intercept | 10% intercept | stage:any | when:First sign of bracing in jaw or shoulders') && sys.includes('task-drop-reset | Task-drop reset | stage:post4 | when:Up but frozen') && !sys.includes('elbow-prop') && /vessel/.test(sys), 'SYSTEM = voice rules + instruction + INDEX (now over when, no not-working)');
+    const lines = sys.split('Library:\n')[1].split('\n');
     ok(lines.every(l => /^[a-z0-9-]+ \| .+ \| stage:(pre4|stage4|post4|any|-) \| when:.{0,110}$/.test(l)), 'every INDEX line has the spec format, when ≤ 110 chars');
     ok(call.messages.length === 1 && call.messages[0].content.startsWith('I keep rereading the chat from last night\nContext: local time') && /last waking level today: 2/.test(call.messages[0].content) && /sc-break \(before 7, after 4\)/.test(call.messages[0].content), 'TEXT = his words + one context line (time, level, today\'s reps with ratings)');
-    ok(t.includes('Thought stop') && t.includes('Say stop out loud and look at three things') && t.includes('Self-compassion break') && t.includes('One-word container') && !t.includes('post4 before level 4'), 'picks filtered in code: unknown, not-working, post4 dropped; max 3');
+    ok(t.includes('Thought stop') && t.includes('Say stop out loud and look at three things') && t.includes('Task-drop reset') && t.includes('Stand still, then name the next task.') && t.includes('Self-compassion break') && !t.includes('One-word container'), 'picks filtered in code: unknown and not-working dropped, post4 kept; max 3');
     await page.getByRole('button', { name: 'Start' }).first().click();
     await clickName(page, 'Begin'); await clickName(page, 'Next'); await clickName(page, 'Next'); await clickName(page, 'Next');
     await clickName(page, 'Save rep');
     await page.waitForTimeout(300);
     let lg = await memJSON(page, 'practice:log:2026_10_04');
-    ok(lg.entries.length === 3 && lg.entries[2].practiceId === 'thought-stop' && lg.entries[2].source === 'app-stuck', 'rep from a Claude pick saved with source "app-stuck"');
+    ok(lg.entries.length === 3 && lg.entries[2].practiceId === 'thought-stop' && lg.entries[2].source === 'app-stuck' && lg.entries[2].note === 'Asked Claude: "I keep rereading the chat from last night" | Claude: Say stop out loud and look at three things in the room.', 'rep from a Claude pick saved with source "app-stuck" and note Asked Claude: "<words>" | Claude: <why>');
     ok((await visibleText(page)).includes('Where are you right now?'), 'after saving, back on the stuck screen');
     // failures
     reply = { status: 500, json: { error: 'boom' } };
@@ -418,7 +426,7 @@ async function step3() {
     const pbBefore = await mem(page, 'practice:playbook');
     await clickName(page, 'Look outside the playbook'); await page.waitForTimeout(400);
     const call3 = ctx.proxyCalls[ctx.proxyCalls.length - 1];
-    ok(call3.tools.length === 1 && call3.tools[0].type === 'web_search_20250305' && call3.tools[0].name === 'web_search' && call3.tools[0].max_uses === 2 && /3 to 6 numbered literal steps/.test(call3.system) && /vessel/.test(call3.system), 'layer c: web_search tool only, asks for 3–6 numbered steps and sources');
+    ok(call3.tools.length === 1 && call3.tools[0].type === 'web_search_20250305' && call3.tools[0].name === 'web_search' && call3.tools[0].max_uses === 2 && /3 to 6 numbered literal steps/.test(sysText(call3)) && /vessel/.test(sysText(call3)), 'layer c: web_search tool only, asks for 3–6 numbered steps and sources');
     await clickName(page, 'Save as proposal'); await page.waitForTimeout(300);
     const om = await memJSON(page, 'practice:outside-map');
     const it = om.items[om.items.length - 1];
@@ -436,11 +444,11 @@ async function step3() {
     let t = await visibleText(page);
     ok(t.includes('Using the built-in list: the stuck map is missing.'), 'missing doc → built-in default, says so in small text');
     const labels = ['In bed, not past level 4', 'At level 4, eyes open', 'Up but frozen, the drop', 'On edge around someone or a sound', 'Looping, overthinking', 'Harsh on myself', 'Comparing myself', 'After a conflict', "Can't get myself to bed", 'About to leave the house', 'Scared of falling or getting hurt'];
-    ok(labels.every(l => t.includes(l)) && !t.includes('Grief about lost time'), 'all default situations; grief hidden before level 4');
+    ok(labels.every(l => t.includes(l)) && t.includes('Grief about lost time'), 'all default situations; grief (minimum level) shown at any time');
     ok(t.trim().indexOf('Something else') > t.indexOf('Scared of falling'), '"Something else" is last on the list');
     await clickName(page, 'Up but frozen, the drop');
     t = await visibleText(page);
-    ok(t.includes('10% intercept') && t.includes('Countdown 5-4-3-2-1') && !t.includes('Task-drop reset') && !t.includes('Yield, push, reach') && !t.includes('C-see'), 'post4 practices skipped before level 4');
+    ok(t.includes('10% intercept') && t.includes('Countdown 5-4-3-2-1') && t.includes('Task-drop reset') && t.includes('Yield, push, reach') && t.includes('C-see'), 'not in bed: post4 practices shown with no waking level logged');
     await clickName(page, '✕ Close');
     await clickName(page, 'Level 4');
     await page.waitForTimeout(300);
@@ -610,7 +618,9 @@ async function step4() {
     await clickName(page, 'Draft with Claude');
     await page.waitForTimeout(400);
     const call = ctx.proxyCalls[ctx.proxyCalls.length - 1];
-    ok(call && !call.tools && !call.tool_choice && call.model === 'claude-sonnet-5-5' && call.max_tokens === 16000 && call.output_config.effort === 'low' && /vessel/.test(call.system) && call.messages[0].content === expected, 'Draft with Claude: same proxy call, no tools, sends only the message');
+    ok(call && !call.tools && !call.tool_choice && call.model === 'claude-sonnet-5-5' && call.max_tokens === 16000 && call.output_config.effort === 'low' && /vessel/.test(sysText(call)) && call.messages[0].content === expected, 'Draft with Claude: same proxy call, no tools, sends only the message');
+    const drec = (await memJSON(page, 'practice:asks:2026_10_04'))?.entries?.slice(-1)[0];
+    ok(drec && drec.kind === 'draft-shobha' && drec.words === expected && drec.prompt === expected && drec.text.startsWith('Hi Dr. Shobha') && (await visibleText(page)).includes("Saved to today's answers."), 'Draft with Claude: reply saved to practice:asks:<today> as draft-shobha; "Saved to today\'s answers." shown');
     t = await visibleText(page);
     ok(t.includes('Can we talk about Self-compassion break in public?') && !/\bsc-break\b/.test(t.split('Copy WhatsApp message')[1] || ''), "Claude's draft shown with ids swapped for names");
     await page.fill('#pr-queue-add', 'Bring up the cold mornings');
@@ -672,11 +682,403 @@ async function step4() {
   }
 }
 
+
+// Build pass: saved answers (A), prompt caching (B), whole-database backups (C), fix pass (D).
+const asksKey = (iso) => 'practice:asks:' + iso.replace(/-/g, '_');
+const noNullish = (t) => !/\bnull\b|\bundefined\b/.test(t);
+
+async function step5() {
+  console.log('\n[A + B: every Claude answer is saved; system block is cached]');
+  {
+    const words = 'I keep rereading the chat from last night and cannot put the phone down. ' + 'x'.repeat(260);
+    let reply = { status: 200, json: { model: 'claude-sonnet-5-5-20260901', usage: { input_tokens: 1200, output_tokens: 80, cache_creation_input_tokens: 900, cache_read_input_tokens: 0 }, content: [
+      { type: 'text', text: 'Here are ' }, { type: 'text', text: 'three.' },
+      { type: 'tool_use', id: 't1', name: 'choose_practices', input: { picks: [{ id: 'elbow-prop', why: 'not working, filtered' }, { id: 'nope', why: 'unknown, filtered' }, { id: 'thought-stop', why: 'Say stop out loud.' }] } }] } };
+    const yesterdayAsks = { date: '2026-10-03', entries: [
+      { time: '21:15', kind: 'coach-me', words: 'Where: Eyes closed.', prompt: 'p', text: '', tools: [{ name: 'choose_practices', input: { picks: [{ id: 'countdown', why: 'Count and move.' }] } }], sources: [], model: 'm', usage: {} },
+      { kind: 'outside', words: 'An answer with no time', prompt: 'p', text: '1. Step one.', tools: [], sources: [], model: 'm', usage: {} },
+    ] };
+    const seed = { ...F.base(), [asksKey('2026-10-03')]: JSON.stringify(yesterdayAsks) };
+    const ctx = await openPractice({ seed, now: '2026-10-04T09:00:00', proxy: async () => reply });
+    const { page } = ctx;
+    await clickName(page, 'Stuck');
+    await page.getByLabel('Ask Claude', { exact: true }).fill(words);
+    await clickName(page, 'Pick practices for me'); await page.waitForTimeout(500);
+    const call = ctx.proxyCalls[ctx.proxyCalls.length - 1];
+    ok(Array.isArray(call.system) && call.system.length === 1 && call.system[0].type === 'text' && JSON.stringify(call.system[0].cache_control) === '{"type":"ephemeral"}' && Object.keys(call.system[0]).sort().join(',') === 'cache_control,text,type' && call.system[0].text.startsWith('Voice rules:'), 'B: system = [{type:"text", text, cache_control:{type:"ephemeral"}}]');
+    ok(!('cache_control' in call) && call.messages.every(m => typeof m.content === 'string') && Object.keys(call).sort().join(',') === 'max_tokens,messages,model,output_config,system,tool_choice,tools', 'B: no top-level automatic caching; the user message carries no breakpoint');
+    let asks = await memJSON(page, asksKey('2026-10-04'));
+    let r = asks?.entries?.[0];
+    ok(asks && asks.date === '2026-10-04' && asks.entries.length === 1, 'A: reply appended to practice:asks:2026_10_04');
+    ok(r && r.time === '09:00' && r.kind === 'stuck' && r.words === words && r.prompt === call.messages[0].content && r.text === 'Here are three.' && r.model === 'claude-sonnet-5-5-20260901', 'A: record has time, kind, words, prompt (full user text), text (text blocks joined), model');
+    ok(r && JSON.stringify(r.usage) === JSON.stringify({ input_tokens: 1200, output_tokens: 80, cache_creation_input_tokens: 900, cache_read_input_tokens: 0 }), 'A: record has usage incl. cache token counts');
+    ok(r && r.tools.length === 1 && r.tools[0].name === 'choose_practices' && r.tools[0].input.picks.length === 3 && r.tools[0].input.picks[0].id === 'elbow-prop' && r.tools[0].input.picks[1].id === 'nope', 'A: record keeps every pick, including the ones filtered out in code');
+    ok(r && Array.isArray(r.sources) && r.sources.length === 0, 'A: sources empty when there are no citations');
+    let t = await visibleText(page);
+    ok(t.includes("Saved to today's answers.") && t.includes('Say stop out loud.') && !t.includes('not working, filtered'), 'A: "Saved to today\'s answers." under the picks; filtered picks not offered');
+    await page.getByRole('button', { name: 'Start' }).first().click();
+    await clickName(page, 'Begin'); await clickName(page, 'Next'); await clickName(page, 'Next'); await clickName(page, 'Next');
+    await clickName(page, 'Save rep'); await page.waitForTimeout(300);
+    const lg = await memJSON(page, 'practice:log:2026_10_04');
+    ok(words.length > 240 && lg.entries[0].practiceId === 'thought-stop' && lg.entries[0].note === `Asked Claude: "${words.slice(0, 240)}" | Claude: Say stop out loud.`, 'A: rep from a pick logged with note Asked Claude: "<words, max 240 chars>" | Claude: <why>');
+    reply = { status: 500, json: { error: 'x' } };
+    await clickName(page, 'Pick practices for me'); await page.waitForTimeout(400);
+    asks = await memJSON(page, asksKey('2026-10-04'));
+    ok(asks.entries.length === 1 && !(await visibleText(page)).includes("Saved to today's answers."), 'A: a non-200 call saves nothing and shows no save line');
+    reply = { status: 200, json: { content: [{ type: 'text', text: 'Try breathing.' }] } };
+    await clickName(page, 'Pick practices for me'); await page.waitForTimeout(400);
+    asks = await memJSON(page, asksKey('2026-10-04'));
+    r = asks.entries[1];
+    ok(asks.entries.length === 2 && r.text === 'Try breathing.' && r.tools.length === 0 && JSON.stringify(r.usage) === '{}' && r.model === 'claude-sonnet-5-5', 'A: a text-only reply is still saved (model falls back to the one requested)');
+    t = await visibleText(page);
+    ok(t.includes('without choosing practices') && t.includes("Saved to today's answers."), 'A: the failed check is shown, and that the reply was saved anyway');
+    reply = toolUse([{ id: 'countdown', why: 'Count down and move on 1.' }]);
+    await clickName(page, 'Something else');
+    await page.getByLabel('Something else, in your words').fill('Stuck in the shower');
+    await page.getByRole('button', { name: 'Ask Claude', exact: true }).click(); await page.waitForTimeout(400);
+    asks = await memJSON(page, asksKey('2026-10-04'));
+    ok(asks.entries[2]?.kind === 'stuck-else' && asks.entries[2].words === 'Stuck in the shower', 'A: Something else → kind "stuck-else"');
+    reply = { status: 200, json: { content: [
+      { type: 'server_tool_use', id: 's1', name: 'web_search', input: { query: 'x' } },
+      { type: 'web_search_tool_result', tool_use_id: 's1', content: [] },
+      { type: 'text', text: '1. Turn the water colder.\n2. Step out.\n3. Reach for the towel.', citations: [{ type: 'web_search_result_location', title: 'Example Health', url: 'https://example.org/a' }, { type: 'web_search_result_location', title: 'Example Health', url: 'https://example.org/a' }] }] } };
+    await clickName(page, 'Look outside the playbook'); await page.waitForTimeout(400);
+    asks = await memJSON(page, asksKey('2026-10-04'));
+    r = asks.entries[3];
+    ok(r && r.kind === 'outside' && r.words === 'Stuck in the shower' && JSON.stringify(r.sources) === JSON.stringify([{ title: 'Example Health', url: 'https://example.org/a' }]) && r.text.startsWith('1. Turn the water colder.') && r.tools.length === 0, 'A: Look outside → kind "outside" with sources (title + url) and text');
+    t = await visibleText(page);
+    const outPart = t.slice(t.lastIndexOf('Look outside the playbook'));
+    ok(outPart.includes('1. Turn the water colder.') && outPart.includes("Saved to today's answers."), 'A: "Saved to today\'s answers." under the Look outside answer');
+    const btn = page.getByRole('button', { name: /^Show earlier answers from Claude \(\d+\)$/ });
+    ok((await btn.count()) === 1 && (await btn.textContent()) === 'Show earlier answers from Claude (6)', 'A: collapsed "Show earlier answers from Claude (6)" (4 today + 2 yesterday)');
+    ok(!(await visibleText(page)).includes('You: An answer with no time'), 'A: earlier answers start collapsed');
+    ok(t.indexOf('Show earlier answers') > t.lastIndexOf('Look outside the playbook'), 'A: the card sits below Look outside');
+    await btn.click();
+    t = await visibleText(page);
+    const card = t.slice(t.indexOf('Show earlier answers from Claude'), t.indexOf('If thoughts of ending'));
+    const pos = ['Today 09:00 · Look outside', 'Today 09:00 · Something else', 'Today 09:00 · Ask Claude', 'Yesterday 21:15 · Coach me', 'Yesterday · Look outside'].map(x => card.indexOf(x));
+    ok(pos.every((x, i) => x >= 0 && (i === 0 || x > pos[i - 1])), 'A: newest first, "Today/Yesterday HH:MM · <kind>"; an entry without a time shows no time → ' + JSON.stringify(pos));
+    ok(card.includes('You: Stuck in the shower') && card.includes('Countdown 5-4-3-2-1: Count and move.') && card.includes('Thought stop: Say stop out loud.') && card.includes('Try breathing.') && card.includes('1. Step one.'), 'A: each entry shows You: <words>, each pick as <practice name>: <why>, then any text');
+    ok(noNullish(card), 'A: no "null" or "undefined" in the card');
+    await finish(ctx, 'saved-answers', { allowProxyFailure: true });
+  }
+
+  console.log('\n[A: the answers doc is unreadable → shown, never overwritten]');
+  {
+    const seed = { ...F.base(), [asksKey('2026-10-04')]: '{bad' };
+    const ctx = await openPractice({ seed, now: '2026-10-04T09:00:00', proxy: async () => toolUse([{ id: 'countdown', why: 'Count down.' }]) });
+    const { page } = ctx;
+    await clickName(page, 'Stuck');
+    await page.getByLabel('Ask Claude', { exact: true }).fill('test');
+    await clickName(page, 'Pick practices for me'); await page.waitForTimeout(400);
+    let t = await visibleText(page);
+    ok(t.includes('Count down.') && t.includes("❌ This answer didn't save. Take a screenshot before you leave this screen."), 'A: save failed → the answer is still shown, with the screenshot warning');
+    ok((await mem(page, asksKey('2026-10-04'))) === '{bad', 'A: unreadable answers doc not overwritten');
+    await page.getByRole('button', { name: /^Show earlier answers from Claude/ }).click();
+    t = await visibleText(page);
+    ok(t.includes("Today's answers couldn't be read") && t.includes('Nothing was changed.'), 'A: earlier answers card shows the read error');
+    await finish(ctx, 'asks-unreadable');
+  }
+
+  console.log('\n[A + D5 + D6: Coach me, last night\'s lights-out, an entry with no time]');
+  {
+    const seed = { ...F.base(),
+      [k('2026-10-04')]: logDoc('2026-10-04', [{ practiceId: 'sc-break', source: 'routine' }, { time: '00:40', practiceId: 'bedtime-plan', source: 'routine' }]),
+      [k('2026-10-03')]: logDoc('2026-10-03', [{ time: '22:10', practiceId: 'lights-out', source: 'routine' }, { time: '17:30', practiceId: 'bedtime-plan', source: 'routine' }, { practiceId: 'lights-out', source: 'routine' }]),
+    };
+    const ctx = await openPractice({ seed, now: '2026-10-04T07:00:00', proxy: async () => toolUse([{ id: 'countdown', why: 'Count down and sit up on 1.' }]) });
+    const { page } = ctx;
+    let t = await visibleText(page);
+    ok(await page.getByRole('button', { name: 'Waking up', exact: true }).isVisible(), 'D2: 07:00, nothing logged → Waking up button');
+    ok(/LOGGED TODAY \(2\)\nSelf-compassion break\n00:40 Bedtime plan/i.test(t) && noNullish(t), 'D6: an entry with no time is listed without "null"/"undefined"');
+    await clickName(page, 'Waking up'); await clickName(page, 'Eyes closed'); await clickName(page, 'Next');
+    await clickName(page, 'Coach me'); await page.waitForTimeout(500);
+    const call = ctx.proxyCalls[ctx.proxyCalls.length - 1];
+    ok(/; last night's lights-out: 00:40\.$/.test(call.messages[0].content), "D5: Coach me uses today's 00:40 bedtime-plan entry as last night's lights-out → " + JSON.stringify(call.messages[0].content.split('\n')[1]));
+    const r = (await memJSON(page, asksKey('2026-10-04'))).entries[0];
+    ok(r.kind === 'coach-me' && r.words === 'Where: Eyes closed. In the way: nothing picked.' && r.prompt === call.messages[0].content, 'A: Coach me reply saved as kind "coach-me" with his answers as words');
+    ok((await visibleText(page)).includes("Saved to today's answers."), 'A: "Saved to today\'s answers." under the Coach me picks');
+    await page.getByRole('button', { name: 'Start', exact: true }).first().click();
+    await clickName(page, 'Begin'); await clickName(page, 'Next'); await clickName(page, 'Next');
+    await clickName(page, 'Save rep'); await page.waitForTimeout(300);
+    const e = (await memJSON(page, k('2026-10-04'))).entries.slice(-1)[0];
+    ok(e.practiceId === 'countdown' && e.source === 'app-waking' && e.note === 'Asked Claude: "Where: Eyes closed. In the way: nothing picked." | Claude: Count down and sit up on 1.', 'A: rep from a Coach me pick logged with the Asked Claude note');
+    await clickName(page, '✕ Close');
+    await clickName(page, 'Stuck');
+    await page.getByLabel('Ask Claude', { exact: true }).fill('test');
+    await clickName(page, 'Pick practices for me'); await page.waitForTimeout(400);
+    const c2 = ctx.proxyCalls[ctx.proxyCalls.length - 1].messages[0].content;
+    ok(noNullish(c2) && /logged today: sc-break, bedtime-plan, countdown\.$/.test(c2), 'D6: context line sent to Claude has no "null"/"undefined" with an entry missing its time → ' + JSON.stringify(c2.split('\n')[1]));
+    await finish(ctx, 'coach-lights-out');
+  }
+
+  console.log('\n[D1: 15:00, no waking level logged]');
+  {
+    const map = { version: 3, situations: [
+      { id: 'bed', label: 'In bed, not past level 4', practices: ['sf-daily-stall', 'yield-push-reach'] },
+      { id: 'frozen', label: 'Up but frozen', practices: ['task-drop-reset', 'countdown'] },
+      { id: 'grief', label: 'Grief about lost time', practices: ['grief-release'], minLevel: 4 },
+    ] };
+    const seed = { ...F.base(), 'practice:stuck-map': JSON.stringify(map) };
+    const ctx = await openPractice({ seed, now: '2026-10-04T15:00:00', proxy: async () => toolUse([{ id: 'task-drop-reset', why: 'Stand still and name the next task.' }]) });
+    const { page } = ctx;
+    ok(!(await page.getByRole('button', { name: 'Waking up', exact: true }).count()), 'D2: no Waking up button at 15:00');
+    await clickName(page, 'Stuck');
+    await clickName(page, 'In bed, not past level 4');
+    let t = await visibleText(page);
+    ok(t.includes('Self-forgiveness for the daily stall') && !t.includes('Yield, push, reach'), 'D1b: the in-bed situation still drops its post4 practice');
+    await clickName(page, 'Up but frozen');
+    t = await visibleText(page);
+    ok(t.includes('Task-drop reset') && t.includes('Countdown'), 'D1b: a non-bed situation keeps its post4 practice');
+    await clickName(page, 'Grief about lost time');
+    ok((await visibleText(page)).includes('Grief release tapping'), 'D1b: a situation with a minimum level shows at any time');
+    await clickName(page, 'Grief about lost time');
+    await page.getByLabel('Ask Claude', { exact: true }).fill('frozen after class');
+    await clickName(page, 'Pick practices for me'); await page.waitForTimeout(400);
+    t = await visibleText(page);
+    ok(t.includes('Stand still and name the next task.'), 'D1c: Ask Claude keeps a post4 pick');
+    const sys = sysText(ctx.proxyCalls[ctx.proxyCalls.length - 1]);
+    ok(sys.includes('- Physio and grief tapping never while he is still waking up in bed.') && !sys.includes('only after level 4'), 'D1d: new voice rule');
+    await finish(ctx, 'd1-15h');
+  }
+
+  console.log('\n[D2: Waking up button hours and hiding]');
+  for (const [label, now, entries, show] of [
+    ['01:00', '2026-10-04T01:00:00', [], false],
+    ['04:00', '2026-10-04T04:00:00', [], true],
+    ['13:00', '2026-10-04T13:00:00', [], false],
+    ['09:00 after a post4 rep', '2026-10-04T09:00:00', [{ time: '08:30', practiceId: 'task-drop-reset', source: 'app' }], false],
+    ['09:00 after level "4" written outside the app', '2026-10-04T09:00:00', [{ time: '08:30', practiceId: 'waking-ladder', level: '4', source: 'routine' }], false],
+  ]) {
+    const seed = { ...F.base(), ...(entries.length ? { [k('2026-10-04')]: logDoc('2026-10-04', entries) } : {}) };
+    const ctx = await openPractice({ seed, now, proxy: async () => toolUse([{ id: 'countdown', why: 'x' }]) });
+    const { page } = ctx;
+    ok((await page.getByRole('button', { name: 'Waking up', exact: true }).count()) === (show ? 1 : 0), `D2: ${label} → Waking up button ${show ? 'shown' : 'hidden'}`);
+    if (entries[0]?.level === '4') {
+      ok((await visibleText(page)).includes('Waking ladder · level 4'), 'D6: level "4" shown as level 4 in the log');
+      await clickName(page, 'Stuck');
+      await page.getByLabel('Ask Claude', { exact: true }).fill('test');
+      await clickName(page, 'Pick practices for me'); await page.waitForTimeout(400);
+      ok(/last waking level today: 4;/.test(ctx.proxyCalls[ctx.proxyCalls.length - 1].messages[0].content), 'D6: level "4" counts as 4 in the context line');
+    }
+    await finish(ctx, 'd2-' + label);
+  }
+
+  console.log('\n[D3 + D4: alternates with seven-minute-waking not-working; dizzy while standing]');
+  {
+    const pb = JSON.parse(F.base()['practice:playbook']);
+    pb.practices.push(F.sevenMinute);
+    const ctx = await openPractice({ seed: { ...F.base(), 'practice:playbook': JSON.stringify(pb) }, now: '2026-10-04T07:10:00' });
+    const { page } = ctx;
+    await clickName(page, 'Waking up');
+    await clickName(page, 'Standing'); await clickName(page, 'Dizzy or lightheaded'); await clickName(page, 'Next');
+    let t = await visibleText(page);
+    ok(t.includes('Step 1 of 2') && t.includes('Sit down on the nearest surface or hold something solid. 5 slow breaths, then stand up slowly with a hand on something.'), 'D4: Standing + dizzy → sit down or hold something solid');
+    await clickName(page, "I'm up and moving"); await page.waitForTimeout(300);
+    await clickName(page, 'Back to Today');
+    ok(!(await page.getByRole('button', { name: 'Waking up', exact: true }).count()), 'D2: hidden once up');
+    // Fresh start from Stuck → in bed → Waking up (the Today button is gone now).
+    await clickName(page, 'Stuck'); await clickName(page, 'In bed, not past level 4'); await clickName(page, 'Waking up, one step at a time');
+    await clickName(page, 'Propped up or sitting'); await clickName(page, 'Dizzy or lightheaded'); await clickName(page, 'Next');
+    ok((await visibleText(page)).includes('Stay sitting, 5 slow breaths, then stand up slowly with a hand on something.'), 'D4: propped up + dizzy keeps the current text');
+    await clickName(page, "Didn't work, try another"); // replaces the dizzy step; then start over for the full walk
+    await clickName(page, '✕ Close'); await clickName(page, 'Waking up, one step at a time');
+    await clickName(page, 'Eyes open, lying down'); await clickName(page, 'Next');
+    const alts = [];
+    for (let i = 0; i < 12; i++) {
+      if (!(await page.getByRole('button', { name: "Didn't work, try another", exact: true }).count())) break;
+      await clickName(page, "Didn't work, try another");
+      const m = (await visibleText(page)).match(/Step \d+ of \d+\n+([^\n]+)/);
+      if (m) alts.push(m[1]);
+      if (i === 0) ok((await visibleText(page)).includes('0:30'), 'D3: the 30-second elbows step gets a timer');
+    }
+    const expected = [
+      'Prop yourself up on your elbows and stay there for 30 seconds.',
+      'Roll onto your side, then push yourself up to sitting.',
+      "Take 5 voo breaths: on each out-breath, make a long, low 'voo' sound.",
+      'Move only your eyes: slowly left to right, then up and down.',
+      'Turn your head slowly to the left, then to the right.',
+      'If you went back under: late is not skipped. Say one self-forgiveness line, then do the next step.',
+      "Say out loud 'I stalled at ___' and fill in the blank.",
+    ];
+    ok(JSON.stringify(alts) === JSON.stringify(expected), 'D3: fixed list in order; not-working seven-minute-waking lends single steps; countdown (already queued) skipped → ' + JSON.stringify(alts));
+    t = await visibleText(page);
+    ok(t.includes('No more alternates.') && !t.includes('Step 1 of'), 'D3: list runs out → "No more alternates."');
+    await clickName(page, 'Not yet, start over');
+    ok((await visibleText(page)).includes('Where are you?'), 'D3: "Not yet, start over" goes back to the first question');
+    await clickName(page, 'Eyes closed'); await clickName(page, 'Next');
+    for (let i = 0; i < 12 && (await page.getByRole('button', { name: "Didn't work, try another", exact: true }).count()); i++) await clickName(page, "Didn't work, try another");
+    const before = (await memJSON(page, k('2026-10-04'))).entries.length;
+    await clickName(page, "I'm up and moving"); await page.waitForTimeout(300);
+    const lg = await memJSON(page, k('2026-10-04'));
+    ok(lg.entries.length === before + 1 && lg.entries[before].level === 4 && lg.entries[before].source === 'app-waking', 'D3: "I\'m up and moving" on the No more alternates screen logs level 4');
+    await finish(ctx, 'd3-d4');
+  }
+
+  console.log('\n[C: whole-database backup, real window.storage against a fake Firestore]');
+  {
+    const fake = {
+      test_extra: { value: '[1,2]', key: 'test:extra', updatedAt: '2026-10-01T10:00:00.000Z', extra: 'keep me' },
+      kaizen3_logs: { value: 'active-logs', key: 'kaizen3:logs' },
+      kaizen3_logs_archive_2026_09: { value: 'archived-logs', key: 'kaizen3:logs', archivedAt: '2026-09-30' },
+      practice_playbook: { value: F.base()['practice:playbook'], key: 'practice:playbook' },
+      practice_asks_2026_10_04: { value: JSON.stringify({ date: '2026-10-04', entries: [] }), key: 'practice:asks:2026_10_04' },
+      some_future_doc: { value: 'x', key: 'some-future:doc', migratedAt: '2026-01-01T00:00:00.000Z' },
+    };
+    const ctx = await openPage({ fakeFirestore: fake, now: '2026-10-04T12:00:00' });
+    const { page } = ctx;
+    await page.waitForTimeout(3500);
+    await page.evaluate(() => {
+      const d = window.__fakeDocs.get('test_extra');
+      d.createdAt = { seconds: 1, nanoseconds: 0, toDate: () => new Date('2026-09-01T08:00:00.000Z') };
+      d.when = new Date('2026-09-02T08:00:00.000Z');
+      d.nested = { at: { toDate: () => new Date('2026-09-03T08:00:00.000Z') }, list: [new Date('2026-09-04T08:00:00.000Z')] };
+    });
+    const g = await page.evaluate(async () => { const r = await window.nwGatherBackup(); return { r, ids: [...window.__fakeDocs.keys()].sort() }; });
+    const b = g.r.backup;
+    ok(b.format === 2 && b.source === 'firestore' && b.count === g.ids.length && b.docs.length === g.ids.length && JSON.stringify(b.docs.map(d => d.id)) === JSON.stringify(g.ids) && typeof b.timestamp === 'string', `C: format 2 with every doc in the database (${b.count}), sorted by id, each once`);
+    const tasks = b.docs.find(d => d.id === 'test_extra').fields;
+    ok(tasks.extra === 'keep me' && tasks.key === 'test:extra' && tasks.value === '[1,2]' && tasks.updatedAt === '2026-10-01T10:00:00.000Z', 'C: all fields kept, including an extra field');
+    ok(tasks.createdAt === '2026-09-01T08:00:00.000Z' && tasks.when === '2026-09-02T08:00:00.000Z' && tasks.nested.at === '2026-09-03T08:00:00.000Z' && tasks.nested.list[0] === '2026-09-04T08:00:00.000Z', 'C: Timestamps and Dates → ISO strings (nested too)');
+    ok(b.docs.some(d => d.id === 'kaizen3_logs_archive_2026_09' && d.fields.value === 'archived-logs' && d.fields.archivedAt === '2026-09-30') && b.docs.some(d => d.id === 'kaizen3_logs' && d.fields.value === 'active-logs'), 'C: the archive and the active doc sharing its key are both backed up');
+    ok(['practice_playbook', 'practice_asks_2026_10_04', 'some_future_doc'].every(id => b.docs.some(d => d.id === id)), 'C: Practice docs and a doc no code knows about are included');
+    ok(!('data' in b) && Object.keys(b).sort().join(',') === 'count,docs,format,source,timestamp', 'C: no second key→value map');
+    const fp2 = await page.evaluate(async () => (await window.nwGatherBackup()).fingerprint);
+    ok(typeof g.r.fingerprint === 'string' && fp2 === g.r.fingerprint, 'C: same docs → same fingerprint');
+    const fp3 = await page.evaluate(async () => { window.__fakeDocs.get('some_future_doc').value = 'y'; const f = (await window.nwGatherBackup()).fingerprint; window.__fakeDocs.get('some_future_doc').value = 'x'; return f; });
+    ok(fp3 !== g.r.fingerprint, 'C: a changed doc → a different fingerprint');
+
+    // Restore by ID.
+    const rr = await page.evaluate(async (backup) => {
+      window.__confirms = [];
+      window.confirm = (m) => { window.__confirms.push(m); return true; };
+      const docs = window.__fakeDocs;
+      docs.delete('kaizen3_logs_archive_2026_09');
+      docs.set('kaizen3_logs', { value: 'changed', key: 'kaizen3:logs' });
+      localStorage.setItem('kaizen3:logs', 'device-copy');
+      const t0 = Date.now();
+      const res = await window.nwRestoreBackup(backup);
+      const iso = (v) => (v instanceof Date ? v.toISOString() : String(v));
+      const fresh = (v) => v instanceof Date && v.getTime() >= t0 - 1000;
+      const arch = docs.get('kaizen3_logs_archive_2026_09'), act = docs.get('kaizen3_logs'), tasks = docs.get('test_extra'), fut = docs.get('some_future_doc');
+      return { res, confirms: window.__confirms,
+        arch: arch && { value: arch.value, key: arch.key, archivedAt: arch.archivedAt, fresh: fresh(arch.updatedAt) && fresh(arch.restoredAt) },
+        act: act && act.value, tasksExtra: tasks.extra, tasksUpdated: iso(tasks.updatedAt), tasksCreated: tasks.createdAt, futMigrated: 'migratedAt' in fut,
+        local: localStorage.getItem('kaizen3:logs'), localTasks: localStorage.getItem('test:extra') };
+    }, b);
+    ok(rr.res.restored === b.count && rr.res.failed.length === 0 && rr.res.count === b.count, `C: restore wrote all ${b.count} docs by ID, no failures`);
+    ok(rr.confirms.length === 1 && rr.confirms[0].includes(`Restore ${b.count} items`) && rr.confirms[0].includes('2026'), 'C: restore asks first, with the item count and backup date → ' + JSON.stringify(rr.confirms[0]));
+    ok(rr.arch && rr.arch.value === 'archived-logs' && rr.arch.key === 'kaizen3:logs' && rr.arch.archivedAt === '2026-09-30' && rr.arch.fresh && rr.act === 'active-logs', 'C: archive doc restored under its own ID with its fields, plus updatedAt and restoredAt = now; active doc restored');
+    ok(rr.tasksExtra === 'keep me' && rr.tasksCreated === '2026-09-01T08:00:00.000Z' && rr.tasksUpdated !== '2026-10-01T10:00:00.000Z' && !rr.futMigrated, 'C: extra fields restored; backed-up updatedAt / migratedAt replaced, not copied');
+    ok(rr.local === 'active-logs' && rr.localTasks === '[1,2]', 'C: device copy updated from the active doc only');
+    const ra = await page.evaluate(async (archDoc) => {
+      localStorage.setItem('kaizen3:logs', 'device-copy');
+      const res = await window.nwRestoreBackup({ format: 2, timestamp: '2026-10-01T00:00:00.000Z', count: 1, docs: [archDoc] });
+      return { res, local: localStorage.getItem('kaizen3:logs'), arch: window.__fakeDocs.get('kaizen3_logs_archive_2026_09').value };
+    }, b.docs.find(d => d.id === 'kaizen3_logs_archive_2026_09'));
+    ok(ra.res.restored === 1 && ra.arch === 'archived-logs' && ra.local === 'device-copy', "C: restoring an archive doc doesn't overwrite the active key's device copy");
+    const cancel = await page.evaluate(async (backup) => {
+      window.confirm = () => false;
+      const n = window.__fakeCalls.length;
+      const res = await window.nwRestoreBackup(backup);
+      return { res, sets: window.__fakeCalls.slice(n).filter(c => c[0] === 'set').length };
+    }, b);
+    ok(cancel.res.cancelled === true && cancel.sets === 0, 'C: cancelling the confirm writes nothing');
+    const fail = await page.evaluate(async () => {
+      window.confirm = () => true;
+      const docs = window.__fakeDocs;
+      const orig = docs.set.bind(docs);
+      docs.set = (k, v) => { if (k === 'zz_fail') throw new Error('denied'); return orig(k, v); };
+      const res = await window.nwRestoreBackup({ format: 2, timestamp: '2026-10-01T00:00:00.000Z', docs: [
+        { id: 'zz_fail', fields: { value: '1', key: 'zz:fail' } }, { id: 'zz_ok', fields: { value: '2', key: 'zz:ok' } }, { fields: { value: '3' } }] });
+      delete docs.set;
+      return res;
+    });
+    ok(fail.restored === 1 && JSON.stringify(fail.failed) === JSON.stringify(['zz_fail', '(a doc with no id)']), 'C: restore reports failures by id → ' + JSON.stringify(fail.failed));
+    const old = await page.evaluate(async () => {
+      const res = await window.nwRestoreBackup({ timestamp: '2026-09-01T00:00:00.000Z', data: { 'test:extra': 'old-format-value' } });
+      return { res, doc: window.__fakeDocs.get('test_extra').value, local: localStorage.getItem('test:extra') };
+    });
+    ok(old.res.restored === 1 && old.res.failed.length === 0 && old.doc === 'old-format-value' && old.local === 'old-format-value', 'C: an old-format file (data map) restores with storage.set per key');
+
+    // System tab: text, Download Backup.
+    await page.getByRole('button', { name: 'System', exact: true }).click();
+    let t = await page.locator('body').innerText();
+    ok(t.includes('Backs up everything in the database, including the Practice tab and anything added later.'), 'C: System tab text');
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: /DOWNLOAD BACKUP/ }).click()]);
+    const file = JSON.parse(require('fs').readFileSync(await dl.path(), 'utf8'));
+    const nDocs = await page.evaluate(() => window.__fakeDocs.size);
+    ok(file.format === 2 && file.source === 'firestore' && file.count === nDocs && file.docs.length === nDocs, `C: Download Backup saves the format-2 backup (${file.count} docs)`);
+    await page.waitForTimeout(200);
+    t = await page.locator('body').innerText();
+    ok(new RegExp(`Backup downloaded ✅ · ${nDocs} items · \\d+\\.\\d\\d MB`).test(t) && !t.includes("this device's copy"), 'C: status shows item count and MB');
+
+    // Sync to Drive against a fake Drive API: multipart up to 4.5 MB, resumable above.
+    const drive = [];
+    const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization, content-type, x-upload-content-type', 'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS', 'access-control-expose-headers': 'Location' };
+    await page.route('https://www.googleapis.com/**', async (route) => {
+      const req = route.request(); const url = req.url(); const m = req.method();
+      if (m === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
+      drive.push({ m, url, len: (req.postDataBuffer() || Buffer.alloc(0)).length, body: m === 'POST' && /uploadType=resumable/.test(url) ? req.postData() : null });
+      const json = (o, extra = {}) => route.fulfill({ status: 200, headers: { ...cors, 'content-type': 'application/json', ...extra }, body: JSON.stringify(o) });
+      if (m === 'GET' && /mimeType/.test(decodeURIComponent(url))) return json({ files: [{ id: 'FOLDER1' }] });
+      if (m === 'GET') return json({ files: [] });
+      if (m === 'POST' && /uploadType=multipart/.test(url)) return json({ id: 'FILE_MULTI' });
+      if (m === 'POST' && /uploadType=resumable/.test(url)) return json({}, { Location: 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=XYZ' });
+      if (m === 'PUT' && /upload_id=XYZ/.test(url)) return json({ id: 'FILE_RESUMABLE' });
+      return route.fulfill({ status: 404, headers: cors, body: '{}' });
+    });
+    await page.evaluate(() => localStorage.setItem('gdrive_token_v1', JSON.stringify({ token: 'test-token', expiresAt: Date.now() + 3600 * 1000 })));
+    await page.getByRole('button', { name: /SYNC TO GOOGLE DRIVE/ }).click();
+    await page.waitForFunction(() => /Synced to Drive|failed/.test(document.body.innerText), null, { timeout: 15000 }).catch(() => {});
+    t = await page.locator('body').innerText();
+    ok(/✅ Synced to Drive → .* · \d+ items · \d+\.\d\d MB/.test(t) && drive.some(d => d.m === 'POST' && /uploadType=multipart/.test(d.url)) && !drive.some(d => /uploadType=resumable/.test(d.url)), 'C: Sync to Drive under 4.5 MB → multipart upload; status shows items and MB');
+    drive.length = 0;
+    await page.evaluate(() => window.__fakeDocs.set('big_doc', { key: 'big:doc', value: 'x'.repeat(5 * 1024 * 1024) }));
+    await page.getByRole('button', { name: /SYNC TO GOOGLE DRIVE/ }).click();
+    await page.waitForFunction(() => /Synced to Drive → .*MB/.test(document.body.innerText) && /[5-9]\.\d\d MB/.test(document.body.innerText), null, { timeout: 15000 }).catch(() => {});
+    t = await page.locator('body').innerText();
+    const init = drive.find(d => d.m === 'POST' && /uploadType=resumable/.test(d.url));
+    const put = drive.find(d => d.m === 'PUT');
+    ok(init && JSON.parse(init.body).parents[0] === 'FOLDER1' && /^nikhil-world-backup-\d{4}-\d\d-\d\d\.json$/.test(JSON.parse(init.body).name) && put && put.len > 5 * 1024 * 1024 && !drive.some(d => /uploadType=multipart/.test(d.url)) && /✅ Synced to Drive/.test(t), 'C: over 4.5 MB → resumable: POST metadata, PUT the content to the Location URL');
+    ok(ctx.errors.length === 0, 'C: no console errors' + (ctx.errors.length ? ' → ' + ctx.errors.join(' | ') : ''));
+    await ctx.browser.close();
+  }
+
+  console.log('\n[C: Firestore unreadable → this device only, tokens excluded]');
+  {
+    const ctx = await openPage({ seed: F.base(), now: '2026-10-04T12:00:00' });
+    const { page } = ctx;
+    await page.waitForTimeout(3000);
+    const g = await page.evaluate(async () => {
+      localStorage.setItem('gdrive_token_v1', JSON.stringify({ token: 'SECRET-TOKEN', expiresAt: 1 }));
+      localStorage.setItem('firebase:authUser', 'fb-internal');
+      localStorage.setItem('__nwInternal', 'internal');
+      localStorage.setItem('someApiToken', 'SECRET-2');
+      localStorage.setItem('kaizen3:tasks', '[3]');
+      localStorage.setItem('practice:log:2026_10_04', '{"entries":[]}');
+      return (await window.nwGatherBackup()).backup;
+    });
+    const keys = g.docs.map(d => d.fields.key);
+    ok(g.source === 'this-device' && g.docs.some(d => d.id === 'kaizen3_tasks' && d.fields.key === 'kaizen3:tasks' && d.fields.value === '[3]') && g.docs.some(d => d.id === 'practice_log_2026_10_04'), 'C: fallback uses every key on this device');
+    ok(!keys.some(k => /token|^firebase|^__/i.test(k)) && !JSON.stringify(g).includes('SECRET'), 'C: the Drive token, Firebase and internal keys are left out');
+    await page.getByRole('button', { name: 'System', exact: true }).click();
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: /DOWNLOAD BACKUP/ }).click()]);
+    ok(/-this-device\.json$/.test(dl.suggestedFilename()), 'C: a device-only download gets its own file name');
+    await page.waitForTimeout(200);
+    const t = await page.locator('body').innerText();
+    ok(/Backup downloaded ✅ · \d+ items · \d+\.\d\d MB · The database couldn't be read, so only this device's copy was used\./.test(t), "C: status says only this device's copy was used");
+    ok(ctx.errors.length === 0, 'C fallback: no console errors' + (ctx.errors.length ? ' → ' + ctx.errors.join(' | ') : ''));
+    await ctx.browser.close();
+  }
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
   if (which === 'all' || which === '2') await step2();
   if (which === 'all' || which === '3') await step3();
   if (which === 'all' || which === '4') await step4();
+  if (which === 'all' || which === '5') await step5();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

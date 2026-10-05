@@ -1,10 +1,21 @@
 # Spec P1 — Practice tab: progress
 
-Branch: `claude/kind-shannon-6i3pkk` (assigned by the environment).
+Branch: `claude/kind-shannon-6i3pkk` (steps 1–4, merged in PR #12). Build pass: `claude/optimistic-darwin-qyqw7c`.
 
 ## Where I am
 
-All 4 steps are committed, plus one follow-up Nikhil asked for after reviewing: Learn counts reps of all time, and Waking up logs him as up when he taps "I'm up and moving". The PR stays a draft for Nikhil to review; nothing is merged.
+All 4 steps are committed, plus one follow-up Nikhil asked for after reviewing: Learn counts reps of all time, and Waking up logs him as up when he taps "I'm up and moving".
+
+**Build pass (after the Oct 4 review)** is committed on `claude/optimistic-darwin-qyqw7c` as a draft PR: every Claude answer is saved, prompt caching on the system block, backups cover the whole database, and the Practice fix pass. Nothing is merged.
+
+## Build pass (Oct 4 review)
+
+| Part | What changed | How checked (`p1-test.js 5`) |
+|------|--------------|------------------------------|
+| A. Save every Claude answer | `P_KEYS.asks(day)` = `practice:asks:<YYYY_MM_DD>`. `pCallClaude` takes `ask: {kind, words}`; after a 200 JSON reply it appends `{time, kind, words, prompt, text, tools[{name,input}], sources[{title,url}], model, usage}` through `pUpdate` (append-only, never throws, true/false) **before** any checks. Kinds: `stuck`, `stuck-else`, `coach-me`, `outside`, `draft-shobha`. "Saved to today's answers." or the ❌ screenshot warning under picks, Look outside and the Dr. Shobha draft. A rep started from a pick (Stuck, Coach me) logs `note: Asked Claude: "<words, max 240>" \| Claude: <why>`. Stuck has a collapsed "Show earlier answers from Claude (N)" card below Look outside (today + yesterday, newest first, max 12). | record fields field by field; usage incl. cache counts; non-200 saves nothing; text-only reply saved; picks filtered in code kept in the record; note on a rep from a Stuck pick and from a Coach me pick (300-char words cut to 240); Something else / Look outside / Coach me / Dr. Shobha kinds; earlier-answers card order, labels, an entry with no time, no "null"/"undefined"; unreadable answers doc → warning shown, doc untouched, read error in the card |
+| B. Prompt caching | `system: [{type:'text', text, cache_control:{type:'ephemeral'}}]`; no top-level caching, no beta header. Older tests now read `call.system[0].text`. | exact block shape; request still has only the spec fields |
+| C. Whole-database backups | `window.storage.exportRawDocs()` (every doc, all fields, Timestamps → ISO, null on failure) and `window.storage.setDoc(id, fields)` (restore by ID; localStorage mirror only when `sanitiseKey(fields.key) === id`). Top-level `nwGatherBackup()` → `{backup:{format:2, timestamp, source, count, docs}, fingerprint}`, falling back to this device's keys minus `/^(gdrive_token\|firebase\|__)\|token/i`. Download Backup and Sync to Drive both use it (`STORAGE_KEYS` deleted); silent sync skips an unchanged fingerprint; multipart up to 4.5 MB, resumable above. `nwRestoreBackup(d)` confirms first, restores format 2 by ID and old `data` maps by key, reports failures by id. | real `window.storage` against the fake Firestore: every doc incl. an archive, an unknown doc and an extra field; Timestamps/Dates → ISO; same docs → same fingerprint, changed doc → different; restore by ID with fresh `updatedAt`/`restoredAt`; restoring an archive leaves the active key's device copy alone; cancel writes nothing; failures by id; old-format file; Download Backup file + status; Sync to Drive against a faked Drive API (multipart under 4.5 MB, resumable POST + PUT over it); fallback excludes the token and Firebase/internal keys and says "only this device's copy" |
+| D. Fix pass | Waking levels only while waking up: in-bed Stuck situations skip post4, others show it any time (minimum-level situations too); post4 filter removed from Ask Claude; voice rule reworded; Waking up button only 04:00–11:59 and hidden after level ≥ 4 or a post4 rep; fixed alternates list ending in "No more alternates."; new standing + dizzy step; Coach me lights-out window (yesterday ≥ 18:00, today < 06:00); numeric-string levels; entries with no time. | 15:00 with no level (non-bed keeps post4, in-bed drops it, Ask Claude keeps a post4 pick, grief shown); button at 01:00 / 04:00 / 13:00 / after a post4 rep / after level "4"; level "4" in the log and context line; seven-minute-waking as not-working walks the full list in order; standing + dizzy; 00:40 bedtime-plan with the clock at 07:00; an entry with no time on Today and in the context line |
 
 ## Precondition
 
@@ -36,6 +47,7 @@ All 4 steps are committed, plus one follow-up Nikhil asked for after reviewing: 
 All go through `pRead` / `pWrite`, which throw on any key not starting with `practice:`.
 
 - read: `practice:playbook`, `practice:homework`, `practice:shobha-queue`, `practice:outside-map`, `practice:progress`, `practice:stuck-map`, `practice:today:<YYYY_MM_DD>`, `practice:log:<YYYY_MM_DD>` (today; yesterday; the last 30 days for Progress; every log doc for Learn, listed through the new `window.storage.listPrefix("practice:log:")`)
+- build pass: read `practice:asks:<today>` and `practice:asks:<yesterday>` (earlier-answers card); write (append only) `practice:asks:<today>` after each 200 reply from Claude
 - write (read-modify-write, append only): `practice:log:<today>` (append entry), `practice:playbook` (status change + history), `practice:homework` (append to an item's `updates[]`), `practice:shobha-queue` (append item; mark covered), `practice:outside-map` (append gap or proposal)
 
 ## How checks are run
@@ -62,10 +74,14 @@ Console errors from the deliberately blocked requests are not counted; any other
 
 - Follow-up (all-time reps in Learn, "I'm up and moving" in Waking up): `p1-test.js all` → 211 passed, 0 failed. `p1-check.js` → console errors: none. `grep -c "api.anthropic.com" index.html` → 0. New checks: all-time counts with the mock; the 180-day fallback when listing isn't available; the real `listPrefix` against a fake Firestore (range query only, no whole-collection read); last-step "I'm up and moving" logs straight away.
 
+- Build pass: `p1-test.js all` → 323 passed, 0 failed (steps 2–5). `p1-check.js` → console errors: none. `grep -c "api.anthropic.com" index.html` → 0. The live Firestore was not touched: backups and restores ran only against the harness's in-memory fake Firestore, and Drive only against a faked Drive API.
+
 ## Not checked
 
 - The real AI proxy was never called; every request went to a local fake. The request bodies were checked field by field, but the live proxy's replies (for example, whether it allows `web_search`) were not.
 - Not tried on a real phone or against the real seeded docs. Field shapes the spec doesn't fix (for example `steps[]`, `evidence`, `updates[]`, `owedByDrShobha[]`) are displayed whether they hold strings or objects.
+
+- Build pass: silent Drive sync skipping an unchanged fingerprint wasn't exercised (it runs on a 5-minute timer in the App shell); manual syncs were. Resumable upload was checked against a fake Drive API, not real Drive (in particular, that Drive's CORS response exposes the `Location` header to the browser). `exportRawDocs` was checked with Date objects and objects with `toDate()`, not the real Firestore SDK's Timestamp class.
 
 ## Next step
 
