@@ -135,6 +135,8 @@ Console errors from the deliberately blocked requests are not counted; any other
 
 - Storage pass: `node scripts/harness.js` → api.anthropic.com in index.html: 0 · storage-layer check: ok · page load: no console errors · `p1-test.js all`: 323 passed, 0 failed (same as before the change) · `storage-test.js all`: 98 passed, 0 failed. Screenshots at 390×844 reviewed (Practice with the device-only banner and status line; System with the size table and an 87% banner). The live Firestore was not touched: every check ran against the in-memory mock or the fake Firestore.
 
+- Drafts, notes, log tidy, cost tracker, room on this device (Oct 5): `node scripts/harness.js` → api.anthropic.com in index.html: 0 · storage-layer check: ok · page load: no console errors · `p1-test.js all`: 325 passed, 0 failed · `storage-test.js all`: 152 passed, 0 failed · `backup-test.js all`: 41 passed, 0 failed · `sw-test.js`: 39 passed, 0 failed · `notes-test.js all`: 101 passed, 0 failed. Screenshots at 390×844 reviewed (Saved bar, its Add note box, the Note panel, "+ Note" on a step, the cost tracker). The live Firestore, its rules, the Cloud Functions and Google Drive were not touched.
+
 - Offline, sealing, Drive backup (Oct 5): `node scripts/harness.js` → see the PR for the final run (api.anthropic.com in index.html: 0 · storage-layer check: ok · page load: no console errors · `p1-test.js all` · `storage-test.js all` · `backup-test.js all` · `sw-test.js`). Screenshots at 390×844 reviewed (Reflect with "Tap again to delete this day" and "Deleted days (1)"; System with "This app", the device meter and the offline history line). The live Firestore, its rules, the Cloud Functions and Google Drive were not touched.
 
 ## Not checked
