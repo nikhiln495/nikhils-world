@@ -4,6 +4,15 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Nikhil's World</title>
+  <!-- Add to Home Screen: opens full screen at https://nikhils-world.web.app/ and https://nikhiln495.github.io/nikhils-world/ (all paths relative) -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#0f0f0f">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Nikhil's World">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
   <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=JetBrains+Mono:wght@400;700&family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,600&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -87,6 +96,13 @@
       };
 
       if (tryInit()) { resolve(true); return; }
+      // Offline and the Firebase scripts aren't on this device: don't wait; this device's copy is used.
+      if (navigator.onLine === false) {
+        window.__dbAvailable = false;
+        console.warn("⚠️ Offline and Firebase isn't on this device yet. Using this device's copy.");
+        resolve(false);
+        return;
+      }
 
       // Firebase global wasn't there yet — wait up to 3 seconds, polling every 150ms.
       let waited = 0;
@@ -109,32 +125,46 @@
     // features: CLAUDE.md. How docs are stored: docs/DATA-FORMAT.md.
     //
     // Firestore rejects any doc over 1,048,576 bytes. No doc is ever written over SAFE (900,000):
-    //  • Growing values (an array, { entries: [...] }, or an object keyed by date) are SEALED: when a
-    //    write would take the active doc over 800,000 bytes, its oldest items move into read-only part
-    //    docs <id>__part_<n> (each written and confirmed first) until it is under 400,000 bytes.
+    //  • Only keys listed in SEALED_LOG_KEYS are SEALED: when a write would take the active doc over
+    //    800,000 bytes, its oldest items move into read-only part docs <id>__part_<n> (each written and
+    //    confirmed first) until it is under 400,000 bytes. Every item stays editable (an edited copy goes in
+    //    the active doc and wins) and deletable (a deleted marker in the active doc hides the copy in its part).
     //  • Any other value over SAFE is SPLIT across <id>__split_<gen>_<i> docs and put back together on read.
-    // set() says where a save landed: 'cloud' | 'device-only' | false. localStorage keeps a backup copy;
-    // device-only saves wait in a queue and go up when the device is back online or the app starts.
+    //    A key outside SEALED_LOG_KEYS that still has sealed parts is read whole and written back whole.
+    // set() says where a save landed: 'cloud' | 'device-only' | false. localStorage keeps this device's copy
+    // (refreshed on every cloud read, so the app opens offline); device-only saves wait in a queue and go up
+    // when the device is back online or the app starts, unless the cloud copy changed since this device's copy.
     // Keys with colons/slashes are sanitised for Firestore doc IDs.
     function sanitiseKey(key) {
       return key.replace(/[:/\.#$\[\]]/g, '_');
     }
 
     (function () {
+      // The only keys whose oldest items are moved into sealed parts. Add a key here only for a log that
+      // grows forever; every other key is stored whole (split into pieces when it is big). See CLAUDE.md.
+      const SEALED_LOG_KEYS = ['kaizen4:logs'];
       const COLL = 'appdata';
       const LIMIT = 1048576;          // Firestore's hard limit per doc
       const SAFE = 900000;            // nothing is written above this
-      const SEAL_AT = 800000;         // growing data: seal when the active doc would pass this
+      const SEAL_AT = 800000;         // sealed log keys: seal when the active doc would pass this
       const SEAL_TO = 400000;         // ...moving the oldest items out until it is under this
       const PART_MAX = 600000;        // each new sealed part holds at most this much
       const PIECE_MAX = 700000;       // each piece of a split value
       const WARN_AT = Math.round(SAFE * 0.85);
+      const MB = 1024 * 1024;
+      const BIG_AT = 1.5 * MB;        // a key outside SEALED_LOG_KEYS this big in total gets a banner
+      const DEVICE_LIMIT = 5 * MB;    // estimate of what this device's localStorage holds (2 bytes per character)
+      const DEVICE_WARN_PCT = 70;
       const CLOUD_TIMEOUT_MS = 15000; // a cloud write not settled by then counts as device-only
       const Q_KEY = '__nw_upload_queue';
       const LAST_KEY = '__nw_last_cloud_save';
       const CONFLICTS_KEY = '__nw_conflicts';
       const DISMISSED_KEY = '__nw_dismissed_sizes';
+      const SEEN_KEY = '__nw_cloud_seen';  // id → { at, parts }: the cloud version this device's copy matches
+      const MARKS_KEY = '__nw_deleted';    // key → deleted markers, this device's copy of the active doc's `deleted`
       const NO_DB = "the cloud database didn't load (network or content blocker)";
+      const OFFLINE = 'the device is offline';
+      const seals = (key) => SEALED_LOG_KEYS.includes(key);
       // Docs from before this layer that hold older Kaizen daily logs; read as sealed parts of kaizen4:logs.
       // localKeys: the device copy used when the cloud can't be read (as Kaizen did before).
       const LEGACY_PARTS = { 'kaizen4:logs': { ids: ['kaizen3_logs'], prefixes: ['kaizen3_logs_archive_', 'kaizen4_logs_archive_'], localKeys: ['kaizen3:logs'] } };
@@ -176,25 +206,45 @@
         out.push(s.slice(start));
         return out;
       };
+      // cyrb53: a short, fast hash of an item's JSON, so a deleted marker can name an item that has no id.
+      // tools/drive-backup.gs has the same function; the two must stay identical.
+      const hashOf = (str) => {
+        let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+        for (let i = 0; i < str.length; i++) {
+          const ch = str.charCodeAt(i);
+          h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677);
+        }
+        h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+        h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+        return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
+      };
 
       // ── State ──
       const load = (k, dflt) => { try { const v = JSON.parse(localStorage.getItem(k) || 'null'); return v == null ? dflt : v; } catch (_) { return dflt; } };
-      const keep = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} };
+      const keep = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} usageLater(); };
       let queue = load(Q_KEY, []).filter(e => e && typeof e.key === 'string' && typeof e.id === 'string');
       let lastCloud = Number(load(LAST_KEY, 0)) || null;
       let conflicts = load(CONFLICTS_KEY, []).filter(c => c && typeof c.id === 'string');
       const dismissedSizes = load(DISMISSED_KEY, {});
+      const seen = load(SEEN_KEY, {});
+      const devMarks = load(MARKS_KEY, {});
       const failed = new Map();     // id → { what, reason }: saved neither in the cloud nor on this device
       const sizeWarn = new Map();   // id → { what, bytes, note }
+      const bigKeys = new Map();    // key → total bytes, for keys outside SEALED_LOG_KEYS at or over BIG_AT
       const readIssues = new Map(); // id → { what, reason }
+      const olderOffline = new Set(); // keys whose older history couldn't be read because the device is offline
       const held = new Map();       // id → firstAt: the cloud had a newer copy; saves stay on this device until reload
-      const metaCache = new Map();  // id → { parts, order, shape, split } as last read or written
+      const fromDevice = new Set(); // ids last read from this device's copy because the cloud couldn't be reached
+      const foldWhole = new Set();  // ids (outside SEALED_LOG_KEYS, with old parts) read whole this session
+      const metaCache = new Map();  // id → { parts, order, shape, split, deleted, folding } as last read or written
       const partCache = new Map();  // part id → { parsed, shape } (sealed parts never change)
       const idxCache = new Map();   // id → { sig, idx }: what is already sealed, to strip from new writes
       const legacyIds = new Map();  // key → legacy part ids found this session
       const chains = new Map();     // id → promise: writes to one doc run one at a time
       const listeners = new Set();
       let flushing = null, flushAgain = false;
+      let usage = { bytes: 0, limit: DEVICE_LIMIT, pct: 0 };
+      let usageTimer = null, usageDismissed = null;
 
       const ready = async () => { try { await window.__dbReady; } catch (_) {} };
       const isOffline = () => typeof navigator !== 'undefined' && navigator.onLine === false;
@@ -223,6 +273,51 @@
         const code = e && e.code ? String(e.code) + ': ' : '';
         return 'the cloud rejected it (' + code + String((e && e.message) || e || 'unknown error').slice(0, 160) + ')';
       };
+      // The cloud version (updatedAt, ms; 0 = none) this device's copy of a doc matches, and how many parts it has.
+      const baseOf = (id) => (seen[id] && typeof seen[id].at === 'number' ? seen[id].at : null);
+      const seenSet = (id, at, parts) => {
+        const v = { at: at || 0, parts: parts || 0 };
+        if (seen[id] && seen[id].at === v.at && seen[id].parts === v.parts) return;
+        seen[id] = v; keep(SEEN_KEY, seen);
+      };
+      const seenDrop = (id) => { if (seen[id]) { delete seen[id]; keep(SEEN_KEY, seen); } };
+      const setMarks = (key, marks) => {
+        const next = Array.isArray(marks) ? marks : [];
+        if (!next.length && !devMarks[key]) return;
+        if (JSON.stringify(devMarks[key] || []) === JSON.stringify(next)) return;
+        devMarks[key] = next; keep(MARKS_KEY, devMarks);
+      };
+      // This device's copy of a key, refreshed from the cloud. If it doesn't fit, the stale copy is removed
+      // (an old copy that looks current could be edited offline and overwrite newer data).
+      const refreshDevice = (key, id, value, f) => {
+        if (inQueue(id) || isReadOnlyId(id) || typeof value !== 'string') return;
+        try {
+          if (localStorage.getItem(key) !== value) localStorage.setItem(key, value);
+          seenSet(id, msOf(f && f.updatedAt) || 0, f && Array.isArray(f.parts) ? f.parts.length : 0);
+        } catch (_) {
+          try { localStorage.removeItem(key); } catch (__) {}
+          seenDrop(id);
+        }
+        usageLater();
+      };
+
+      // ── This device's saved data (localStorage), counted at 2 bytes per character ──
+      const measureDevice = () => {
+        let chars = 0;
+        try {
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            chars += (k ? k.length : 0) + ((k && localStorage.getItem(k)) || '').length;
+          }
+        } catch (_) {}
+        const bytes = chars * 2;
+        usage = { bytes, limit: DEVICE_LIMIT, pct: bytes / DEVICE_LIMIT * 100 };
+        return usage;
+      };
+      function usageLater() {
+        if (usageTimer) return;
+        usageTimer = setTimeout(() => { usageTimer = null; const before = usage.pct >= DEVICE_WARN_PCT; measureDevice(); if (before !== (usage.pct >= DEVICE_WARN_PCT) || before) emit(); }, 300);
+      }
 
       // ── What a key is, in words (for banners) ──
       const WHAT = [
@@ -232,6 +327,7 @@
         [/^transition-log$/, 'Transition log'], [/^session-summaries$/, 'Session notes'], [/^trajectory-foci$/, 'Session foci'],
         [/^creative-log(-v2)?$/, 'Creative log'], [/^creative-catch$/, 'Creative catch list'], [/^creative-streak$/, 'Creative streak'],
         [/^gatekeeper-name$/, 'Gatekeeper name'], [/^trajectory-bigpicture$/, 'Big picture note'], [/^body-needs$/, 'Body needs'],
+        [/^device-timezone$/, "This device's time zone"],
         [/^practice:log:(\d{4})_(\d\d)_(\d\d)$/, m => `Practice log for ${m[1]}-${m[2]}-${m[3]}`],
         [/^practice:asks:(\d{4})_(\d\d)_(\d\d)$/, m => `Claude answers for ${m[1]}-${m[2]}-${m[3]}`],
         [/^practice:playbook$/, 'Practice playbook'], [/^practice:homework$/, 'Practice homework'],
@@ -251,6 +347,7 @@
         if (Array.isArray(f.parts) && f.parts.length) return 'active doc (has sealed parts)';
         return 'doc';
       };
+      const mbText = (b) => (b / MB).toFixed(1);
 
       // ── Banners and the status line ──
       const banners = () => {
@@ -265,6 +362,14 @@
           if (dismissedSizes[id] === w.bytes) return;
           out.push({ id: 'size:' + id, kind: 'size', dismissable: true, text: `${w.what} (doc ${id}) is at ${Math.round(w.bytes / SAFE * 100)}% of the safe size: ${w.bytes.toLocaleString('en-US')} of ${SAFE.toLocaleString('en-US')} bytes. ${w.note}` });
         });
+        bigKeys.forEach((bytes, key) => {
+          if (dismissedSizes['big:' + key] === bytes) return;
+          const name = whatOf(key) === `"${key}"` ? `"${key}"` : `${whatOf(key)} (key ${key})`;
+          out.push({ id: 'big:' + key, kind: 'big', dismissable: true, text: `${name} is ${mbText(bytes)} MB in total. Each save now uploads the whole value, and this device's copy may stop fitting.` });
+        });
+        if (usage.pct >= DEVICE_WARN_PCT && usageDismissed !== Math.floor(usage.pct)) {
+          out.push({ id: 'device-full', kind: 'device-full', dismissable: true, text: `This device's saved data is ${(usage.bytes / MB).toFixed(2)} MB of about 5 MB (${Math.round(usage.pct)}%). When it is full, saves made offline can't be kept on this device.` });
+        }
         readIssues.forEach((r, id) => out.push({ id: 'read:' + id, kind: 'read', dismissable: true, text: `Older parts of ${r.what} couldn't be read, so some of its history may be missing from the screen. Nothing was deleted. Reason: ${r.reason}.` }));
         return out;
       };
@@ -273,26 +378,35 @@
         failedCount: failed.size,
         queue: queue.map(e => ({ key: e.key, what: e.what, reason: e.reason, at: e.at })),
         lastCloudSave: lastCloud,
+        olderOffline: [...olderOffline],
+        online: !isOffline(),
+        device: usage,
         banners: banners(),
       });
       const emit = () => { const s = snapshot(); listeners.forEach(fn => { try { fn(s); } catch (_) {} }); };
       const fail = (id, what, reason) => { failed.set(id, { what, reason }); emit(); };
       const issue = (id, key, reason) => { readIssues.set(id, { what: whatOf(key), reason }); emit(); };
       const markCloud = () => { lastCloud = Date.now(); keep(LAST_KEY, lastCloud); emit(); };
+      // Docs that are never written again (sealed parts, old archives, pieces, conflict copies) get no banner;
+      // they are listed in the size table on the System tab.
       const measure = (id, f) => {
         const bytes = docBytes(id, f);
-        if (bytes >= WARN_AT) {
-          const key = typeof f.key === 'string' ? f.key : id;
-          const ro = isReadOnlyId(id) || f.sealed || f.splitOf || f.conflictOf;
-          let grows = false;
-          if (!ro && typeof f.value === 'string') { try { grows = !!shapeOf(JSON.parse(f.value)); } catch (_) {} }
-          const note = ro ? 'It is read-only and is never written again.'
-            : grows ? 'Its oldest entries move to a sealed part automatically at 800,000 bytes.'
+        const key = typeof f.key === 'string' ? f.key : id;
+        const ro = isReadOnlyId(id) || f.sealed || f.splitOf || f.conflictOf;
+        if (bytes >= WARN_AT && !ro) {
+          const note = seals(key) ? 'Its oldest entries move to a sealed part automatically at 800,000 bytes.'
             : 'It is split into pieces automatically above 900,000 bytes.';
-          sizeWarn.set(id, { what: whatOf(key) + (ro ? ' (stored copy)' : ''), bytes, note });
+          sizeWarn.set(id, { what: whatOf(key), bytes, note });
           emit();
         } else if (sizeWarn.has(id)) { sizeWarn.delete(id); emit(); }
         return bytes;
+      };
+      // Keys outside SEALED_LOG_KEYS: a banner once the whole value passes BIG_AT.
+      const measureKey = (key, value) => {
+        if (seals(key) || typeof value !== 'string') return;
+        const bytes = value.length * 3 < BIG_AT ? value.length : utf8(value);
+        if (bytes >= BIG_AT) { if (bigKeys.get(key) !== bytes) { bigKeys.set(key, bytes); emit(); } }
+        else if (bigKeys.has(key)) { bigKeys.delete(key); emit(); }
       };
       const enqueue = (e) => {
         queue = queue.filter(x => x.id !== e.id).concat([e]);
@@ -312,19 +426,20 @@
       const put = (id, data) => timed(ref(id).set(data), id);
       const del = (id) => { try { ref(id).delete().catch(() => {}); } catch (_) {} };
       const readRaw = async (id) => {
-        if (isOffline()) throw nwErr('the device is offline');
+        if (isOffline()) throw nwErr(OFFLINE);
         const s = await timed(ref(id).get(), id);
         return s.exists ? (s.data() || {}) : null;
       };
       const queryPrefix = async (prefix) => {
-        if (isOffline()) throw nwErr('the device is offline');
+        if (isOffline()) throw nwErr(OFFLINE);
         const f = firebase.firestore.FieldPath.documentId();
-        const s = await timed(db.collection(COLL).where(f, '>=', prefix).where(f, '<', prefix + '').get(), prefix);
+        const s = await timed(db.collection(COLL).where(f, '>=', prefix).where(f, '<', prefix + '\uf8ff').get(), prefix);
         return s.docs.map(d => ({ id: d.id, fields: d.data() || {} }));
       };
       const metaOf = (f) => ({
         parts: f && Array.isArray(f.parts) ? f.parts : [],
         order: (f && f.order) || null, shape: (f && f.shape) || null, split: (f && f.split) || null,
+        deleted: f && Array.isArray(f.deleted) ? f.deleted : [], folding: !!(f && f.folding),
       });
 
       // A split value: the main doc's `split` lists its pieces in order.
@@ -384,6 +499,7 @@
       };
       const parse = (s) => { try { return JSON.parse(s); } catch (_) { return undefined; } };
       const itemsOf = (shape, v) => (shape === 'array' ? v : v.entries);
+      const idOf = (it) => (it && typeof it === 'object' && (typeof it.id === 'string' || typeof it.id === 'number') ? String(it.id) : null);
       const TIME_FIELDS = ['date', 'at', 'ts', 'timestamp', 'createdAt', 'created', 'savedAt', 'when', 'time'];
       const itemTime = (it) => {
         if (!it || typeof it !== 'object') return null;
@@ -445,15 +561,64 @@
         rec.forEach(p => ids.push(p.id));
         return ids.map(pid => Object.assign({ id: pid }, partCache.get(pid)));
       };
-      const indexFor = (id, parts) => {
-        const sig = parts.map(p => p.id).join('|');
+      // The parts of a key already read this session (for when the cloud can't be reached).
+      const cachedParts = (key, meta) => {
+        const ids = (legacyIds.get(key) || []).concat(meta.parts.filter(p => p && typeof p.id === 'string').slice().sort((a, b) => (Number(a.n) || 0) - (Number(b.n) || 0)).map(p => p.id));
+        return ids.filter(pid => partCache.has(pid)).map(pid => Object.assign({ id: pid }, partCache.get(pid)));
+      };
+
+      // ── Deleted markers (keys in SEALED_LOG_KEYS) ──
+      // A marker in the active doc's `deleted` list hides a copy of an item in a sealed part (the part is never
+      // rewritten). { date } hides that date in every part (date-keyed logs); { id } hides every part item
+      // with that id; { part, index, hash } hides the one item at that position of that part, if its JSON
+      // still hashes to `hash` (arrays whose items have no id). Removing the marker brings the item back.
+      // The active doc's own items are never hidden: a feature removes those from its value itself.
+      const hidesOf = (marks) => {
+        const h = { dates: new Set(), ids: new Set(), pos: new Map() };
+        (marks || []).forEach(m => {
+          if (!m || typeof m !== 'object') return;
+          if (typeof m.date === 'string') h.dates.add(m.date);
+          else if (m.id !== undefined && m.id !== null) h.ids.add(String(m.id));
+          else if (typeof m.part === 'string' && typeof m.index === 'number') h.pos.set(m.part + '#' + m.index, String(m.hash));
+        });
+        return h;
+      };
+      const hidden = (h, part, it, i) => {
+        const iid = idOf(it);
+        if (iid !== null && h.ids.has(iid)) return true;
+        const want = h.pos.get(part + '#' + i);
+        return want !== undefined && want === hashOf(JSON.stringify(it));
+      };
+      const visibleParts = (parts, marks) => {
+        const h = hidesOf(marks);
+        if (!h.dates.size && !h.ids.size && !h.pos.size) return parts;
+        return parts.map(p => {
+          if (!p.parsed || typeof p.parsed !== 'object') return p;
+          if (p.shape === 'dated' || p.shape === 'empty') {
+            const o = {};
+            Object.keys(p.parsed).forEach(k => { if (!h.dates.has(k)) o[k] = p.parsed[k]; });
+            return Object.assign({}, p, { parsed: o });
+          }
+          if (p.shape === 'array' || p.shape === 'entries') {
+            const items = [], orig = [];
+            itemsOf(p.shape, p.parsed).forEach((it, i) => { if (!hidden(h, p.id, it, i)) { items.push(it); orig.push(i); } });
+            return Object.assign({}, p, { orig, parsed: p.shape === 'array' ? items : Object.assign({}, p.parsed, { entries: items }) });
+          }
+          return p;
+        });
+      };
+      const marksFor = (key, f) => (f ? metaOf(f).deleted : (devMarks[key] || []));
+
+      const indexFor = (id, parts, marks) => {
+        const sig = parts.map(p => p.id).join('|') + '#' + JSON.stringify(marks || []);
         const c = idxCache.get(id);
         if (c && c.sig === sig) return c.idx;
-        const first = parts.find(p => p.shape && p.shape !== 'empty');
+        const vis = visibleParts(parts, marks);
+        const first = vis.find(p => p.shape && p.shape !== 'empty');
         let idx = null;
         if (first) {
           idx = { shape: first.shape, dated: new Map(), counts: new Map() };
-          parts.forEach(p => {
+          vis.forEach(p => {
             if (p.shape !== idx.shape) return;
             if (idx.shape === 'dated') Object.keys(p.parsed).forEach(k => idx.dated.set(k, JSON.stringify(p.parsed[k])));
             else itemsOf(idx.shape, p.parsed).forEach(it => { const j = JSON.stringify(it); idx.counts.set(j, (idx.counts.get(j) || 0) + 1); });
@@ -463,6 +628,7 @@
         return idx;
       };
       // Drops items a write repeats unchanged from a sealed part (a feature may save its whole history back).
+      // Items hidden by a deleted marker are not counted, so a deleted item typed in again is kept.
       const strip = (shape, v, idx) => {
         if (shape === 'dated') { const o = {}; Object.keys(v).forEach(k => { if (idx.dated.get(k) !== JSON.stringify(v[k])) o[k] = v[k]; }); return o; }
         const counts = new Map(idx.counts);
@@ -470,8 +636,9 @@
         return shape === 'array' ? v.filter(fresh) : Object.assign({}, v, { entries: v.entries.filter(fresh) });
       };
       // Sealed parts first (oldest first), then the active doc. Items with the same `id` (arrays) or
-      // the same date (dated objects) keep the newest copy.
-      const merge = (shape, parts, active, order) => {
+      // the same date (dated objects) keep the newest copy. With `src`, also returns where each item came
+      // from: { part, index } or { active: index }.
+      const merge = (shape, parts, active, order, src) => {
         const ps = parts.filter(p => p.shape === shape);
         if (shape === 'dated') {
           const all = {};
@@ -479,21 +646,26 @@
           if (active) Object.assign(all, active);
           const o = {};
           Object.keys(all).sort().forEach(k => { o[k] = all[k]; });
-          return o;
+          return src ? { value: o, from: null } : o;
         }
         const chron = [];
-        const add = (items) => (order === 'newest-first' ? items.slice().reverse() : items).forEach(it => chron.push(it));
-        ps.forEach(p => add(itemsOf(shape, p.parsed)));
-        if (active) add(itemsOf(shape, active));
-        const pos = new Map(), out = [];
-        chron.forEach(it => {
-          const k = it && typeof it === 'object' && (typeof it.id === 'string' || typeof it.id === 'number') ? 'id:' + it.id : null;
-          if (k && pos.has(k)) { out[pos.get(k)] = it; return; }
+        const add = (items, from) => {
+          const list = items.map((it, i) => ({ it, from: from(i) }));
+          (order === 'newest-first' ? list.reverse() : list).forEach(x => chron.push(x));
+        };
+        ps.forEach(p => add(itemsOf(shape, p.parsed), i => ({ part: p.id, index: p.orig ? p.orig[i] : i })));
+        if (active) add(itemsOf(shape, active), i => ({ active: i }));
+        const pos = new Map(), out = [], from = [];
+        chron.forEach(({ it, from: f }) => {
+          const iid = idOf(it);
+          const k = iid !== null ? 'id:' + iid : null;
+          if (k && pos.has(k)) { out[pos.get(k)] = it; from[pos.get(k)] = f; return; }
           if (k) pos.set(k, out.length);
-          out.push(it);
+          out.push(it); from.push(f);
         });
-        if (order === 'newest-first') out.reverse();
-        return shape === 'array' ? out : Object.assign({}, active || {}, { entries: out });
+        if (order === 'newest-first') { out.reverse(); from.reverse(); }
+        const value = shape === 'array' ? out : Object.assign({}, active || {}, { entries: out });
+        return src ? { value, from } : value;
       };
       const withParts = (f, m) => {
         if (m.parts.length) { f.parts = m.parts; f.order = m.order || 'oldest-first'; if (m.shape) f.shape = m.shape; }
@@ -501,9 +673,9 @@
       };
       // Moves the oldest items into new sealed parts. Each part is written and confirmed before the
       // active doc is touched; returns the trimmed active doc with its parts list, written in one go.
-      const seal = async (key, id, shape, parsed, at) => {
+      const seal = async (key, id, shape, parsed, at, extra) => {
         const fresh = metaOf(await readRaw(id)); // the newest parts list, in case another device sealed
-        const asIs = () => withParts({ key, value: JSON.stringify(parsed), updatedAt: new Date(at) }, fresh);
+        const asIs = () => Object.assign(withParts({ key, value: JSON.stringify(parsed), updatedAt: new Date(at) }, fresh), extra);
         if (fresh.shape && fresh.shape !== shape) return asIs();
         const order = shape === 'dated' ? 'oldest-first' : (fresh.order || guessOrder(itemsOf(shape, parsed)));
         const units = unitsOf(shape, parsed, order);
@@ -511,7 +683,7 @@
         if (shape === 'entries') Object.keys(parsed).forEach(k => { if (k !== 'entries') rest[k] = parsed[k]; });
         const wrap = shape === 'entries' ? utf8(JSON.stringify(Object.assign({}, rest, { entries: [] }))) : 2;
         const spare = { id: id + '__part_000', n: 0, count: 0, rangeKind: 'index', from: '0000-00-00', to: '0000-00-00', bytes: 0 };
-        const base = docBytes(id, { key, value: '', updatedAt: new Date(at), parts: fresh.parts.concat([spare, spare]), order, shape });
+        const base = docBytes(id, Object.assign({ key, value: '', updatedAt: new Date(at), parts: fresh.parts.concat([spare, spare]), order, shape }, extra));
         let total = units.reduce((s, u) => s + u.bytes, 0) + Math.max(0, units.length - 1) + wrap;
         let cut = 0;
         while (units.length - cut > 1 && base + total >= SEAL_TO) { total -= units[cut].bytes + 1; cut++; }
@@ -542,67 +714,195 @@
           n++;
         }
         idxCache.delete(id);
-        return { key, value: JSON.stringify(build(shape, units.slice(cut), order, rest)), updatedAt: new Date(at), parts, order, shape };
+        return Object.assign({ key, value: JSON.stringify(build(shape, units.slice(cut), order, rest)), updatedAt: new Date(at), parts, order, shape }, extra);
       };
 
-      // One save to the cloud: strip what is already sealed, seal if it grew past SEAL_AT,
-      // split if it is still over SAFE. Throws if the cloud didn't take it.
-      const cloudWrite = async (key, id, value, at) => {
+      // One save to the cloud. Keys in SEALED_LOG_KEYS: strip what is already sealed, seal if it grew past
+      // SEAL_AT, keep the deleted markers. Any other key is written whole (split if over SAFE); if it still
+      // has sealed parts from before, they are folded back (see foldBack). Throws if the cloud didn't take it.
+      const cloudWrite = async (key, id, value, at, opts) => {
+        opts = opts || {};
         let meta = metaCache.get(id);
         if (!meta) meta = metaOf(await readRaw(id));
         metaCache.delete(id); // unknown until this write settles
+        if (!seals(key) && (meta.parts.length || meta.folding)) return foldBack(key, id, value, at, meta, opts);
         const legacy = !!LEGACY_PARTS[key];
-        let fields = withParts({ key, value, updatedAt: new Date(at) }, meta);
+        const marks = seals(key) ? (devMarks[key] || meta.deleted) : [];
+        const extra = marks.length ? { deleted: marks } : {};
+        let fields = Object.assign(withParts({ key, value, updatedAt: new Date(at) }, meta), extra);
         let parsed, shape = null;
-        if (meta.parts.length || legacy || docBytes(id, fields) > SEAL_AT) {
+        if (seals(key) && (meta.parts.length || legacy || docBytes(id, fields) > SEAL_AT)) {
           parsed = parse(value);
           shape = parsed === undefined ? null : shapeOf(parsed);
         }
         if (shape && (meta.parts.length || legacy)) {
-          const idx = indexFor(id, await loadParts(key, id, { parts: meta.parts }));
+          const idx = indexFor(id, await loadParts(key, id, { parts: meta.parts }), marks);
           if (idx && idx.shape === shape) {
             parsed = strip(shape, parsed, idx);
             fields.value = JSON.stringify(parsed);
           }
         }
-        if (shape && docBytes(id, fields) > SEAL_AT) fields = await seal(key, id, shape, parsed, at);
+        if (shape && docBytes(id, fields) > SEAL_AT) fields = await seal(key, id, shape, parsed, at, extra);
         const written = await writeDoc(id, fields, meta.split);
         metaCache.set(id, metaOf(written));
+        seenSet(id, at, metaOf(written).parts.length);
+        measureKey(key, value);
         return written;
+      };
+      // A key outside SEALED_LOG_KEYS that still has sealed parts (sealed before sealing became opt-in).
+      // 1. Write the whole value (split if needed), keeping the parts list and marking the doc `folding`, so
+      //    readers take the value as whole. 2. Only after that write is confirmed, write the doc again
+      //    without the parts list. Part docs are never touched. If the feature didn't read the whole value
+      //    this session (opts.whole), the parts are merged into the value first, so nothing is left out.
+      const foldBack = async (key, id, value, at, meta, opts) => {
+        let whole = value;
+        if (!opts.whole && !meta.folding) {
+          const parts = await loadParts(key, id, { parts: meta.parts });
+          const parsed = parse(value);
+          const shape = parsed === undefined ? null : shapeOf(parsed);
+          const pshape = (parts.find(p => p.shape && p.shape !== 'empty') || {}).shape;
+          if (!shape || (pshape && shape !== pshape)) {
+            // Not the same format as its parts: keep the parts list so nothing is hidden.
+            const written = await writeDoc(id, withParts({ key, value, updatedAt: new Date(at) }, meta), meta.split);
+            metaCache.set(id, metaOf(written));
+            seenSet(id, at, metaOf(written).parts.length);
+            return written;
+          }
+          const idx = indexFor(id, parts, []);
+          const kept = idx && idx.shape === shape ? strip(shape, parsed, idx) : parsed;
+          whole = JSON.stringify(merge(shape, parts, kept, meta.order || 'oldest-first'));
+        }
+        const first = await writeDoc(id, Object.assign(withParts({ key, value: whole, updatedAt: new Date(at) }, meta), { folding: true }), meta.split);
+        const last = Object.assign({}, first);
+        delete last.parts; delete last.order; delete last.shape; delete last.folding;
+        try { await put(id, last); }
+        catch (e) { metaCache.set(id, metaOf(first)); seenSet(id, at, metaOf(first).parts.length); measureKey(key, whole); return first; } // still readable whole; the next save retries
+        measure(id, last);
+        metaCache.set(id, metaOf(last));
+        seenSet(id, at, 0);
+        foldWhole.delete(id);
+        idxCache.delete(id);
+        measureKey(key, whole);
+        if (whole !== value && !inQueue(id)) { try { localStorage.setItem(key, whole); } catch (_) {} }
+        return last;
       };
 
       // The active doc for a key: this device's copy if it is waiting to upload, else the cloud's.
-      const readActive = async (key) => {
+      // inChain: called from inside this doc's write chain (don't wait for the upload queue).
+      const readActive = async (key, inChain) => {
         await ready();
         const id = sanitiseKey(key);
-        if (inQueue(id) && flushing) { try { await flushing; } catch (_) {} }
+        if (!inChain && inQueue(id) && flushing) { try { await flushing; } catch (_) {} }
         if (inQueue(id)) { const v = localGet(key); if (v !== null) return { value: v, fields: null }; }
-        if (db) {
-          try {
-            const f = await readRaw(id);
-            if (f) {
-              metaCache.set(id, metaOf(f));
-              measure(id, f);
-              try { return { value: await assemble(id, f), fields: f }; }
-              catch (e) {
-                // Never report a split value as missing: a feature would start over and overwrite it.
-                console.warn('Reading the pieces of ' + id + ' failed:', e);
-                const v = localGet(key);
-                if (v !== null) return { value: v, fields: f };
-                throw Object.assign(nwErr(`the pieces of ${id} couldn't be read (${reasonOf(e)})`), { nwFatal: true });
+        const fallback = () => { fromDevice.add(id); return { value: localGet(key), fields: null }; };
+        if (!db || isOffline()) return fallback(); // offline: this device's copy at once
+        try {
+          const f = await readRaw(id);
+          fromDevice.delete(id);
+          if (f) {
+            metaCache.set(id, metaOf(f));
+            measure(id, f);
+            try {
+              const value = await assemble(id, f);
+              if (!isReadOnlyId(id)) {
+                setMarks(key, metaOf(f).deleted);
+                if (!f.parts || !f.parts.length || seals(key) || f.folding) refreshDevice(key, id, value, f);
+                measureKey(key, value);
               }
+              return { value, fields: f };
+            } catch (e) {
+              // Never report a split value as missing: a feature would start over and overwrite it.
+              console.warn('Reading the pieces of ' + id + ' failed:', e);
+              const v = localGet(key);
+              if (v !== null) { fromDevice.add(id); return { value: v, fields: f }; }
+              throw Object.assign(nwErr(`the pieces of ${id} couldn't be read (${reasonOf(e)})`), { nwFatal: true });
             }
-            metaCache.set(id, metaOf(null));
-            const local = localGet(key);
-            // Key only on this device (saved before the cloud was reachable): copy it up quietly.
-            if (local !== null && !isReadOnlyId(id)) serial(id, () => cloudWrite(key, id, local, Date.now())).catch(() => {});
-            return { value: local, fields: null };
-          } catch (e) {
-            if (e && e.nwFatal) throw e;
-            console.warn("Firestore get failed, using this device's copy:", e);
           }
+          metaCache.set(id, metaOf(null));
+          const local = localGet(key);
+          // Key only on this device (saved before the cloud was reachable): copy it up quietly.
+          if (local !== null && !isReadOnlyId(id)) serial(id, () => cloudWrite(key, id, local, Date.now())).catch(() => {});
+          return { value: local, fields: null };
+        } catch (e) {
+          if (e && e.nwFatal) throw e;
+          console.warn("Firestore get failed, using this device's copy:", e);
         }
-        return { value: localGet(key), fields: null };
+        return fallback();
+      };
+
+      // Sealed parts + the active doc, merged; deleted markers respected. `a` is readActive's result.
+      const getAllFrom = async (key, a, inChain) => {
+        const id = sanitiseKey(key);
+        const plain = a.value !== null && a.value !== undefined ? { value: a.value } : null;
+        let f = a.fields;
+        const known = seen[id] && seen[id].parts > 0;
+        if (!f && db && !isOffline() && !fromDevice.has(id) && (seals(key) || known || (metaCache.get(id) || metaOf(null)).parts.length)) {
+          // This device's copy is the value (it is waiting to upload); the cloud doc gives the parts list.
+          try { f = await readRaw(id); } catch (_) { f = null; }
+        }
+        const meta = f ? metaOf(f) : (metaCache.get(id) || metaOf(null));
+        if (meta.folding) return plain;
+        const legacy = LEGACY_PARTS[key];
+        const unlisted = !f && !meta.parts.length && known;
+        if (!meta.parts.length && !legacy && !unlisted) return plain;
+        // Old Kaizen archive copies on this device, for when the cloud can't be read.
+        const localParts = () => ((legacy || {}).localKeys || []).map(k => {
+          const p = parse(localGet(k));
+          return p && typeof p === 'object' ? { id: sanitiseKey(k), parsed: p, shape: shapeOf(p) || 'empty' } : null;
+        }).filter(Boolean);
+        let parts, complete = false;
+        try {
+          if (!db) throw nwErr(NO_DB);
+          if (fromDevice.has(id) && !inQueue(id)) throw nwErr("the cloud couldn't be reached");
+          if (unlisted) throw nwErr(isOffline() ? OFFLINE : "its list of older parts couldn't be read");
+          parts = await loadParts(key, id, { parts: meta.parts });
+          complete = true;
+          if (readIssues.has(id)) { readIssues.delete(id); emit(); }
+          if (olderOffline.delete(key)) emit();
+        } catch (e) {
+          if (isOffline() || fromDevice.has(id)) { if (!olderOffline.has(key)) { olderOffline.add(key); emit(); } }
+          else { console.warn('Reading the sealed parts of ' + key + ' failed:', e); issue(id, key, reasonOf(e)); }
+          const have = cachedParts(key, meta);
+          parts = have.concat(localParts().filter(p => !have.some(h => h.id === p.id)));
+        }
+        if (!parts.length) return plain;
+        const active = plain ? parse(plain.value) : null;
+        const shape = (active != null && shapeOf(active)) || meta.shape || (parts.find(p => p.shape && p.shape !== 'empty') || {}).shape;
+        if (!shape || shape === 'empty') return plain;
+        const isEmptyObj = (v) => v && typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length;
+        if (active === undefined || (active != null && shapeOf(active) !== shape && !(isEmptyObj(active) && shape === 'dated'))) {
+          issue(id, key, 'the newest part is in a different format from the older parts');
+          return plain;
+        }
+        if (parts.some(p => p.shape !== shape && p.shape !== 'empty')) issue(id, key, 'some older parts are in a different format');
+        const order = meta.order || (parts.find(p => p.shape === shape && p.order) || {}).order || 'oldest-first';
+        const marks = seals(key) ? marksFor(key, f) : [];
+        const merged = merge(shape, visibleParts(parts, marks), active, order, true);
+        return { value: JSON.stringify(merged.value), parts: parts.length, complete, shape, order, from: merged.from, all: parts, marks, active, fields: f };
+      };
+
+      // A device-only save, or an upload: has the cloud copy changed since this device's copy?
+      // base: the cloud version this device's copy matched (null: never had it; missing: saved by an older app).
+      const changedSince = (cloud, e, value) => {
+        if (!cloud) return false;
+        if (typeof cloud.value === 'string' && cloud.value === value && !cloud.split) return false;
+        const cloudAt = msOf(cloud.updatedAt) || 0;
+        if (!('base' in e)) return msOf(cloud.updatedAt) != null && cloudAt > e.firstAt;
+        if (e.base === null) return true;
+        return cloudAt !== e.base;
+      };
+      // The cloud copy is kept; this device's version is written beside it as <id>__conflict_<time>.
+      const saveConflict = async (key, id, what, value, e, cloud) => {
+        const now = Date.now();
+        const cid = `${id}__conflict_${new Date(now).toISOString().replace(/[:.]/g, '_')}`;
+        const cloudAt = msOf(cloud && cloud.updatedAt);
+        const marks = devMarks[key];
+        await writeDoc(cid, Object.assign({ key, value, conflictOf: id, deviceSavedAt: new Date(e.at), cloudUpdatedAt: cloudAt != null ? new Date(cloudAt) : null, savedAt: new Date(now) },
+          seals(key) && marks && marks.length ? { deleted: marks } : {}), null);
+        held.set(id, e.firstAt);
+        conflicts = conflicts.concat([{ id: cid, key, what, at: now }]);
+        keep(CONFLICTS_KEY, conflicts);
+        return cid;
       };
 
       const uploadOne = async (id) => {
@@ -613,23 +913,19 @@
         const why = (err) => { e.reason = reasonOf(err); saveQueue(); emit(); return false; };
         let cloud;
         try { cloud = await readRaw(id); } catch (err) { return why(err); }
-        const cloudAt = msOf(cloud && cloud.updatedAt);
-        const now = Date.now();
-        if (cloud && cloudAt != null && cloudAt > e.firstAt) {
+        if (changedSince(cloud, e, value)) {
           // The cloud changed after this device's copy did: keep the cloud's, save this device's beside it.
-          const cid = `${id}__conflict_${new Date(now).toISOString().replace(/[:.]/g, '_')}`;
-          try { await writeDoc(cid, { key: e.key, value, conflictOf: id, deviceSavedAt: new Date(e.at), cloudUpdatedAt: new Date(cloudAt), savedAt: new Date(now) }, null); }
+          try { await saveConflict(e.key, id, e.what, value, e, cloud); }
           catch (err) { return why(err); }
-          held.set(id, e.firstAt);
-          conflicts = conflicts.concat([{ id: cid, key: e.key, what: e.what, at: now }]);
-          keep(CONFLICTS_KEY, conflicts);
           dropEntry(e);
           return true;
         }
         metaCache.set(id, metaOf(cloud));
-        try { await cloudWrite(e.key, id, value, now); }
+        const now = Date.now();
+        try { await cloudWrite(e.key, id, value, now, { whole: !!e.whole }); }
         catch (err) { metaCache.delete(id); return why(err); }
         failed.delete(id);
+        fromDevice.delete(id);
         dropEntry(e);
         markCloud();
         return true;
@@ -649,52 +945,117 @@
           .then(() => { flushing = null; emit(); });
         return flushing;
       };
-      window.__dbReady.then(() => { emit(); if (queue.length) flush(); });
-      window.addEventListener('online', () => { if (queue.length) flush(); });
+      window.__dbReady.then(() => { measureDevice(); emit(); if (queue.length) flush(); });
+      window.addEventListener('online', () => { emit(); if (queue.length) flush(); });
+      window.addEventListener('offline', () => emit());
+
+      // set(), inside the doc's write chain. opts: what (words for banners), restore (may write a read-only
+      // doc), marks (the new deleted-marker list for a key in SEALED_LOG_KEYS).
+      const setInChain = async (key, id, value, opts) => {
+        const at = Date.now();
+        const what = opts.what || whatOf(key);
+        const whole = foldWhole.has(id);
+        if (Array.isArray(opts.marks)) setMarks(key, opts.marks);
+        let localOk = false;
+        try { localStorage.setItem(key, value); localOk = true; } catch (_) {}
+        usageLater();
+        const q = queue.find(e => e.id === id);
+        const deviceOnly = (reason, firstAt) => {
+          if (!localOk) { fail(id, what, reason + ", and this device's storage is full"); return false; }
+          failed.delete(id);
+          const e = { key, id, at, firstAt, reason, what, base: q ? ('base' in q ? q.base : baseOf(id)) : baseOf(id) };
+          if (whole || (q && q.whole)) e.whole = true;
+          enqueue(e);
+          return 'device-only';
+        };
+        if (held.has(id)) return deviceOnly('a newer copy is in the cloud from another device. Reload the app to see it', held.get(id));
+        if (q) {
+          const r = deviceOnly(isOffline() ? OFFLINE : !db ? NO_DB : 'an earlier save of it is still waiting to upload', q.firstAt);
+          if (db && !isOffline()) setTimeout(flush, 0);
+          return r;
+        }
+        if (!db) return deviceOnly(NO_DB, at);
+        if (isOffline()) return deviceOnly(OFFLINE, at);
+        if (fromDevice.has(id)) {
+          // This device's copy was read while the cloud couldn't be reached: never overwrite a cloud copy
+          // that changed since.
+          let cloud;
+          try { cloud = await readRaw(id); } catch (e) { return deviceOnly(reasonOf(e), at); }
+          const e = { at, firstAt: at, base: baseOf(id) };
+          if (changedSince(cloud, e, value)) {
+            try { await saveConflict(key, id, what, value, e, cloud); }
+            catch (err) { return deviceOnly(reasonOf(err), at); }
+            // Kept as the conflict copy (its banner says so); later saves stay on this device until reload.
+            failed.delete(id);
+            emit();
+            return 'device-only';
+          }
+          fromDevice.delete(id);
+          metaCache.set(id, metaOf(cloud));
+        }
+        const baseBefore = baseOf(id);
+        try {
+          await cloudWrite(key, id, value, at, { whole });
+        } catch (e) {
+          console.warn('Cloud save failed for ' + key + ':', e);
+          metaCache.delete(id);
+          const r = deviceOnly(reasonOf(e), at);
+          // A write that timed out can still land later; if nothing newer was saved, it is in the cloud.
+          if (r && e && e.nwTimeout && e.rawId === id && e.raw) e.raw.then(() => {
+            const qe = queue.find(x => x.id === id);
+            if (qe && qe.at === at) { dropEntry(qe); seenSet(id, at, (seen[id] || {}).parts); markCloud(); }
+            else if (qe && qe.base === baseBefore) { qe.base = at; saveQueue(); }
+          }, () => {});
+          return r;
+        }
+        if (!localOk) { try { localStorage.removeItem(key); } catch (_) {} seenDrop(id); } // a stale device copy; the cloud has the new one
+        failed.delete(id);
+        markCloud();
+        return 'cloud';
+      };
+
+      // The item a delete or restore names, found in a key's whole history.
+      // target: { date } (date-keyed values), { id }, or { index } (position in what getAll returns).
+      const locate = (all, target) => {
+        if (all.shape === 'dated') return typeof target.date === 'string' ? { mark: { date: target.date } } : null;
+        if (target.id !== undefined && target.id !== null) return { mark: { id: target.id } };
+        if (typeof target.index !== 'number') return null;
+        const items = itemsOf(all.shape, parse(all.value));
+        const it = items[target.index];
+        const from = all.from[target.index];
+        if (!from) return null;
+        if (idOf(it) !== null) return { mark: { id: it.id }, from, item: it };
+        if (from.part) return { mark: { part: from.part, index: from.index, hash: hashOf(JSON.stringify(it)) }, from, item: it };
+        return { from, item: it };
+      };
+      const sameMark = (a, b) => (typeof a.date === 'string' ? a.date === b.date
+        : a.id !== undefined && a.id !== null ? b.id !== undefined && b.id !== null && String(a.id) === String(b.id)
+        : a.part === b.part && a.index === b.index);
 
       window.storage = {
         get: async (key) => {
           const a = await readActive(key);
+          const id = sanitiseKey(key);
+          const meta = a.fields ? metaOf(a.fields) : (metaCache.get(id) || metaOf(null));
+          // A key outside SEALED_LOG_KEYS that still has sealed parts: the whole value.
+          if (!seals(key) && !meta.folding && (meta.parts.length || (!a.fields && seen[id] && seen[id].parts > 0))) {
+            const all = await getAllFrom(key, a);
+            if (all && all.complete) {
+              foldWhole.add(id);
+              // This device's copy is the whole value, so it has no parts to wait for when offline.
+              if (!inQueue(id) && a.fields) refreshDevice(key, id, all.value, { updatedAt: a.fields.updatedAt });
+              measureKey(key, all.value);
+            }
+            return all ? { value: all.value } : null;
+          }
           return a.value !== null && a.value !== undefined ? { value: a.value } : null;
         },
 
-        // Sealed parts + the active doc, merged oldest first. Same as get() for a key with no parts.
+        // Sealed parts + the active doc, merged oldest first, without deleted items. Same as get() for a
+        // key with no parts.
         getAll: async (key) => {
-          const id = sanitiseKey(key);
-          const a = await readActive(key);
-          const plain = a.value !== null && a.value !== undefined ? { value: a.value } : null;
-          const cached = (metaCache.get(id) || metaOf(null)).parts;
-          const listed = (a.fields && Array.isArray(a.fields.parts) && a.fields.parts.length) || cached.length;
-          if (!listed && !LEGACY_PARTS[key]) return plain;
-          // Old Kaizen archive copies on this device, for when the cloud can't be read.
-          const localParts = () => ((LEGACY_PARTS[key] || {}).localKeys || []).map(k => {
-            const p = parse(localGet(k));
-            return p && typeof p === 'object' ? { id: sanitiseKey(k), parsed: p, shape: shapeOf(p) || 'empty' } : null;
-          }).filter(Boolean);
-          let parts;
-          if (!db) { issue(id, key, NO_DB); parts = localParts(); }
-          else {
-            try {
-              parts = await loadParts(key, id, a.fields || { parts: cached });
-              if (readIssues.has(id)) { readIssues.delete(id); emit(); }
-            } catch (e) {
-              console.warn('Reading the sealed parts of ' + key + ' failed:', e);
-              issue(id, key, reasonOf(e));
-              parts = localParts();
-            }
-          }
-          if (!parts.length) return plain;
-          const active = plain ? parse(plain.value) : null;
-          const shape = (active != null && shapeOf(active)) || (a.fields && a.fields.shape) || (parts.find(p => p.shape && p.shape !== 'empty') || {}).shape;
-          if (!shape || shape === 'empty') return plain;
-          const isEmptyObj = (v) => v && typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length;
-          if (active === undefined || (active != null && shapeOf(active) !== shape && !(isEmptyObj(active) && shape === 'dated'))) {
-            issue(id, key, 'the newest part is in a different format from the older parts');
-            return plain;
-          }
-          if (parts.some(p => p.shape !== shape && p.shape !== 'empty')) issue(id, key, 'some older parts are in a different format');
-          const order = (a.fields && a.fields.order) || (parts.find(p => p.shape === shape && p.order) || {}).order || 'oldest-first';
-          return { value: JSON.stringify(merge(shape, parts, active, order)), parts: parts.length };
+          const all = await getAllFrom(key, await readActive(key));
+          return all ? (all.parts ? { value: all.value, parts: all.parts } : { value: all.value }) : null;
         },
 
         // Returns 'cloud' (the cloud has it), 'device-only' (only this device has it; it uploads later)
@@ -705,49 +1066,92 @@
           if (typeof key !== 'string' || !key) return false;
           if (typeof value !== 'string') value = String(value);
           const id = sanitiseKey(key);
-          const what = opts.what || whatOf(key);
           if (isReadOnlyId(id) && !opts.restore) {
             console.warn('Refused to write ' + id + ': sealed parts are read-only.');
-            fail(id, what, 'it is a sealed part, which is read-only');
+            fail(id, opts.what || whatOf(key), 'it is a sealed part, which is read-only');
             return false;
           }
+          // A restore never trusts what this session read before (docs may have been removed since).
+          if (opts.restore) { metaCache.delete(id); legacyIds.delete(key); idxCache.delete(id); }
+          return serial(id, () => setInChain(key, id, value, opts));
+        },
+
+        // Deletes one item of a key in SEALED_LOG_KEYS (works for any key). target: { date } for date-keyed
+        // values, { id }, or { index } (its position in what getAll returns). The item is removed from the
+        // active doc; a copy in a sealed part gets a deleted marker in the active doc (the part is left as it
+        // is, so the item can be restored). opts.value: the feature's own new active value (the item already
+        // removed), written instead of the stored one. Returns what set() returns, or false if not found.
+        deleteItem: async (key, target, opts) => {
+          opts = opts || {};
+          await ready();
+          const id = sanitiseKey(key);
           return serial(id, async () => {
-            const at = Date.now();
-            let localOk = false;
-            try { localStorage.setItem(key, value); localOk = true; } catch (_) {}
-            const deviceOnly = (reason, firstAt) => {
-              if (!localOk) { fail(id, what, reason + ", and this device's storage is full"); return false; }
-              failed.delete(id);
-              enqueue({ key, id, at, firstAt, reason, what });
-              return 'device-only';
-            };
-            if (held.has(id)) return deviceOnly('a newer copy is in the cloud from another device. Reload the app to see it', held.get(id));
-            const q = queue.find(e => e.id === id);
-            if (q) {
-              const r = deviceOnly(isOffline() ? 'the device is offline' : !db ? NO_DB : 'an earlier save of it is still waiting to upload', q.firstAt);
-              if (db && !isOffline()) setTimeout(flush, 0);
-              return r;
+            const a = await readActive(key, true);
+            const all = await getAllFrom(key, a, true);
+            const shape = (all && all.shape) || shapeOf(parse(a.value));
+            if (!shape) return false;
+            const view = all && all.from ? all : { shape, value: a.value, from: (itemsOf(shape, parse(a.value)) || []).map((_, i) => ({ active: i })) };
+            const hit = locate(view, target || {});
+            if (!hit) return false;
+            let value = typeof opts.value === 'string' ? opts.value : a.value;
+            if (typeof opts.value !== 'string' && value != null) {
+              const v = parse(value);
+              if (shape === 'dated') { const d = target.date; Object.keys(v).forEach(k => { if (k === d) delete v[k]; }); }
+              else {
+                const list = itemsOf(shape, v);
+                const keepIt = (it, i) => (hit.mark && hit.mark.id !== undefined ? idOf(it) !== String(hit.mark.id) : !(hit.from && hit.from.active === i));
+                const left = list.filter(keepIt);
+                if (shape === 'array') value = JSON.stringify(left); else v.entries = left;
+              }
+              if (shape !== 'array') value = JSON.stringify(v);
             }
-            if (!db) return deviceOnly(NO_DB, at);
-            if (isOffline()) return deviceOnly('the device is offline', at);
-            try {
-              await cloudWrite(key, id, value, at);
-            } catch (e) {
-              console.warn('Cloud save failed for ' + key + ':', e);
-              metaCache.delete(id);
-              const r = deviceOnly(reasonOf(e), at);
-              // A write that timed out can still land later; if nothing newer was saved, it is in the cloud.
-              if (r && e && e.nwTimeout && e.rawId === id && e.raw) e.raw.then(() => {
-                const qe = queue.find(x => x.id === id);
-                if (qe && qe.at === at) { dropEntry(qe); markCloud(); }
-              }, () => {});
-              return r;
-            }
-            if (!localOk) { try { localStorage.removeItem(key); } catch (_) {} } // a stale device copy; the cloud has the new one
-            failed.delete(id);
-            markCloud();
-            return 'cloud';
+            const marks = (devMarks[key] || (a.fields ? metaOf(a.fields).deleted : [])).slice();
+            const inParts = hit.mark && all && all.all ? all.all.some(p => {
+              if (shape === 'dated') return p.parsed && Object.prototype.hasOwnProperty.call(p.parsed, target.date);
+              if (hit.mark && hit.mark.part) return p.id === hit.mark.part;
+              return p.shape === shape && itemsOf(shape, p.parsed).some(it => idOf(it) === String(hit.mark.id));
+            }) : false;
+            if (hit.mark && (inParts || (seals(key) && !all)) && !marks.some(m => sameMark(m, hit.mark))) marks.push(Object.assign({}, hit.mark, { at: new Date().toISOString() }));
+            if (value == null) value = shape === 'array' ? '[]' : '{}';
+            return setInChain(key, id, value, { what: opts.what, marks: seals(key) ? marks : undefined });
           });
+        },
+
+        // Removes a deleted marker, so the item shows again. target as in deleteItem, or the marker itself.
+        // opts.value: the feature's own active value to write with it.
+        restoreItem: async (key, target, opts) => {
+          opts = opts || {};
+          await ready();
+          const id = sanitiseKey(key);
+          return serial(id, async () => {
+            const a = await readActive(key, true);
+            const marks = devMarks[key] || (a.fields ? metaOf(a.fields).deleted : []);
+            const left = marks.filter(m => !sameMark(m, target || {}));
+            if (left.length === marks.length) return false;
+            const value = typeof opts.value === 'string' ? opts.value : a.value;
+            return setInChain(key, id, value == null ? '{}' : value, { what: opts.what, marks: left });
+          });
+        },
+
+        // The deleted markers of a key, each with the item it hides (from its sealed part), newest first.
+        deletedItems: async (key) => {
+          const a = await readActive(key);
+          const all = await getAllFrom(key, a);
+          const marks = marksFor(key, a.fields);
+          const parts = (all && all.all) || [];
+          return marks.map(m => {
+            let item;
+            for (const p of parts) {
+              if (!p.parsed || typeof p.parsed !== 'object') continue;
+              if (typeof m.date === 'string') { if (Object.prototype.hasOwnProperty.call(p.parsed, m.date)) item = p.parsed[m.date]; }
+              else if (p.shape === 'array' || p.shape === 'entries') {
+                const list = itemsOf(p.shape, p.parsed);
+                if (m.id !== undefined && m.id !== null) { const f = list.filter(it => idOf(it) === String(m.id)).pop(); if (f !== undefined) item = f; }
+                else if (m.part === p.id && list[m.index] !== undefined && hashOf(JSON.stringify(list[m.index])) === String(m.hash)) item = list[m.index];
+              }
+            }
+            return { marker: m, item };
+          }).sort((x, y) => String(y.marker.at || '').localeCompare(String(x.marker.at || '')));
         },
 
         // Every doc whose key starts with `prefix` (e.g. "practice:log:"), and nothing else: Firestore is
@@ -776,7 +1180,7 @@
                 metaCache.set(d.id, metaOf(f));
                 measure(d.id, f);
                 let value = await assemble(d.id, f);
-                if (Array.isArray(f.parts) && f.parts.length) { const all = await window.storage.getAll(k); if (all) value = all.value; }
+                if (Array.isArray(f.parts) && f.parts.length && !f.folding) { const all = await window.storage.getAll(k); if (all) value = all.value; }
                 out[k] = { id: d.id, key: k, value };
               }
             } catch (e) {
@@ -791,7 +1195,7 @@
         // backups and the size table. Firestore Timestamps (and Dates) become ISO strings. null if unreadable.
         exportRawDocs: async () => {
           await ready();
-          if (!db) return null;
+          if (!db || isOffline()) return null;
           // Only plain objects and arrays are walked; other Firestore types become something JSON-safe
           // (a DocumentReference holds the whole Firestore instance and must not be walked).
           const plain = (v) => {
@@ -827,7 +1231,7 @@
           const rest = Object.assign({}, fields);
           delete rest.updatedAt; delete rest.migratedAt; delete rest.restoredAt;
           const now = new Date();
-          const isActive = typeof fields.key === 'string' && sanitiseKey(fields.key) === id;
+          const isActive = typeof fields.key === 'string' && sanitiseKey(fields.key) === id && !isReadOnlyId(id);
           let localOk = false;
           if (isActive && typeof fields.value === 'string') {
             try { localStorage.setItem(fields.key, fields.value); localOk = true; } catch (_) {}
@@ -837,9 +1241,13 @@
             try {
               let prev = null;
               try { prev = metaOf(await readRaw(id)).split; } catch (_) {}
-              await writeDoc(id, Object.assign(rest, { updatedAt: now, restoredAt: now }), prev);
+              const written = await writeDoc(id, Object.assign(rest, { updatedAt: now, restoredAt: now }), prev);
               metaCache.delete(id); partCache.delete(id); idxCache.clear(); legacyIds.clear();
-              if (isActive) { const e = queue.find(x => x.id === id); if (e) dropEntry(e); failed.delete(id); }
+              if (isActive) {
+                const e = queue.find(x => x.id === id); if (e) dropEntry(e); failed.delete(id);
+                setMarks(fields.key, metaOf(written).deleted);
+                if (localOk) seenSet(id, now.getTime(), metaOf(written).parts.length); else seenDrop(id);
+              }
               return true;
             } catch (e) {
               console.warn('Firestore restore failed for ' + id + ':', e);
@@ -847,6 +1255,53 @@
             }
           });
         },
+
+        // Makes a key's whole history read back exactly as `value` (a backup restore of a key in
+        // SEALED_LOG_KEYS): writes it, then sets deleted markers for anything in its sealed parts that the
+        // backup doesn't have. Nothing in a part is changed. Returns what set() returns.
+        setExact: async (key, value, opts) => {
+          opts = opts || {};
+          const first = await window.storage.set(key, value, opts);
+          if (first !== 'cloud' || !seals(key)) return first;
+          const id = sanitiseKey(key);
+          return serial(id, async () => {
+            const a = await readActive(key, true);
+            const all = await getAllFrom(key, a, true);
+            if (!all || !all.all || !all.all.length) return first;
+            const want = parse(value), shape = all.shape;
+            if (want === undefined || shapeOf(want) !== shape) return first;
+            const marks = [];
+            const at = new Date().toISOString();
+            if (shape === 'dated') {
+              const dates = new Set();
+              all.all.forEach(p => { if (p.parsed && typeof p.parsed === 'object') Object.keys(p.parsed).forEach(k => dates.add(k)); });
+              dates.forEach(d => { if (!Object.prototype.hasOwnProperty.call(want, d)) marks.push({ date: d, at }); });
+            } else {
+              const wanted = itemsOf(shape, want);
+              const ids = new Set(wanted.map(idOf).filter(x => x !== null));
+              const counts = new Map();
+              wanted.forEach(it => { if (idOf(it) === null) { const j = JSON.stringify(it); counts.set(j, (counts.get(j) || 0) + 1); } });
+              const activeItems = itemsOf(shape, all.active || (shape === 'array' ? [] : { entries: [] })) || [];
+              activeItems.forEach(it => { if (idOf(it) === null) { const j = JSON.stringify(it); if (counts.get(j)) counts.set(j, counts.get(j) - 1); } });
+              const markedIds = new Set();
+              all.all.forEach(p => {
+                if (p.shape !== shape) return;
+                itemsOf(shape, p.parsed).forEach((it, i) => {
+                  const iid = idOf(it);
+                  if (iid !== null) { if (!ids.has(iid) && !markedIds.has(iid)) { markedIds.add(iid); marks.push({ id: it.id, at }); } return; }
+                  const j = JSON.stringify(it);
+                  if (counts.get(j)) { counts.set(j, counts.get(j) - 1); return; }
+                  marks.push({ part: p.id, index: i, hash: hashOf(j), at });
+                });
+              });
+            }
+            const cur = a.value == null ? value : a.value;
+            return setInChain(key, id, cur, { what: opts.what, marks });
+          });
+        },
+
+        // This device's saved data, counted at 2 bytes per character, against a 5 MB estimate.
+        deviceUsage: () => measureDevice(),
 
         // Lets the SaveStatusPill display "Local-only" mode distinctly
         isCloudReady: () => !!window.__dbAvailable,
@@ -861,10 +1316,12 @@
           if (kind === 'read') readIssues.delete(id);
           if (kind === 'conflict') { conflicts = conflicts.filter(c => c.id !== id); keep(CONFLICTS_KEY, conflicts); }
           if (kind === 'size' && sizeWarn.has(id)) { dismissedSizes[id] = sizeWarn.get(id).bytes; keep(DISMISSED_KEY, dismissedSizes); }
+          if (kind === 'big' && bigKeys.has(id)) { dismissedSizes['big:' + id] = bigKeys.get(id); keep(DISMISSED_KEY, dismissedSizes); }
+          if (kind === 'device-full') usageDismissed = Math.floor(usage.pct);
           emit();
         },
         flush: () => flush(),
-        docBytes, kindOf, LIMIT, SAFE,
+        docBytes, kindOf, hashOf, LIMIT, SAFE, SEALED_LOG_KEYS: SEALED_LOG_KEYS.slice(), DEVICE_LIMIT,
       };
     })();
     // ══ NW-STORAGE-LAYER END ════════════════════════════════════════
@@ -1399,7 +1856,7 @@ const nwClock = (ms) => {
 function NwStorageBanners() {
   const s = useNwSaveState();
   if (!s || !s.banners?.length) return null;
-  const tone = { 'device-only': ['#2a1f05', '#fbbf24'], failed: ['#2a0b0b', '#fca5a5'], conflict: ['#2a1f05', '#fbbf24'], size: ['#1f1a05', '#fde68a'], read: ['#1f1a05', '#fde68a'] };
+  const tone = { 'device-only': ['#2a1f05', '#fbbf24'], failed: ['#2a0b0b', '#fca5a5'], conflict: ['#2a1f05', '#fbbf24'], size: ['#1f1a05', '#fde68a'], big: ['#1f1a05', '#fde68a'], 'device-full': ['#2a1f05', '#fbbf24'], read: ['#1f1a05', '#fde68a'] };
   return (
     <div data-nw-banners style={{ flexShrink: 0, maxHeight: '40vh', overflowY: 'auto', position: 'relative', zIndex: 9998 }}>
       {s.banners.map(b => {
@@ -1423,10 +1880,20 @@ function NwSaveStatusLine() {
   const text = s.waiting ? `${s.waiting} waiting to upload`
     : s.failedCount ? `${s.failedCount} not saved — see the message at the top`
     : s.lastCloudSave ? `All saved · last cloud save ${nwClock(s.lastCloudSave)}` : 'All saved';
+  // Older sealed history isn't kept on this device: one plain line instead of an error.
+  const older = s.olderOffline && s.olderOffline.length > 0;
   return (
-    <div data-nw-status role="status" style={{ flexShrink: 0, textAlign: 'center', fontSize: 11, padding: '4px 16px', color: s.waiting || s.failedCount ? '#fbbf24' : '#9ca3af', background: '#141414', borderTop: '1px solid #262626', fontFamily: "'Space Mono', monospace" }}>
-      {text}
-    </div>
+    <>
+      {older && (
+        <div data-nw-older style={{ flexShrink: 0, display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'center', fontSize: 11, padding: '4px 16px', color: '#9ca3af', background: '#141414', borderTop: '1px solid #262626', fontFamily: "'Space Mono', monospace" }}>
+          {s.online ? <span>Back online. Reload to see older history.</span> : <span>Older history loads when you're online</span>}
+          {s.online && <button onClick={() => window.location.reload()} style={{ minHeight: 28, padding: '2px 10px', background: 'transparent', color: '#4ECDC4', border: '1px solid #4ECDC4', borderRadius: 6, fontSize: 11, fontFamily: 'inherit', cursor: 'pointer' }}>Reload</button>}
+        </div>
+      )}
+      <div data-nw-status role="status" style={{ flexShrink: 0, textAlign: 'center', fontSize: 11, padding: '4px 16px', color: s.waiting || s.failedCount ? '#fbbf24' : '#9ca3af', background: '#141414', borderTop: '1px solid #262626', fontFamily: "'Space Mono', monospace" }}>
+        {text}
+      </div>
+    </>
   );
 }
 
@@ -1603,12 +2070,12 @@ const SK = {
   ping        : 'kaizen3:ping',
 };
 
+// window.storage always answers (from this device's copy when the cloud can't be reached), so Kaizen loads
+// straight away; the connection check is written in the background and never waited for.
 async function testStorage() {
-  try {
-    await window.storage.set(SK.ping, 'ok');
-    const r = await window.storage.get(SK.ping);
-    return r?.value === 'ok';
-  } catch { return false; }
+  if (!window.storage || typeof window.storage.get !== 'function') return false;
+  try { Promise.resolve(window.storage.set(SK.ping, 'ok')).catch(() => {}); } catch {}
+  return true;
 }
 
 async function storageGet(key) {
@@ -1773,6 +2240,42 @@ function KaizenApp() {
     setLogs({ ...logs, [date]: { ...cur, ...patch } });
   };
 
+  // ── Delete / restore a day ──
+  // The day leaves the active doc. A copy in a sealed part or an old archive stays where it is, hidden by
+  // a deleted marker in the active doc (window.storage.deleteItem), so "Deleted days" can bring it back.
+  const [deletedDays, setDeletedDays] = useState([]);
+  const loadDeleted = async () => {
+    try { const d = await window.storage.deletedItems?.(SK.logs); setDeletedDays(Array.isArray(d) ? d : []); } catch {}
+  };
+  useEffect(() => { if (loaded && storeSt === 'active') loadDeleted(); }, [loaded, storeSt]);
+  const showSaved = (where) => {
+    setSaveSt(where === 'cloud' ? 'saved' : where ? 'device' : 'error');
+    if (where === 'cloud') setTimeout(() => setSaveSt('idle'), 1500);
+    if (!where) setSaveFailure({ message: "A save didn't go through. Your latest change may not be stored. Reload and check, or export a backup." });
+  };
+  const deleteLogDay = async (date) => {
+    clearTimeout(saveTimers.current[SK.logs]); // the value below already has every unsaved edit
+    const next = { ...logs };
+    delete next[date];
+    setLogsRaw(next);
+    setArchiveLogs(a => { const n = { ...a }; delete n[date]; return n; });
+    setSaveSt('saving');
+    let where = false;
+    try { where = await window.storage.deleteItem(SK.logs, { date }, { value: JSON.stringify(next) }); } catch {}
+    showSaved(where);
+    loadDeleted();
+  };
+  const restoreLogDay = async (date) => {
+    clearTimeout(saveTimers.current[SK.logs]);
+    setSaveSt('saving');
+    let where = false;
+    try { where = await window.storage.restoreItem(SK.logs, { date }, { value: JSON.stringify(logs) }); } catch {}
+    showSaved(where);
+    const history = await storageGetAll(SK.logs);
+    if (history) setArchiveLogs(history);
+    loadDeleted();
+  };
+
   // ── Today log shortcut ───────────────────
   const today    = todayISO();
   const todayLog = mergedLogs[today] || { brainDump:'', highlight:'', micro:'', done:[], reflection:'' };
@@ -1849,7 +2352,7 @@ function KaizenApp() {
     tasks:     <TasksView    tasks={sorted} allTasks={tasks} projects={projects} setTasks={setTasks}/>,
     projects:  <ProjectsView projects={projects} tasks={tasks} setProjects={setProjects} setTasks={setTasks}/>,
     templates: <TemplatesView/>,
-    reflect:   <ReflectView  logs={mergedLogs} updateLog={updateLog} tasks={enriched} allTasks={tasks} setTasks={setTasks} projects={projects}/>,
+    reflect:   <ReflectView  logs={mergedLogs} updateLog={updateLog} tasks={enriched} allTasks={tasks} setTasks={setTasks} projects={projects} deletedDays={deletedDays} onDeleteDay={deleteLogDay} onRestoreDay={restoreLogDay}/>,
     trajectory:<TrajectoryView logs={mergedLogs} updateLog={updateLog} tasks={enriched}/>,
   };
 
@@ -3757,8 +4260,10 @@ function TrajectoryView({ logs, updateLog, tasks }) {
 // REFLECT VIEW
 // ─────────────────────────────────────────────────────
 
-function ReflectView({logs, updateLog, tasks, allTasks, setTasks, projects}) {
+function ReflectView({logs, updateLog, tasks, allTasks, setTasks, projects, deletedDays = [], onDeleteDay, onRestoreDay}) {
   const [expandedDate, setExpandedDate] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [showDeleted, setShowDeleted] = useState(false);
   const dates = Object.keys(logs).sort().reverse().slice(0,90);
   const last7  = dates.slice(0,7);
 
@@ -3825,11 +4330,41 @@ function ReflectView({logs, updateLog, tasks, allTasks, setTasks, projects}) {
                   log={l}
                   updateLog={patch=>updateLog(d,patch)}
                 />
+                {onDeleteDay && (
+                  <button data-nw-delete-day={d}
+                    onClick={()=>{ if (confirmDelete===d) { setConfirmDelete(null); setExpandedDate(null); onDeleteDay(d); } else setConfirmDelete(d); }}
+                    style={{marginTop:12,width:'100%',padding:'10px 12px',borderRadius:10,border:'none',cursor:'pointer',fontSize:13,
+                      background:confirmDelete===d?'#fee2e2':'transparent',color:'#991b1b',outline:confirmDelete===d?'none':'1px solid #e8c4c4'}}>
+                    {confirmDelete===d ? 'Tap again to delete this day' : 'Delete this day'}
+                  </button>
+                )}
               </div>
             )}
           </div>
         );
       })}
+      {deletedDays.length > 0 && (
+        <div data-nw-deleted-days style={{marginTop:16}}>
+          <button onClick={()=>setShowDeleted(!showDeleted)} style={{background:'transparent',border:'none',cursor:'pointer',padding:'6px 2px',fontSize:12,color:'#6b6660',display:'flex',alignItems:'center',gap:6}}>
+            {showDeleted ? <ChevronDown size={14}/> : <ChevronRight size={14}/>} Deleted days ({deletedDays.length})
+          </button>
+          {showDeleted && (
+            <div>
+              <div style={{fontSize:11,color:'#6b6660',margin:'2px 2px 8px',lineHeight:1.5}}>Deleted days stay saved. Restore puts a day back.</div>
+              {deletedDays.map(({marker, item}) => (
+                <div key={marker.date || JSON.stringify(marker)} className="card" style={{padding:12,marginBottom:6,display:'flex',gap:10,alignItems:'center'}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div className="fm" style={{fontSize:11,color:'#6b6660'}}>{marker.date ? fmtDate(marker.date) : 'Item'}</div>
+                    <div style={{fontSize:13,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{(item && item.highlight) || 'No highlight'}</div>
+                  </div>
+                  <button data-nw-restore-day={marker.date} onClick={()=>onRestoreDay && onRestoreDay(marker.date)}
+                    style={{padding:'8px 12px',borderRadius:10,border:'1px solid #3d5a3d',background:'transparent',color:'#3d5a3d',cursor:'pointer',fontSize:13,flexShrink:0}}>Restore</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -10419,11 +10954,81 @@ function PendingView({ glance, onJump }) {
   );
 }
 
+// ── TIME ZONES ──────────────────────────────────────────────────
+// Backup files are named by the date where this device is, plus a short zone label. Browsers often give
+// "GMT+5:30" instead of a name, so common zones have their names here: [standard, daylight saving].
+// A zone not listed uses the browser's name if it is letters (e.g. "CST"), else its UTC offset ("UTC+5:45").
+// tools/drive-backup.gs has the same list and rules; keep the two the same.
+const NW_ZONE_NAMES = {
+  'America/Anchorage': ['AKST', 'AKDT'], 'America/Juneau': ['AKST', 'AKDT'], 'America/Sitka': ['AKST', 'AKDT'],
+  'America/Nome': ['AKST', 'AKDT'], 'America/Yakutat': ['AKST', 'AKDT'], 'America/Adak': ['HST', 'HDT'], 'Pacific/Honolulu': ['HST', 'HST'],
+  'America/Los_Angeles': ['PST', 'PDT'], 'America/Vancouver': ['PST', 'PDT'], 'America/Denver': ['MST', 'MDT'],
+  'America/Edmonton': ['MST', 'MDT'], 'America/Boise': ['MST', 'MDT'], 'America/Phoenix': ['MST', 'MST'],
+  'America/Chicago': ['CST', 'CDT'], 'America/Winnipeg': ['CST', 'CDT'], 'America/New_York': ['EST', 'EDT'],
+  'America/Toronto': ['EST', 'EDT'], 'America/Detroit': ['EST', 'EDT'], 'America/Halifax': ['AST', 'ADT'],
+  'Europe/London': ['GMT', 'BST'], 'Europe/Paris': ['CET', 'CEST'], 'Europe/Berlin': ['CET', 'CEST'],
+  'Europe/Madrid': ['CET', 'CEST'], 'Europe/Rome': ['CET', 'CEST'], 'Europe/Amsterdam': ['CET', 'CEST'],
+  'Europe/Zurich': ['CET', 'CEST'], 'Europe/Vienna': ['CET', 'CEST'], 'Europe/Brussels': ['CET', 'CEST'],
+  'Europe/Stockholm': ['CET', 'CEST'], 'Europe/Oslo': ['CET', 'CEST'], 'Europe/Copenhagen': ['CET', 'CEST'],
+  'Europe/Prague': ['CET', 'CEST'], 'Europe/Warsaw': ['CET', 'CEST'], 'Europe/Athens': ['EET', 'EEST'],
+  'Europe/Helsinki': ['EET', 'EEST'], 'Europe/Bucharest': ['EET', 'EEST'], 'Europe/Kyiv': ['EET', 'EEST'],
+  'Asia/Kolkata': ['IST', 'IST'], 'Asia/Calcutta': ['IST', 'IST'], 'Asia/Dubai': ['GST', 'GST'],
+  'Asia/Singapore': ['SGT', 'SGT'], 'Asia/Hong_Kong': ['HKT', 'HKT'], 'Asia/Tokyo': ['JST', 'JST'], 'Asia/Seoul': ['KST', 'KST'],
+  'Australia/Sydney': ['AEST', 'AEDT'], 'Australia/Melbourne': ['AEST', 'AEDT'], 'Australia/Brisbane': ['AEST', 'AEST'],
+  'Australia/Adelaide': ['ACST', 'ACDT'], 'Australia/Perth': ['AWST', 'AWST'], 'Pacific/Auckland': ['NZST', 'NZDT'],
+  'UTC': ['UTC', 'UTC'], 'Etc/UTC': ['UTC', 'UTC'],
+};
+// Old names some browsers still report, and the current name of each zone.
+const NW_ZONE_ALIASES = { 'Asia/Calcutta': 'Asia/Kolkata', 'Asia/Katmandu': 'Asia/Kathmandu', 'Europe/Kiev': 'Europe/Kyiv', 'Asia/Saigon': 'Asia/Ho_Chi_Minh', 'Asia/Rangoon': 'Asia/Yangon', 'US/Alaska': 'America/Anchorage', 'US/Pacific': 'America/Los_Angeles', 'US/Eastern': 'America/New_York', 'Etc/UCT': 'UTC', 'Etc/Universal': 'UTC', 'Etc/Zulu': 'UTC' };
+// "+05:30" / "-08:00" from minutes east of UTC; label form "UTC+5:30" / "UTC-8".
+const nwOffsetText = (min) => { const a = Math.abs(min); return (min < 0 ? '-' : '+') + String(Math.floor(a / 60)).padStart(2, '0') + ':' + String(a % 60).padStart(2, '0'); };
+const nwOffsetLabel = (min) => { const a = Math.abs(min); return min === 0 ? 'UTC' : 'UTC' + (min < 0 ? '-' : '+') + Math.floor(a / 60) + (a % 60 ? ':' + String(a % 60).padStart(2, '0') : ''); };
+// The label for a zone at one moment. platformShort: the short name the browser (or Apps Script) gives.
+function nwZoneLabel(zone, offsetMin, isDst, platformShort) {
+  const named = NW_ZONE_NAMES[zone];
+  if (named) return named[isDst ? 1 : 0];
+  if (platformShort && /^[A-Z]{2,5}$/.test(platformShort) && platformShort !== 'GMT') return platformShort;
+  return nwOffsetLabel(offsetMin);
+}
+// { zone: 'America/Anchorage', date: '2026-10-04', label: 'AKDT', offset: '-08:00', offsetMin: -480 } for `when`.
+function nwZoneInfo(when, zoneOverride) {
+  const d = when ? new Date(when) : new Date();
+  let zone = zoneOverride;
+  try { zone = zone || Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (_) {}
+  zone = NW_ZONE_ALIASES[zone] || zone || 'UTC';
+  const partsAt = (t) => {
+    const o = {};
+    new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short' })
+      .formatToParts(t).forEach(p => { o[p.type] = p.value; });
+    return o;
+  };
+  const offsetAt = (t) => {
+    const p = partsAt(t);
+    const asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second);
+    return Math.round((asUtc - Math.floor(t.getTime() / 1000) * 1000) / 60000);
+  };
+  const p = partsAt(d);
+  const offsetMin = offsetAt(d);
+  const y = d.getUTCFullYear();
+  const std = Math.min(offsetAt(new Date(Date.UTC(y, 0, 1))), offsetAt(new Date(Date.UTC(y, 6, 1))));
+  return { zone, date: `${p.year}-${p.month}-${p.day}`, label: nwZoneLabel(zone, offsetMin, offsetMin > std, p.timeZoneName), offset: nwOffsetText(offsetMin), offsetMin };
+}
+// nikhil-world-backup-<YYYY-MM-DD>-<label>.json, in this device's time zone.
+const nwBackupFileName = (z, thisDeviceOnly) => `nikhil-world-backup-${z.date}-${z.label}${thisDeviceOnly ? '-this-device' : ''}.json`;
+window.nwZoneInfo = nwZoneInfo;
+window.nwBackupFileName = nwBackupFileName;
+
 // ── BACKUPS ─────────────────────────────────────────────────────
-// A backup is every doc in the database (format 2). If the database can't be read, it falls back to
-// every key on this device except tokens and Firebase/internal keys.
+// A backup (format 3) has one entry per key: { key, value, updatedAt }, where value is exactly what
+// window.storage.getAll returns for it (sealed parts merged, split pieces joined, deleted items left out),
+// parsed from JSON ({ ..., text: true } when the stored value isn't JSON). Conflict copies are kept beside
+// the entries. If the database can't be read, it falls back to every key on this device except tokens and
+// Firebase/internal keys.
 const NW_BACKUP_SKIP = /^(gdrive_token|firebase|__)|token/i;
 const NW_MULTIPART_MAX_BYTES = 4.5 * 1024 * 1024; // above this, Drive gets a resumable upload
+// Docs that aren't keys of their own: sealed parts, split pieces, conflict copies, old Kaizen archives.
+const nwNotAKey = (id, f) => /__part_\d+$|__split_|__conflict_/.test(id) || id === 'kaizen3_logs' || /^kaizen[34]_logs_archive_/.test(id)
+  || !!(f && (f.sealed || f.splitOf || f.conflictOf));
 
 async function nwHash(str) {
   try {
@@ -10443,27 +11048,63 @@ async function nwHash(str) {
   return 'cyrb53:' + (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
 }
 
-// Returns { backup: { format:2, timestamp, source, count, docs:[{id, fields}] }, fingerprint }.
-// docs are sorted by id, each doc once. fingerprint = hash of the docs JSON (no timestamp).
+// A stored string as a backup value: parsed JSON, or the text itself with text: true.
+const nwAsValue = (s) => {
+  if (typeof s !== 'string') return { value: s === undefined ? null : s };
+  try { return { value: JSON.parse(s) }; } catch (_) { return { value: s, text: true }; }
+};
+// The string to store for a backup entry (the reverse of nwAsValue).
+const nwValueString = (e) => (e.text && typeof e.value === 'string' ? e.value : JSON.stringify(e.value));
+
+// Returns { backup: { format: 3, timestamp, source, zone, label, offset, count, entries, conflictCopies,
+// unreadable }, fingerprint }. entries are sorted by key. fingerprint = hash of everything but the timestamp.
 async function nwGatherBackup() {
+  const z = nwZoneInfo();
   let raw = null;
   try { raw = await window.storage?.exportRawDocs?.(); } catch (_) { raw = null; }
   let source = 'firestore';
-  const byId = new Map();
+  const entries = [], conflictCopies = [], unreadable = [];
   if (Array.isArray(raw)) {
-    raw.forEach(d => { if (d && typeof d.id === 'string' && !byId.has(d.id)) byId.set(d.id, { id: d.id, fields: d.fields || {} }); });
+    const docs = raw.filter(d => d && typeof d.id === 'string').map(d => ({ id: d.id, fields: d.fields || {} }));
+    const keys = new Map(); // key → its doc's fields
+    docs.forEach(d => {
+      if (nwNotAKey(d.id, d.fields)) return;
+      const k = typeof d.fields.key === 'string' && sanitiseKey(d.fields.key) === d.id ? d.fields.key : d.id;
+      keys.set(k, d.fields);
+    });
+    // Old Kaizen archives are read as part of kaizen4:logs, even if its active doc is missing.
+    if (docs.some(d => d.id === 'kaizen3_logs' || /^kaizen[34]_logs_archive_/.test(d.id)) && !keys.has('kaizen4:logs')) keys.set('kaizen4:logs', {});
+    for (const k of [...keys.keys()].sort()) {
+      const f = keys.get(k);
+      try {
+        const r = await window.storage.getAll(k);
+        if (!r || r.value === null || r.value === undefined) continue;
+        entries.push(Object.assign({ key: k }, nwAsValue(r.value), { updatedAt: typeof f.updatedAt === 'string' ? f.updatedAt : null }));
+      } catch (e) {
+        // Can't be put together: keep its raw docs so nothing is left out of the backup.
+        const id = sanitiseKey(k);
+        unreadable.push({ key: k, reason: String(e?.message || e), docs: docs.filter(d => d.id === id || d.id.startsWith(id + '__')) });
+      }
+    }
+    docs.filter(d => d.fields.conflictOf || /__conflict_/.test(d.id)).forEach(d => {
+      const f = d.fields;
+      const base = { id: d.id, key: f.key ?? null, conflictOf: f.conflictOf ?? null, deviceSavedAt: f.deviceSavedAt ?? null, cloudUpdatedAt: f.cloudUpdatedAt ?? null, savedAt: f.savedAt ?? null };
+      if (f.split) conflictCopies.push(Object.assign(base, { docs: docs.filter(x => x.id === d.id || x.fields.splitOf === d.id) }));
+      else conflictCopies.push(Object.assign(base, nwAsValue(f.value)));
+    });
   } else {
     source = 'this-device';
     const keys = [];
     try { for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i)); } catch (_) {}
     keys.filter(k => typeof k === 'string' && !NW_BACKUP_SKIP.test(k)).sort().forEach(k => {
-      const id = sanitiseKey(k);
-      if (!byId.has(id)) byId.set(id, { id, fields: { key: k, value: localStorage.getItem(k) } });
+      entries.push(Object.assign({ key: k }, nwAsValue(localStorage.getItem(k)), { updatedAt: null }));
     });
   }
-  const docs = [...byId.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  const fingerprint = await nwHash(JSON.stringify(docs));
-  return { backup: { format: 2, timestamp: new Date().toISOString(), source, count: docs.length, docs }, fingerprint };
+  const fingerprint = await nwHash(JSON.stringify({ entries, conflictCopies, unreadable }));
+  const backup = { format: 3, timestamp: new Date().toISOString(), source, zone: z.zone, label: z.label, offset: z.offset, count: entries.length, entries };
+  if (conflictCopies.length) backup.conflictCopies = conflictCopies;
+  if (unreadable.length) backup.unreadable = unreadable;
+  return { backup, fingerprint, zone: z };
 }
 
 // "523 items · 1.24 MB", plus a note when only this device's copy was used.
@@ -10473,29 +11114,60 @@ const nwBackupSummary = (backup, content) => {
     (backup.source === 'this-device' ? " · The database couldn't be read, so only this device's copy was used." : '');
 };
 
-// Restores a backup file. Format 2: each doc by its ID (window.storage.setDoc), pieces of split values
-// and sealed parts first, so a doc never points at pieces that aren't back yet. Older files with a
-// {key: value} data map: window.storage.set per key (allowed to write read-only docs). Asks first.
-// Returns { cancelled } | { error } | { restored, failed: [ids], deviceOnly: [keys], count }.
+// Restores a backup file. Format 3: each key through window.storage (set, or setExact for keys in
+// SEALED_LOG_KEYS), then read back with getAll; a key that doesn't read back exactly is reported as failed.
+// Conflict copies and unreadable keys' raw docs go back by ID. Format 2: each doc by its ID
+// (window.storage.setDoc), pieces of split values and sealed parts first, so a doc never points at pieces
+// that aren't back yet. Older files with a {key: value} data map: window.storage.set per key. Asks first.
+// Returns { cancelled } | { error } | { restored, failed: [ids or keys], deviceOnly: [keys], count }.
 async function nwRestoreBackup(d) {
-  const isV2 = !!d && d.format === 2 && Array.isArray(d.docs);
-  const isOld = !isV2 && !!d && d.data && typeof d.data === 'object' && !Array.isArray(d.data);
-  if (!isV2 && !isOld) return { error: 'Invalid backup file.' };
-  const count = isV2 ? d.docs.length : Object.keys(d.data).length;
+  const isV3 = !!d && d.format === 3 && Array.isArray(d.entries);
+  const isV2 = !isV3 && !!d && d.format === 2 && Array.isArray(d.docs);
+  const isOld = !isV3 && !isV2 && !!d && d.data && typeof d.data === 'object' && !Array.isArray(d.data);
+  if (!isV3 && !isV2 && !isOld) return { error: 'Invalid backup file.' };
+  const count = isV3 ? d.entries.length : isV2 ? d.docs.length : Object.keys(d.data).length;
   const t = d.timestamp ? new Date(d.timestamp) : null;
   const when = t && !isNaN(t) ? t.toLocaleString() : 'an unknown date';
   if (!window.confirm(`Restore ${count} item${count === 1 ? '' : 's'} from the backup made ${when}? Each one replaces the current copy of that item.`)) return { cancelled: true };
   const failed = [], deviceOnly = [];
   let restored = 0;
-  if (isV2) {
+  const byId = async (docs) => {
     const rank = (doc) => { const f = (doc && doc.fields) || {}; return f.splitOf ? 0 : f.sealed ? 1 : 2; };
-    const ordered = d.docs.map((doc, i) => ({ doc, i })).sort((a, b) => rank(a.doc) - rank(b.doc) || a.i - b.i).map(x => x.doc);
+    const ordered = docs.map((doc, i) => ({ doc, i })).sort((a, b) => rank(a.doc) - rank(b.doc) || a.i - b.i).map(x => x.doc);
+    let ok = 0;
     for (const doc of ordered) {
       const id = doc && typeof doc.id === 'string' ? doc.id : null;
-      let ok = false;
-      try { ok = !!id && !!doc.fields && typeof doc.fields === 'object' && (await window.storage.setDoc(id, doc.fields)) === true; } catch (_) { ok = false; }
-      if (ok) restored++; else failed.push(id || '(a doc with no id)');
+      let done = false;
+      try { done = !!id && !!doc.fields && typeof doc.fields === 'object' && (await window.storage.setDoc(id, doc.fields)) === true; } catch (_) { done = false; }
+      if (done) ok++; else failed.push(id || '(a doc with no id)');
     }
+    return ok;
+  };
+  if (isV3) {
+    for (const e of d.entries) {
+      if (!e || typeof e.key !== 'string' || !e.key) { failed.push('(an entry with no key)'); continue; }
+      const str = nwValueString(e);
+      let where = false;
+      try { where = await (window.storage.setExact || window.storage.set)(e.key, str, { restore: true }); } catch (_) { where = false; }
+      if (!where) { failed.push(e.key); continue; }
+      if (where === 'device-only') deviceOnly.push(e.key);
+      // Read it back: it must match the backup exactly.
+      let back = null;
+      try { back = await window.storage.getAll(e.key); } catch (_) { back = null; }
+      const same = !!back && typeof back.value === 'string' && (e.text ? back.value === e.value : (() => { try { return JSON.stringify(JSON.parse(back.value)) === JSON.stringify(e.value); } catch (_) { return false; } })());
+      if (same) restored++; else failed.push(e.key);
+    }
+    for (const c of d.conflictCopies || []) {
+      if (!c || typeof c.id !== 'string') continue;
+      if (Array.isArray(c.docs)) { await byId(c.docs); continue; }
+      const fields = { key: c.key, value: nwValueString(c), conflictOf: c.conflictOf, deviceSavedAt: c.deviceSavedAt, cloudUpdatedAt: c.cloudUpdatedAt, savedAt: c.savedAt };
+      let ok = false;
+      try { ok = (await window.storage.setDoc(c.id, fields)) === true; } catch (_) { ok = false; }
+      if (!ok) failed.push(c.id);
+    }
+    for (const u of d.unreadable || []) if (Array.isArray(u.docs)) await byId(u.docs);
+  } else if (isV2) {
+    restored = await byId(d.docs);
   } else {
     for (const [k, v] of Object.entries(d.data)) {
       let where = false;
@@ -10508,6 +11180,169 @@ async function nwRestoreBackup(d) {
 }
 window.nwGatherBackup = nwGatherBackup;
 window.nwRestoreBackup = nwRestoreBackup;
+
+// ── DRIVE ───────────────────────────────────────────────────────
+// MD5 of UTF-8 bytes (hex), to check Drive's md5Checksum of an upload.
+function nwMd5(str) {
+  const bytes = new TextEncoder().encode(str);
+  const n = bytes.length, words = new Uint32Array((((n + 8) >>> 6) + 1) * 16);
+  for (let i = 0; i < n; i++) words[i >> 2] |= bytes[i] << ((i % 4) * 8);
+  words[n >> 2] |= 0x80 << ((n % 4) * 8);
+  words[words.length - 2] = (n * 8) >>> 0;
+  words[words.length - 1] = Math.floor(n / 0x20000000);
+  const S = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+  const K = new Uint32Array(64).map((_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296));
+  let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+  for (let o = 0; o < words.length; o += 16) {
+    let a = a0, b = b0, c = c0, d = d0;
+    for (let i = 0; i < 64; i++) {
+      let f, g;
+      if (i < 16) { f = (b & c) | (~b & d); g = i; }
+      else if (i < 32) { f = (d & b) | (~d & c); g = (5 * i + 1) % 16; }
+      else if (i < 48) { f = b ^ c ^ d; g = (3 * i + 5) % 16; }
+      else { f = c ^ (b | ~d); g = (7 * i) % 16; }
+      const tmp = d; d = c; c = b;
+      const x = (a + f + K[i] + words[o + g]) | 0;
+      const s = S[(i >> 4) * 4 + (i % 4)];
+      b = (b + ((x << s) | (x >>> (32 - s)))) | 0;
+      a = tmp;
+    }
+    a0 = (a0 + a) | 0; b0 = (b0 + b) | 0; c0 = (c0 + c) | 0; d0 = (d0 + d) | 0;
+  }
+  return [a0, b0, c0, d0].map(v => [0, 8, 16, 24].map(sh => ((v >>> sh) & 255).toString(16).padStart(2, '0')).join('')).join('');
+}
+window.nwMd5 = nwMd5;
+
+// The old UTC-named backups (nikhil-world-backup-<date>.json, no zone label) are never deleted.
+const NW_UTC_NAMED = /^nikhil-world-backup-\d{4}-\d{2}-\d{2}(-this-device)?\.json$/;
+const NW_DRIVE_FOLDER = "Nikhil's World Backups";
+
+// Uploads one backup file to the "Nikhil's World Backups" folder (the oldest one, if there are several;
+// created only if there is none), checks Drive has it (md5Checksum, or size), and only then moves older
+// files with exactly the same name to Drive's trash. Never deletes a folder, a file with any other name, or
+// an old UTC-named backup. Returns { ok, file, trashed: [ids], error, expired }.
+async function nwDriveUpload(token, filename, content) {
+  const auth = { Authorization: `Bearer ${token}` };
+  const API = 'https://www.googleapis.com/drive/v3/files';
+  const q = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  const json = async (r) => { try { return await r.json(); } catch (_) { return {}; } };
+  const folderQ = `name='${q(NW_DRIVE_FOLDER)}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const fr = await fetch(`${API}?q=${encodeURIComponent(folderQ)}&orderBy=createdTime&fields=files(id,name,createdTime)`, { headers: auth });
+  if (fr.status === 401) return { ok: false, expired: true, error: 'The Google sign-in expired.' };
+  const folders = (await json(fr)).files || [];
+  let folderId = folders.length ? folders[0].id : null;
+  if (!fr.ok) return { ok: false, error: `Drive didn't list the folder (HTTP ${fr.status}).` };
+  if (!folderId) {
+    const made = await json(await fetch(API, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: NW_DRIVE_FOLDER, mimeType: 'application/vnd.google-apps.folder' }) }));
+    folderId = made.id;
+    if (!folderId) return { ok: false, error: "Drive didn't create the backup folder." };
+  }
+  const meta = { name: filename, parents: [folderId] };
+  const FIELDS = 'id,name,size,md5Checksum,parents';
+  let up;
+  if (new Blob([content]).size <= NW_MULTIPART_MAX_BYTES) {
+    // Multipart body built by hand: Safari's FormData+Blob+fetch mangles the boundary.
+    const boundary = 'nw_backup_boundary_' + Date.now();
+    const body = '--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify(meta) + '\r\n'
+      + '--' + boundary + '\r\nContent-Type: application/json\r\n\r\n' + content + '\r\n--' + boundary + '--';
+    const r = await fetch(`https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=${FIELDS}`, { method: 'POST', headers: { ...auth, 'Content-Type': `multipart/related; boundary="${boundary}"` }, body });
+    if (r.status === 401) return { ok: false, expired: true, error: 'The Google sign-in expired.' };
+    up = await json(r);
+  } else {
+    // Large backup: resumable upload. Start a session with the metadata, then PUT the content to its URL.
+    const init = await fetch(`https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=${FIELDS}`, {
+      method: 'POST', headers: { ...auth, 'Content-Type': 'application/json; charset=UTF-8', 'X-Upload-Content-Type': 'application/json' }, body: JSON.stringify(meta),
+    });
+    if (init.status === 401) return { ok: false, expired: true, error: 'The Google sign-in expired.' };
+    const sessionUrl = init.headers.get('Location');
+    if (!init.ok || !sessionUrl) return { ok: false, error: `Drive didn't start the large upload (HTTP ${init.status}${sessionUrl ? '' : ', no upload URL'}).` };
+    up = await json(await fetch(sessionUrl, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: content }));
+  }
+  if (!up || !up.id) return { ok: false, error: (up && up.error && (up.error.message || up.error.status)) || 'Drive gave no file ID.' };
+  // Confirm Drive has exactly this content before anything older is touched.
+  let got = up;
+  if (got.md5Checksum === undefined && got.size === undefined) got = await json(await fetch(`${API}/${encodeURIComponent(up.id)}?fields=${FIELDS}`, { headers: auth }));
+  const bytes = new TextEncoder().encode(content).length;
+  const confirmed = got.name === filename && (got.md5Checksum ? got.md5Checksum === nwMd5(content) : Number(got.size) === bytes);
+  if (!confirmed) return { ok: false, file: got, error: `Drive's copy doesn't match (size ${got.size ?? '?'} of ${bytes} bytes). Older backups were left as they are.` };
+  // Older copies with exactly this name, in this folder: moved to Drive's trash (recoverable for 30 days).
+  const trashed = [];
+  const sameQ = `name='${q(filename)}' and '${q(folderId)}' in parents and trashed=false`;
+  const same = (await json(await fetch(`${API}?q=${encodeURIComponent(sameQ)}&fields=files(id,name,mimeType)`, { headers: auth }))).files || [];
+  for (const f of same) {
+    if (!f || f.id === up.id || f.name !== filename || f.mimeType === 'application/vnd.google-apps.folder' || NW_UTC_NAMED.test(f.name)) continue;
+    const r = await fetch(`${API}/${encodeURIComponent(f.id)}`, { method: 'PATCH', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) }).catch(() => null);
+    if (r && r.ok) trashed.push(f.id);
+  }
+  return { ok: true, file: got, folderId, trashed };
+}
+window.nwDriveUpload = nwDriveUpload;
+
+// The running version: a short hash of this page's scripts, captured as the page loaded (window.__nwVersionSource,
+// set by the last script in <body>). The same file gives the same version at every address; any change to
+// the code gives a new one. scripts/sw-test.js computes it the same way.
+async function nwRunningVersion() {
+  const h = await nwHash(window.__nwVersionSource || '');
+  return h.split(':')[1].slice(0, 7);
+}
+window.nwRunningVersion = nwRunningVersion;
+
+// Saves this device's time zone to the small device-timezone doc when it differs from what is stored (a new
+// zone, or a daylight-saving change). tools/drive-backup.gs names its backup files with it.
+async function nwSaveDeviceZone() {
+  const z = nwZoneInfo();
+  let cur = null;
+  try { const r = await window.storage.get('device-timezone'); cur = r?.value ? JSON.parse(r.value) : null; } catch (_) { cur = null; }
+  if (cur && cur.zone === z.zone && cur.offset === z.offset && cur.label === z.label) return null;
+  return window.storage.set('device-timezone', JSON.stringify({ zone: z.zone, label: z.label, offset: z.offset, at: new Date().toISOString() }));
+}
+
+// System tab: version, offline, and this device's saved data against a 5 MB estimate.
+function NwAppInfo({ active }) {
+  const [version, setVersion] = useState('');
+  const [sw, setSw] = useState('');
+  const [savedAt, setSavedAt] = useState(null);
+  const [usage, setUsage] = useState(null);
+  useEffect(() => {
+    if (!active) return undefined;
+    let off = false;
+    (async () => {
+      const v = await nwRunningVersion();
+      if (!off) setVersion(v);
+      if (!('serviceWorker' in navigator)) { if (!off) setSw('no'); return; }
+      try {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (!off) setSw(navigator.serviceWorker.controller ? 'yes' : reg ? 'next' : 'none');
+        if (reg && window.caches) {
+          const r = await (await caches.open('nw-page:' + reg.scope)).match(reg.scope);
+          if (!off) setSavedAt(r ? r.headers.get('x-nw-saved-at') : null);
+        }
+      } catch (_) { if (!off) setSw('none'); }
+    })();
+    setUsage(window.storage?.deviceUsage?.() || null);
+    const unsub = window.storage?.subscribe?.((s) => { if (!off && s && s.device && s.device.bytes) setUsage(s.device); });
+    return () => { off = true; if (unsub) unsub(); };
+  }, [active]);
+  const offline = { yes: 'yes', next: 'after the next open', none: 'not set up yet', no: "this browser can't" }[sw] || 'checking…';
+  const pct = usage ? usage.pct : 0;
+  const row = { display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 12, padding: '4px 0', color: '#ddd' };
+  const when = savedAt && !isNaN(Date.parse(savedAt)) ? new Date(savedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : null;
+  return (
+    <div data-nw-appinfo style={{ background: '#1a1a1a', padding: 16, borderRadius: 12, border: '1px solid #333', marginBottom: 16 }}>
+      <div style={{ color: '#aaa', fontSize: 11, letterSpacing: 1, marginBottom: 8 }}>THIS APP</div>
+      <div style={row}><span>Running version</span><span data-nw-version>{version || '…'}</span></div>
+      <div style={{ ...row, color: '#888', fontSize: 11 }}><span style={{ overflowWrap: 'anywhere' }}>{location.origin + location.pathname}</span></div>
+      <div style={row}><span>Opens offline</span><span data-nw-offline>{offline}</span></div>
+      {when && <div style={row}><span>Offline copy saved</span><span>{when}</span></div>}
+      <div style={{ ...row, marginTop: 6 }}><span>This device's saved data</span>
+        <span data-nw-device-usage>{usage ? `${(usage.bytes / 1048576).toFixed(2)} MB of about 5 MB (${Math.round(pct)}%)` : '…'}</span></div>
+      <div style={{ height: 6, background: '#2a2a2a', borderRadius: 3, overflow: 'hidden', marginTop: 4 }}>
+        <div style={{ width: `${Math.min(100, pct)}%`, height: '100%', background: pct >= 70 ? '#fbbf24' : '#4ECDC4' }} />
+      </div>
+      <div style={{ fontSize: 11, color: '#888', marginTop: 6, lineHeight: 1.5 }}>Counted at 2 bytes per character. A message shows at the top at 70%.</div>
+    </div>
+  );
+}
 
 // System tab: every doc and part with its size as a % of Firestore's 1,048,576-byte limit, largest first.
 function NwDocSizes({ active }) {
@@ -10534,7 +11369,7 @@ function NwDocSizes({ active }) {
         <div style={{ flex: 1, color: '#aaa', fontSize: 11, letterSpacing: 1 }}>DOC SIZES (LIMIT 1,048,576 BYTES)</div>
         <button onClick={load} disabled={st.busy} style={{ background: 'transparent', color: '#4ECDC4', border: '1px solid #4ECDC4', borderRadius: 6, padding: '6px 10px', fontSize: 11, fontFamily: 'inherit', cursor: 'pointer' }}>{st.busy ? 'Reading…' : 'Refresh'}</button>
       </div>
-      <div style={{ fontSize: 11, color: '#888', marginBottom: 8, lineHeight: 1.5 }}>No doc is written above 900,000 bytes (86%). Growing data moves its oldest entries to sealed parts; anything else is split into pieces.</div>
+      <div style={{ fontSize: 11, color: '#888', marginBottom: 8, lineHeight: 1.5 }}>No doc is written above 900,000 bytes (86%). The Kaizen daily log moves its oldest days to sealed parts; anything else bigger is split into pieces.</div>
       {st.err && <div style={{ fontSize: 12, color: '#fca5a5' }}>{st.err}</div>}
       {st.rows && (
         <table data-nw-sizes style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, tableLayout: 'fixed' }}>
@@ -10566,6 +11401,9 @@ function App() {
     window.addEventListener('open-pending', onOpen);
     return () => window.removeEventListener('open-pending', onOpen);
   }, []);
+
+  // This device's time zone, for the backup file names (also used by tools/drive-backup.gs).
+  useEffect(() => { nwSaveDeviceZone().catch(() => {}); }, []);
 
   // ── SILENT SYNC ─────────────────────────────────────────────────
   // Auto-sync to Drive every 5 minutes, but ONLY if a valid OAuth token
@@ -10600,7 +11438,7 @@ function App() {
   // Replace this with your OAuth 2.0 Web Client ID from GCP Console
   const DRIVE_CLIENT_ID = '55888993304-0c622stmifqg6k77goim4rn4bkhi3r1s.apps.googleusercontent.com';
   const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
-  const DRIVE_FOLDER_NAME = "Nikhil's World Backups";
+  const DRIVE_FOLDER_NAME = NW_DRIVE_FOLDER;
 
   // ══ NW-TOKEN-CACHE START ══ (the only localStorage write outside the storage layer)
   // ── TOKEN PERSISTENCE ─────────────────────────────────────────
@@ -10632,12 +11470,12 @@ function App() {
 
   const exportSystem = async () => {
     setBackupStatus('Gathering data...');
-    const { backup } = await nwGatherBackup();
+    const { backup, zone } = await nwGatherBackup();
     const content = JSON.stringify(backup, null, 2);
     const blob = new Blob([content], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'nikhil-system-backup-' + new Date().toISOString().slice(0,10) + (backup.source === 'this-device' ? '-this-device' : '') + '.json';
+    a.download = nwBackupFileName(zone, backup.source === 'this-device');
     a.click();
     setBackupStatus(`Backup downloaded ✅ · ${nwBackupSummary(backup, content)}`);
     setTimeout(() => setBackupStatus(''), 8000);
@@ -10656,134 +11494,25 @@ function App() {
     }
 
     // doSync: the actual upload. Used by both the cached-token fast path
-    // and the OAuth-popup slow path.
+    // and the OAuth-popup slow path. Upload first, confirm, then trash older copies with the same name.
     const doSync = async (token) => {
       try {
         setStatus('Gathering data...');
-
-        // Build backup JSON (the whole database)
-        const { backup, fingerprint } = await nwGatherBackup();
+        const { backup, fingerprint, zone } = await nwGatherBackup();
         if (silent && fingerprint === lastUploadFp.current) return true; // nothing changed since the last upload
         const content = JSON.stringify(backup, null, 2);
         const summary = nwBackupSummary(backup, content);
-        // A device-only copy gets its own name so it never replaces today's full backup.
-        const filename = "nikhil-world-backup-" + new Date().toISOString().slice(0,10) + (backup.source === 'this-device' ? '-this-device' : '') + ".json";
-
-        setStatus('Finding/creating folder in Drive...');
-
-        // Find or create folder.
-        // Bug fix: the apostrophe in "Nikhil's World Backups" was closing the
-        // Drive API q= string early, so every search returned empty and a NEW
-        // folder was created on every sync. Escape the apostrophe + URL-encode +
-        // orderBy=createdTime so we always converge on the OLDEST existing folder.
-        let folderId = null;
-        const safeName = DRIVE_FOLDER_NAME.replace(/'/g, "\\'");
-        const folderQ = `name='${safeName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
-        const folderSearch = await fetch(
-          `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(folderQ)}&orderBy=createdTime&fields=files(id,name,createdTime)`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        ).then(r => r.json());
-
-        // Token might be expired — surface 401 cleanly.
-        if (folderSearch.error?.code === 401) {
-          clearCachedToken();
-          throw new Error('TOKEN_EXPIRED');
-        }
-
-        if (folderSearch.files?.length > 0) {
-          folderId = folderSearch.files[0].id;
-          // Silently delete duplicate folders (artifact of old "folder explosion" bug)
-          if (folderSearch.files.length > 1) {
-            const extras = folderSearch.files.slice(1);
-            for (const f of extras) {
-              fetch(`https://www.googleapis.com/drive/v3/files/${f.id}`,
-                { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
-              ).catch(() => {}); // Best-effort; never block the upload
-            }
-          }
-        } else {
-          const newFolder = await fetch('https://www.googleapis.com/drive/v3/files', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: DRIVE_FOLDER_NAME, mimeType: 'application/vnd.google-apps.folder' })
-          }).then(r => r.json());
-          folderId = newFolder.id;
-        }
-
+        // Named by the date in this device's time zone; a device-only copy gets its own name so it never
+        // replaces a full backup.
+        const filename = nwBackupFileName(zone, backup.source === 'this-device');
         setStatus('Uploading to Drive...');
-
-        // Dedup: delete any existing file with the same name in this folder
-        // so each day keeps exactly one backup (the latest).
-        try {
-          const dupQ = `name='${filename}' and '${folderId}' in parents and trashed=false`;
-          const dupSearch = await fetch(
-            `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(dupQ)}&fields=files(id)`,
-            { headers: { Authorization: `Bearer ${token}` } }
-          ).then(r => r.json());
-          for (const dup of (dupSearch.files || [])) {
-            await fetch(`https://www.googleapis.com/drive/v3/files/${dup.id}`,
-              { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
-            ).catch(() => {});
-          }
-        } catch(e) { /* best-effort */ }
-
-        const meta = { name: filename, parents: [folderId] };
-        let upload;
-        if (new Blob([content]).size <= NW_MULTIPART_MAX_BYTES) {
-          // Upload file — manually construct multipart body to avoid Safari's
-          // broken FormData+Blob+fetch behavior (silently mangles the boundary).
-          const boundary = 'nw_backup_boundary_' + Date.now();
-          const multipartBody =
-            '--' + boundary + '\r\n' +
-            'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
-            JSON.stringify(meta) + '\r\n' +
-            '--' + boundary + '\r\n' +
-            'Content-Type: application/json\r\n\r\n' +
-            content + '\r\n' +
-            '--' + boundary + '--';
-
-          upload = await fetch(
-            'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
-            {
-              method: 'POST',
-              headers: {
-                Authorization: `Bearer ${token}`,
-                'Content-Type': `multipart/related; boundary="${boundary}"`
-              },
-              body: multipartBody
-            }
-          ).then(r => r.json());
-        } else {
-          // Large backup: resumable upload. Start a session with the metadata, then PUT the content
-          // to the session URL from the Location header.
-          const init = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json; charset=UTF-8',
-              'X-Upload-Content-Type': 'application/json'
-            },
-            body: JSON.stringify(meta)
-          });
-          if (init.status === 401) { clearCachedToken(); throw new Error('TOKEN_EXPIRED'); }
-          const sessionUrl = init.headers.get('Location');
-          if (!init.ok || !sessionUrl) {
-            upload = { error: { message: `Drive didn't start the large upload (HTTP ${init.status}${sessionUrl ? '' : ', no upload URL'}).` } };
-          } else {
-            upload = await fetch(sessionUrl, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: content
-            }).then(r => r.json());
-          }
-        }
-
-        if (upload.id) {
+        const r = await nwDriveUpload(token, filename, content);
+        if (r.expired) { clearCachedToken(); throw new Error('TOKEN_EXPIRED'); }
+        if (r.ok) {
           lastUploadFp.current = fingerprint;
           setStatus(`✅ Synced to Drive → "${DRIVE_FOLDER_NAME}/${filename}" · ${summary}`);
         } else {
-          const errDetail = upload.error?.message || upload.error?.status || JSON.stringify(upload);
-          setStatus('❌ Upload failed: ' + errDetail);
+          setStatus('❌ Upload failed: ' + r.error);
         }
         finish();
         return true;
@@ -10882,6 +11611,7 @@ function App() {
 
       <div style={{ ...paneStyle('system'), display: activeTab === 'system' ? 'flex' : 'none', flexDirection: 'column', padding: 24, color: '#eee', fontFamily: "'Space Mono', monospace" }}>
         <h2 style={{ fontSize: 22, color: '#FF6B6B', marginBottom: 16 }}>System Maintenance</h2>
+        <NwAppInfo active={activeTab === 'system'} />
         <p style={{ fontSize: 13, color: '#888', marginBottom: 24, lineHeight: 1.6 }}>
           Backs up everything in the database, including the Practice tab and anything added later. Run weekly and drop the file into Google Drive as "Elite Maintenance."
         </p>
@@ -11032,6 +11762,32 @@ root.render(
   </ErrorBoundary>
 );
 
+  </script>
+
+  <script>
+    // NW-VERSION: the running version on the System tab is a hash of every script in <body>, in order, as the
+    // page loaded (this one included). The same file gives the same version at every address.
+    window.__nwVersionSource = Array.from(document.querySelectorAll('body script')).map(function (s) {
+      return s.getAttribute('src') ? 'src:' + s.getAttribute('src') : 'inline:' + s.textContent;
+    }).join('\n');
+    // The service worker (sw.js, next to this page) keeps a copy so the app opens offline. Registered with a
+    // relative path, so it works at https://nikhils-world.web.app/ and https://nikhiln495.github.io/nikhils-world/.
+    if ('serviceWorker' in navigator && window.isSecureContext) {
+      window.addEventListener('load', function () {
+        try {
+          navigator.serviceWorker.register('sw.js').then(function () { return navigator.serviceWorker.ready; }).then(function (reg) {
+            // What loaded before the worker was in charge (the first open), sent now and again 10 seconds later
+            // (fonts load late): it stores what it doesn't have yet.
+            var keep = function () {
+              var loaded = performance.getEntriesByType('resource').filter(function (e) { return /^(script|link|css)$/.test(e.initiatorType); }).map(function (e) { return e.name; });
+              if (reg.active) reg.active.postMessage({ type: 'nw-keep', resources: loaded });
+            };
+            keep();
+            setTimeout(keep, 10000);
+          }).catch(function (e) { console.warn('Offline copy not set up:', e && e.message); });
+        } catch (e) { console.warn('Offline copy not set up:', e && e.message); }
+      });
+    }
   </script>
 </body>
 </html>

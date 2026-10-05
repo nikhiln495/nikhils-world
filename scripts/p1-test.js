@@ -915,68 +915,75 @@ async function step5() {
     await finish(ctx, 'd3-d4');
   }
 
-  console.log('\n[C: whole-database backup, real window.storage against a fake Firestore]');
+  console.log('\n[C: whole-database backup (format 3), real window.storage against a fake Firestore]');
   {
+    const L = (h) => ({ brainDump: '', highlight: h, micro: '', done: [], reflection: '' });
     const fake = {
       test_extra: { value: '[1,2]', key: 'test:extra', updatedAt: '2026-10-01T10:00:00.000Z', extra: 'keep me' },
-      kaizen3_logs: { value: 'active-logs', key: 'kaizen3:logs' },
-      kaizen3_logs_archive_2026_09: { value: 'archived-logs', key: 'kaizen3:logs', archivedAt: '2026-09-30' },
+      kaizen3_logs: { value: JSON.stringify({ '2026-07-10': L('kaizen3 day') }), key: 'kaizen3:logs' },
+      kaizen3_logs_archive_2026_09: { value: JSON.stringify({ '2026-08-10': L('archived day') }), key: 'kaizen3:logs', archivedAt: '2026-09-30' },
+      kaizen4_logs: { value: JSON.stringify({ '2026-10-01': L('active day') }), key: 'kaizen4:logs' },
       practice_playbook: { value: F.base()['practice:playbook'], key: 'practice:playbook' },
       practice_asks_2026_10_04: { value: JSON.stringify({ date: '2026-10-04', entries: [] }), key: 'practice:asks:2026_10_04' },
       some_future_doc: { value: 'x', key: 'some-future:doc', migratedAt: '2026-01-01T00:00:00.000Z' },
+      'gatekeeper-name': { value: 'Gus', key: 'gatekeeper-name' },
     };
     const ctx = await openPage({ fakeFirestore: fake, now: '2026-10-04T12:00:00' });
     const { page } = ctx;
     await page.waitForTimeout(3500);
-    await page.evaluate(() => {
-      const d = window.__fakeDocs.get('test_extra');
-      d.createdAt = { seconds: 1, nanoseconds: 0, toDate: () => new Date('2026-09-01T08:00:00.000Z') };
-      d.when = new Date('2026-09-02T08:00:00.000Z');
-      d.nested = { at: { toDate: () => new Date('2026-09-03T08:00:00.000Z') }, list: [new Date('2026-09-04T08:00:00.000Z')] };
+    const g = await page.evaluate(async () => {
+      const r = await window.nwGatherBackup();
+      const all = {};
+      for (const e of r.backup.entries) all[e.key] = (await window.storage.getAll(e.key)).value;
+      return { r, all };
     });
-    const g = await page.evaluate(async () => { const r = await window.nwGatherBackup(); return { r, ids: [...window.__fakeDocs.keys()].sort() }; });
     const b = g.r.backup;
-    ok(b.format === 2 && b.source === 'firestore' && b.count === g.ids.length && b.docs.length === g.ids.length && JSON.stringify(b.docs.map(d => d.id)) === JSON.stringify(g.ids) && typeof b.timestamp === 'string', `C: format 2 with every doc in the database (${b.count}), sorted by id, each once`);
-    const tasks = b.docs.find(d => d.id === 'test_extra').fields;
-    ok(tasks.extra === 'keep me' && tasks.key === 'test:extra' && tasks.value === '[1,2]' && tasks.updatedAt === '2026-10-01T10:00:00.000Z', 'C: all fields kept, including an extra field');
-    ok(tasks.createdAt === '2026-09-01T08:00:00.000Z' && tasks.when === '2026-09-02T08:00:00.000Z' && tasks.nested.at === '2026-09-03T08:00:00.000Z' && tasks.nested.list[0] === '2026-09-04T08:00:00.000Z', 'C: Timestamps and Dates → ISO strings (nested too)');
-    ok(b.docs.some(d => d.id === 'kaizen3_logs_archive_2026_09' && d.fields.value === 'archived-logs' && d.fields.archivedAt === '2026-09-30') && b.docs.some(d => d.id === 'kaizen3_logs' && d.fields.value === 'active-logs'), 'C: the archive and the active doc sharing its key are both backed up');
-    ok(['practice_playbook', 'practice_asks_2026_10_04', 'some_future_doc'].every(id => b.docs.some(d => d.id === id)), 'C: Practice docs and a doc no code knows about are included');
-    ok(!('data' in b) && Object.keys(b).sort().join(',') === 'count,docs,format,source,timestamp', 'C: no second key→value map');
+    const keys = b.entries.map(e => e.key);
+    ok(b.format === 3 && b.source === 'firestore' && b.count === b.entries.length && typeof b.timestamp === 'string' && b.zone === 'America/Anchorage' && b.label === 'AKDT' && b.offset === '-08:00', `C: format 3 (${b.count} entries) with this device's zone, label and offset`);
+    ok(JSON.stringify(keys) === JSON.stringify([...keys].sort()) && new Set(keys).size === keys.length && ['test:extra', 'kaizen4:logs', 'practice:playbook', 'practice:asks:2026_10_04', 'some_future_doc', 'gatekeeper-name'].every(k => keys.includes(k)), 'C: one entry per key, sorted, including Practice docs and a doc no code knows about (its key field names another doc ID, so it is kept under its own ID) → ' + keys.join(', '));
+    ok(!keys.some(k => /^kaizen3:logs$|archive|__/.test(k)), 'C: old Kaizen archives are not keys of their own');
+    ok(b.entries.every(e => JSON.stringify(e.text ? e.value : e.value) !== undefined && (e.text ? g.all[e.key] === e.value : JSON.stringify(JSON.parse(g.all[e.key])) === JSON.stringify(e.value))), 'C: every value is exactly what getAll returns');
+    const k4 = b.entries.find(e => e.key === 'kaizen4:logs').value;
+    ok(Object.keys(k4).join(',') === '2026-07-10,2026-08-10,2026-10-01', 'C: kaizen4:logs holds its old archives merged in, as parsed JSON');
+    const ex = b.entries.find(e => e.key === 'test:extra');
+    ok(Array.isArray(ex.value) && ex.value[1] === 2 && ex.updatedAt === '2026-10-01T10:00:00.000Z' && Object.keys(ex).sort().join(',') === 'key,updatedAt,value', 'C: an entry is { key, value, updatedAt }, value parsed');
+    const gk = b.entries.find(e => e.key === 'gatekeeper-name');
+    ok(gk.value === 'Gus' && gk.text === true, 'C: a value that is not JSON is kept as text (text: true)');
     const fp2 = await page.evaluate(async () => (await window.nwGatherBackup()).fingerprint);
-    ok(typeof g.r.fingerprint === 'string' && fp2 === g.r.fingerprint, 'C: same docs → same fingerprint');
+    ok(typeof g.r.fingerprint === 'string' && fp2 === g.r.fingerprint, 'C: same data → same fingerprint');
     const fp3 = await page.evaluate(async () => { window.__fakeDocs.get('some_future_doc').value = 'y'; const f = (await window.nwGatherBackup()).fingerprint; window.__fakeDocs.get('some_future_doc').value = 'x'; return f; });
-    ok(fp3 !== g.r.fingerprint, 'C: a changed doc → a different fingerprint');
+    ok(fp3 !== g.r.fingerprint, 'C: a changed key → a different fingerprint');
 
-    // Restore by ID.
-    const rr = await page.evaluate(async (backup) => {
+    const raw = await page.evaluate(async () => window.storage.exportRawDocs()); // for the format-2 check below
+    // Format 3 restore into an empty database: every key reads back exactly.
+    const r3 = await page.evaluate(async ({ backup, all }) => {
       window.__confirms = [];
       window.confirm = (m) => { window.__confirms.push(m); return true; };
+      window.__fakeDocs.clear();
+      const res = await window.nwRestoreBackup(backup);
+      const back = {};
+      for (const k of Object.keys(all)) back[k] = (await window.storage.getAll(k)).value;
+      return { res, confirms: window.__confirms, same: Object.keys(all).every(k => back[k] === all[k]), local: localStorage.getItem('test:extra') };
+    }, { backup: b, all: g.all });
+    ok(r3.res.restored === b.count && r3.res.failed.length === 0 && r3.same, `C: format 3 restores all ${b.count} keys into an empty database; every key's getAll reads back exactly`);
+    ok(r3.confirms.length === 1 && r3.confirms[0].includes(`Restore ${b.count} items`) && r3.confirms[0].includes('2026'), 'C: restore asks first, with the item count and backup date');
+    ok(r3.local === '[1,2]', "C: restore updates this device's copy too");
+
+    // Format 2 (raw docs by ID, exported before the format-3 restore above) still restores.
+    const v2 = { format: 2, timestamp: '2026-10-01T00:00:00.000Z', source: 'firestore', count: raw.length, docs: raw };
+    const rr = await page.evaluate(async (v2) => {
+      window.confirm = () => true;
       const docs = window.__fakeDocs;
-      docs.delete('kaizen3_logs_archive_2026_09');
-      docs.set('kaizen3_logs', { value: 'changed', key: 'kaizen3:logs' });
+      docs.clear();
       localStorage.setItem('kaizen3:logs', 'device-copy');
       const t0 = Date.now();
-      const res = await window.nwRestoreBackup(backup);
-      const iso = (v) => (v instanceof Date ? v.toISOString() : String(v));
+      const res = await window.nwRestoreBackup(v2);
       const fresh = (v) => v instanceof Date && v.getTime() >= t0 - 1000;
-      const arch = docs.get('kaizen3_logs_archive_2026_09'), act = docs.get('kaizen3_logs'), tasks = docs.get('test_extra'), fut = docs.get('some_future_doc');
-      return { res, confirms: window.__confirms,
-        arch: arch && { value: arch.value, key: arch.key, archivedAt: arch.archivedAt, fresh: fresh(arch.updatedAt) && fresh(arch.restoredAt) },
-        act: act && act.value, tasksExtra: tasks.extra, tasksUpdated: iso(tasks.updatedAt), tasksCreated: tasks.createdAt, futMigrated: 'migratedAt' in fut,
-        local: localStorage.getItem('kaizen3:logs'), localTasks: localStorage.getItem('test:extra') };
-    }, b);
-    ok(rr.res.restored === b.count && rr.res.failed.length === 0 && rr.res.count === b.count, `C: restore wrote all ${b.count} docs by ID, no failures`);
-    ok(rr.confirms.length === 1 && rr.confirms[0].includes(`Restore ${b.count} items`) && rr.confirms[0].includes('2026'), 'C: restore asks first, with the item count and backup date → ' + JSON.stringify(rr.confirms[0]));
-    ok(rr.arch && rr.arch.value === 'archived-logs' && rr.arch.key === 'kaizen3:logs' && rr.arch.archivedAt === '2026-09-30' && rr.arch.fresh && rr.act === 'active-logs', 'C: archive doc restored under its own ID with its fields, plus updatedAt and restoredAt = now; active doc restored');
-    ok(rr.tasksExtra === 'keep me' && rr.tasksCreated === '2026-09-01T08:00:00.000Z' && rr.tasksUpdated !== '2026-10-01T10:00:00.000Z' && !rr.futMigrated, 'C: extra fields restored; backed-up updatedAt / migratedAt replaced, not copied');
-    ok(rr.local === 'active-logs' && rr.localTasks === '[1,2]', 'C: device copy updated from the active doc only');
-    const ra = await page.evaluate(async (archDoc) => {
-      localStorage.setItem('kaizen3:logs', 'device-copy');
-      const res = await window.nwRestoreBackup({ format: 2, timestamp: '2026-10-01T00:00:00.000Z', count: 1, docs: [archDoc] });
-      return { res, local: localStorage.getItem('kaizen3:logs'), arch: window.__fakeDocs.get('kaizen3_logs_archive_2026_09').value };
-    }, b.docs.find(d => d.id === 'kaizen3_logs_archive_2026_09'));
-    ok(ra.res.restored === 1 && ra.arch === 'archived-logs' && ra.local === 'device-copy', "C: restoring an archive doc doesn't overwrite the active key's device copy");
+      const ex = docs.get('test_extra');
+      return { res, ids: [...docs.keys()].sort(), exFresh: fresh(ex.updatedAt) && fresh(ex.restoredAt), extra: ex.extra, local: localStorage.getItem('kaizen3:logs') };
+    }, v2);
+    ok(rr.res.restored === raw.length && rr.res.failed.length === 0 && JSON.stringify(rr.ids) === JSON.stringify(raw.map(d => d.id).sort()), `C: a format-2 file still restores every doc by ID (${raw.length})`);
+    ok(rr.exFresh && rr.extra === 'keep me' && rr.local === 'device-copy', "C: format 2: fields kept, updatedAt/restoredAt = now; an archive doesn't overwrite a device copy");
     const cancel = await page.evaluate(async (backup) => {
       window.confirm = () => false;
       const n = window.__fakeCalls.length;
@@ -986,15 +993,12 @@ async function step5() {
     ok(cancel.res.cancelled === true && cancel.sets === 0, 'C: cancelling the confirm writes nothing');
     const fail = await page.evaluate(async () => {
       window.confirm = () => true;
-      const docs = window.__fakeDocs;
-      const orig = docs.set.bind(docs);
-      docs.set = (k, v) => { if (k === 'zz_fail') throw new Error('denied'); return orig(k, v); };
-      const res = await window.nwRestoreBackup({ format: 2, timestamp: '2026-10-01T00:00:00.000Z', docs: [
-        { id: 'zz_fail', fields: { value: '1', key: 'zz:fail' } }, { id: 'zz_ok', fields: { value: '2', key: 'zz:ok' } }, { fields: { value: '3' } }] });
-      delete docs.set;
+      window.__fakeFail = (op, id) => (op === 'set' && id === 'zz_fail' ? 'reject' : null);
+      const res = await window.nwRestoreBackup({ format: 3, timestamp: '2026-10-01T00:00:00.000Z', entries: [{ key: 'zz:fail', value: 1 }, { key: 'zz:ok', value: 2 }, { value: 3 }] });
+      window.__fakeFail = null;
       return res;
     });
-    ok(fail.restored === 1 && JSON.stringify(fail.failed) === JSON.stringify(['zz_fail', '(a doc with no id)']), 'C: restore reports failures by id → ' + JSON.stringify(fail.failed));
+    ok(fail.restored === 2 && JSON.stringify(fail.failed) === JSON.stringify(['(an entry with no key)']) && JSON.stringify(fail.deviceOnly) === JSON.stringify(['zz:fail']), 'C: a key the cloud rejects is reported as on this device only; an entry with no key fails → ' + JSON.stringify(fail));
     const old = await page.evaluate(async () => {
       const res = await window.nwRestoreBackup({ timestamp: '2026-09-01T00:00:00.000Z', data: { 'test:extra': 'old-format-value' } });
       return { res, doc: window.__fakeDocs.get('test_extra').value, local: localStorage.getItem('test:extra') };
@@ -1006,16 +1010,19 @@ async function step5() {
     let t = await page.locator('body').innerText();
     ok(t.includes('Backs up everything in the database, including the Practice tab and anything added later.'), 'C: System tab text');
     const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: /DOWNLOAD BACKUP/ }).click()]);
-    const file = JSON.parse(require('fs').readFileSync(await dl.path(), 'utf8'));
-    const nDocs = await page.evaluate(() => window.__fakeDocs.size);
-    ok(file.format === 2 && file.source === 'firestore' && file.count === nDocs && file.docs.length === nDocs, `C: Download Backup saves the format-2 backup (${file.count} docs)`);
+    const text = require('fs').readFileSync(await dl.path(), 'utf8');
+    const file = JSON.parse(text);
+    const nKeys = await page.evaluate(async () => (await window.nwGatherBackup()).backup.count);
+    ok(file.format === 3 && file.count === nKeys && text.startsWith('{\n  "format": 3,\n') && dl.suggestedFilename() === 'nikhil-world-backup-2026-10-04-AKDT.json', `C: Download Backup saves the format-3 backup, pretty-printed, named by the local date and zone (${dl.suggestedFilename()})`);
     await page.waitForTimeout(200);
     t = await page.locator('body').innerText();
-    ok(new RegExp(`Backup downloaded ✅ · ${nDocs} items · \\d+\\.\\d\\d MB`).test(t) && !t.includes("this device's copy"), 'C: status shows item count and MB');
+    ok(new RegExp(`Backup downloaded ✅ · ${nKeys} items · \\d+\\.\\d\\d MB`).test(t) && !t.includes("this device's copy"), 'C: status shows item count and MB');
 
     // Sync to Drive against a fake Drive API: multipart up to 4.5 MB, resumable above.
     const drive = [];
-    const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization, content-type, x-upload-content-type', 'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS', 'access-control-expose-headers': 'Location' };
+    const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization, content-type, x-upload-content-type', 'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS', 'access-control-expose-headers': 'Location' };
+    const crypto = require('crypto');
+    const sent = {};
     await page.route('https://www.googleapis.com/**', async (route) => {
       const req = route.request(); const url = req.url(); const m = req.method();
       if (m === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
@@ -1023,24 +1030,30 @@ async function step5() {
       const json = (o, extra = {}) => route.fulfill({ status: 200, headers: { ...cors, 'content-type': 'application/json', ...extra }, body: JSON.stringify(o) });
       if (m === 'GET' && /mimeType/.test(decodeURIComponent(url))) return json({ files: [{ id: 'FOLDER1' }] });
       if (m === 'GET') return json({ files: [] });
-      if (m === 'POST' && /uploadType=multipart/.test(url)) return json({ id: 'FILE_MULTI' });
-      if (m === 'POST' && /uploadType=resumable/.test(url)) return json({}, { Location: 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=XYZ' });
-      if (m === 'PUT' && /upload_id=XYZ/.test(url)) return json({ id: 'FILE_RESUMABLE' });
+      const fileOf = (content, id) => ({ id, name: sent.name, size: String(Buffer.byteLength(content)), md5Checksum: crypto.createHash('md5').update(content).digest('hex') });
+      if (m === 'POST' && /uploadType=multipart/.test(url)) {
+        const body = req.postData();
+        const parts = body.split(/--nw_backup_boundary_\d+/);
+        sent.name = JSON.parse(parts[1].split('\r\n\r\n')[1]).name;
+        return json(fileOf(parts[2].split('\r\n\r\n').slice(1).join('\r\n\r\n').replace(/\r\n$/, ''), 'FILE_MULTI'));
+      }
+      if (m === 'POST' && /uploadType=resumable/.test(url)) { sent.name = JSON.parse(req.postData()).name; return json({}, { Location: 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=XYZ' }); }
+      if (m === 'PUT' && /upload_id=XYZ/.test(url)) return json(fileOf(req.postDataBuffer(), 'FILE_RESUMABLE'));
       return route.fulfill({ status: 404, headers: cors, body: '{}' });
     });
     await page.evaluate(() => localStorage.setItem('gdrive_token_v1', JSON.stringify({ token: 'test-token', expiresAt: Date.now() + 3600 * 1000 })));
     await page.getByRole('button', { name: /SYNC TO GOOGLE DRIVE/ }).click();
     await page.waitForFunction(() => /Synced to Drive|failed/.test(document.body.innerText), null, { timeout: 15000 }).catch(() => {});
     t = await page.locator('body').innerText();
-    ok(/✅ Synced to Drive → .* · \d+ items · \d+\.\d\d MB/.test(t) && drive.some(d => d.m === 'POST' && /uploadType=multipart/.test(d.url)) && !drive.some(d => /uploadType=resumable/.test(d.url)), 'C: Sync to Drive under 4.5 MB → multipart upload; status shows items and MB');
+    ok(/✅ Synced to Drive → .*nikhil-world-backup-2026-10-04-AKDT\.json" · \d+ items · \d+\.\d\d MB/.test(t) && drive.some(d => d.m === 'POST' && /uploadType=multipart/.test(d.url)) && !drive.some(d => /uploadType=resumable/.test(d.url)), 'C: Sync to Drive under 4.5 MB → multipart upload, confirmed; status shows the file, items and MB');
     drive.length = 0;
     await page.evaluate(() => window.__fakeDocs.set('big_doc', { key: 'big:doc', value: 'x'.repeat(5 * 1024 * 1024) }));
     await page.getByRole('button', { name: /SYNC TO GOOGLE DRIVE/ }).click();
-    await page.waitForFunction(() => /Synced to Drive → .*MB/.test(document.body.innerText) && /[5-9]\.\d\d MB/.test(document.body.innerText), null, { timeout: 15000 }).catch(() => {});
+    await page.waitForFunction(() => /Synced to Drive → .*MB/.test(document.body.innerText) && /[5-9]\.\d\d MB/.test(document.body.innerText), null, { timeout: 30000 }).catch(() => {});
     t = await page.locator('body').innerText();
     const init = drive.find(d => d.m === 'POST' && /uploadType=resumable/.test(d.url));
     const put = drive.find(d => d.m === 'PUT');
-    ok(init && JSON.parse(init.body).parents[0] === 'FOLDER1' && /^nikhil-world-backup-\d{4}-\d\d-\d\d\.json$/.test(JSON.parse(init.body).name) && put && put.len > 5 * 1024 * 1024 && !drive.some(d => /uploadType=multipart/.test(d.url)) && /✅ Synced to Drive/.test(t), 'C: over 4.5 MB → resumable: POST metadata, PUT the content to the Location URL');
+    ok(init && JSON.parse(init.body).parents[0] === 'FOLDER1' && JSON.parse(init.body).name === 'nikhil-world-backup-2026-10-04-AKDT.json' && put && put.len > 5 * 1024 * 1024 && !drive.some(d => /uploadType=multipart/.test(d.url)) && /✅ Synced to Drive/.test(t), 'C: over 4.5 MB → resumable: POST metadata, PUT the content to the Location URL, confirmed');
     ok(ctx.errors.length === 0, 'C: no console errors' + (ctx.errors.length ? ' → ' + ctx.errors.join(' | ') : ''));
     await ctx.browser.close();
   }
@@ -1059,12 +1072,12 @@ async function step5() {
       localStorage.setItem('practice:log:2026_10_04', '{"entries":[]}');
       return (await window.nwGatherBackup()).backup;
     });
-    const keys = g.docs.map(d => d.fields.key);
-    ok(g.source === 'this-device' && g.docs.some(d => d.id === 'kaizen3_tasks' && d.fields.key === 'kaizen3:tasks' && d.fields.value === '[3]') && g.docs.some(d => d.id === 'practice_log_2026_10_04'), 'C: fallback uses every key on this device');
+    const keys = g.entries.map(e => e.key);
+    ok(g.format === 3 && g.source === 'this-device' && g.entries.some(e => e.key === 'kaizen3:tasks' && JSON.stringify(e.value) === '[3]') && keys.includes('practice:log:2026_10_04'), 'C: fallback uses every key on this device');
     ok(!keys.some(k => /token|^firebase|^__/i.test(k)) && !JSON.stringify(g).includes('SECRET'), 'C: the Drive token, Firebase and internal keys are left out');
     await page.getByRole('button', { name: 'System', exact: true }).click();
     const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: /DOWNLOAD BACKUP/ }).click()]);
-    ok(/-this-device\.json$/.test(dl.suggestedFilename()), 'C: a device-only download gets its own file name');
+    ok(dl.suggestedFilename() === 'nikhil-world-backup-2026-10-04-AKDT-this-device.json', 'C: a device-only download gets its own file name → ' + dl.suggestedFilename());
     await page.waitForTimeout(200);
     const t = await page.locator('body').innerText();
     ok(/Backup downloaded ✅ · \d+ items · \d+\.\d\d MB · The database couldn't be read, so only this device's copy was used\./.test(t), "C: status says only this device's copy was used");
