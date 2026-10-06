@@ -172,6 +172,48 @@
       const isInternalId = (id) => /__part_\d+$|__split_|__conflict_/.test(id);
       const isReadOnlyId = (id) => isInternalId(id) || isLegacyPartId(id);
 
+      // ── Docs that merge instead of making a conflict copy ──
+      // Drafts (practice:drafts, drafts:<tab>): { drafts: { <id>: { v, at } } }. Per draft, the newer `at`
+      // wins (v: null is a cleared draft, kept so a clear beats an older copy from another device). Drafts
+      // older than 7 days are dropped; the doc is kept under 50 KB (cleared drafts go first, then the oldest).
+      // Notes (notes:<YYYY_MM_DD>): { notes: [ { id, at, u, ... } ] }. Per note id, the newer `u` wins
+      // (a removed note is { id, deleted: true, u }). Every save of these keys is merged with the cloud copy.
+      const DRAFTS_KEY = /^(practice:drafts|drafts:[A-Za-z0-9_-]+)$/;
+      const NOTES_KEY = /^notes:\d{4}_\d\d_\d\d$/;
+      const DRAFT_DAYS = 7;
+      const DRAFT_DOC_MAX = 50 * 1024;
+      const parseObj = (s) => { try { const v = JSON.parse(s); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; } catch (_) { return {}; } };
+      const tidyDrafts = (drafts, now) => {
+        const out = {};
+        const cut = (now || Date.now()) - DRAFT_DAYS * 86400000;
+        Object.keys(drafts).forEach(k => { const d = drafts[k]; if (d && typeof d === 'object' && typeof d.at === 'number' && d.at >= cut) out[k] = d; });
+        const size = () => enc.encode(JSON.stringify({ drafts: out })).length;
+        if (size() > DRAFT_DOC_MAX) {
+          const order = Object.keys(out).sort((a, b) => ((out[a].v == null ? 0 : 1) - (out[b].v == null ? 0 : 1)) || out[a].at - out[b].at);
+          for (const k of order) { if (size() <= DRAFT_DOC_MAX) break; delete out[k]; }
+        }
+        return out;
+      };
+      const mergeDrafts = (a, b) => {
+        const A = parseObj(a).drafts || {}, B = parseObj(b).drafts || {};
+        const all = Object.assign({}, A);
+        Object.keys(B).forEach(k => { const x = A[k], y = B[k]; if (!x || !y || typeof y.at !== 'number' || !(typeof x.at === 'number' && x.at > y.at)) all[k] = y; });
+        return JSON.stringify({ drafts: tidyDrafts(all) });
+      };
+      const mergeNotes = (a, b) => {
+        const by = new Map();
+        const add = (n) => {
+          if (!n || typeof n !== 'object' || n.id == null) return;
+          const id = String(n.id), cur = by.get(id);
+          if (!cur || (Number(n.u) || 0) >= (Number(cur.u) || 0)) by.set(id, n);
+        };
+        (parseObj(a).notes || []).forEach(add);
+        (parseObj(b).notes || []).forEach(add);
+        const notes = [...by.values()].sort((x, y) => String(x.at || '').localeCompare(String(y.at || '')));
+        return JSON.stringify(Object.assign({}, parseObj(a), parseObj(b), { notes }));
+      };
+      const mergerOf = (key) => (DRAFTS_KEY.test(key) ? mergeDrafts : NOTES_KEY.test(key) ? mergeNotes : null);
+
       // ── Sizes, in UTF-8 bytes, by Firestore's own rules ──
       const enc = new TextEncoder();
       const utf8 = (s) => enc.encode(String(s)).length;
@@ -228,6 +270,9 @@
       const dismissedSizes = load(DISMISSED_KEY, {});
       const seen = load(SEEN_KEY, {});
       const devMarks = load(MARKS_KEY, {});
+      const ROOM_AT = 60;                  // % of the device estimate at which the old Kaizen device copy is tidied
+      const ROOM_KEY = '__nw_room_notes';  // conflict copies made when tidying it (one banner each)
+      let roomNotes = load(ROOM_KEY, []).filter(n => n && typeof n.id === 'string');
       const failed = new Map();     // id → { what, reason }: saved neither in the cloud nor on this device
       const sizeWarn = new Map();   // id → { what, bytes, note }
       const bigKeys = new Map();    // key → total bytes, for keys outside SEALED_LOG_KEYS at or over BIG_AT
@@ -316,7 +361,7 @@
       };
       function usageLater() {
         if (usageTimer) return;
-        usageTimer = setTimeout(() => { usageTimer = null; const before = usage.pct >= DEVICE_WARN_PCT; measureDevice(); if (before !== (usage.pct >= DEVICE_WARN_PCT) || before) emit(); }, 300);
+        usageTimer = setTimeout(() => { usageTimer = null; const before = usage.pct >= DEVICE_WARN_PCT; measureDevice(); if (before !== (usage.pct >= DEVICE_WARN_PCT) || before) emit(); roomLater(); }, 300);
       }
 
       // ── What a key is, in words (for banners) ──
@@ -332,6 +377,8 @@
         [/^practice:asks:(\d{4})_(\d\d)_(\d\d)$/, m => `Claude answers for ${m[1]}-${m[2]}-${m[3]}`],
         [/^practice:playbook$/, 'Practice playbook'], [/^practice:homework$/, 'Practice homework'],
         [/^practice:shobha-queue$/, 'Dr. Shobha queue'], [/^practice:outside-map$/, 'Gaps list'],
+        [/^practice:drafts$/, 'Practice drafts'], [/^drafts:(.+)$/, m => `Drafts (${m[1]})`],
+        [/^notes:(\d{4})_(\d\d)_(\d\d)$/, m => `Notes for ${m[1]}-${m[2]}-${m[3]}`],
       ];
       const whatOf = (key) => {
         for (const [re, l] of WHAT) { const m = re.exec(key); if (m) return typeof l === 'function' ? l(m) : l; }
@@ -370,6 +417,7 @@
         if (usage.pct >= DEVICE_WARN_PCT && usageDismissed !== Math.floor(usage.pct)) {
           out.push({ id: 'device-full', kind: 'device-full', dismissable: true, text: `This device's saved data is ${(usage.bytes / MB).toFixed(2)} MB of about 5 MB (${Math.round(usage.pct)}%). When it is full, saves made offline can't be kept on this device.` });
         }
+        roomNotes.forEach(n => out.push({ id: 'room:' + n.id, kind: 'room', dismissable: true, text: `To make room on this device, older Kaizen history kept on this device was removed. ${n.days} day${n.days === 1 ? ' was' : 's were'} missing or different in the cloud, so the whole copy was first saved in the cloud as ${n.id}.` }));
         readIssues.forEach((r, id) => out.push({ id: 'read:' + id, kind: 'read', dismissable: true, text: `Older parts of ${r.what} couldn't be read, so some of its history may be missing from the screen. Nothing was deleted. Reason: ${r.reason}.` }));
         return out;
       };
@@ -723,6 +771,16 @@
       const cloudWrite = async (key, id, value, at, opts) => {
         opts = opts || {};
         let meta = metaCache.get(id);
+        const merger = mergerOf(key);
+        if (merger) {
+          // Drafts and notes: merged with the cloud copy on every save, so two devices never overwrite each other.
+          const cur = await readRaw(id);
+          meta = metaOf(cur);
+          if (cur && typeof cur.value === 'string' && !cur.split) {
+            const merged = merger(cur.value, value);
+            if (merged !== value) { value = merged; try { localStorage.setItem(key, merged); } catch (_) {} }
+          }
+        }
         if (!meta) meta = metaOf(await readRaw(id));
         metaCache.delete(id); // unknown until this write settles
         if (!seals(key) && (meta.parts.length || meta.folding)) return foldBack(key, id, value, at, meta, opts);
@@ -913,7 +971,7 @@
         const why = (err) => { e.reason = reasonOf(err); saveQueue(); emit(); return false; };
         let cloud;
         try { cloud = await readRaw(id); } catch (err) { return why(err); }
-        if (changedSince(cloud, e, value)) {
+        if (!mergerOf(e.key) && changedSince(cloud, e, value)) {
           // The cloud changed after this device's copy did: keep the cloud's, save this device's beside it.
           try { await saveConflict(e.key, id, e.what, value, e, cloud); }
           catch (err) { return why(err); }
@@ -945,8 +1003,68 @@
           .then(() => { flushing = null; emit(); });
         return flushing;
       };
-      window.__dbReady.then(() => { measureDevice(); emit(); if (queue.length) flush(); });
-      window.addEventListener('online', () => { emit(); if (queue.length) flush(); });
+      // ── Room on this device ──
+      // The old kaizen3:logs device copy (LEGACY_PARTS localKeys) only shows pre-July Kaizen history offline.
+      // Once this device's saved data passes ROOM_AT and the device is online, each day of it is compared
+      // with the cloud's whole history. All days match → the device copy is removed. Any day missing or
+      // different in the cloud → the device copy is first saved as <id>__conflict_<time>, read back to
+      // confirm it is in the cloud, and only then removed. Nothing waiting to upload is ever removed.
+      let roomBusy = null;
+      const makeRoom = async (force) => {
+        if (roomBusy) return roomBusy;
+        roomBusy = (async () => {
+          const out = [];
+          measureDevice();
+          if (!force && usage.pct < ROOM_AT) return out;
+          if (!db || isOffline()) return out;
+          for (const key of Object.keys(LEGACY_PARTS)) {
+            const id = sanitiseKey(key);
+            for (const lk of LEGACY_PARTS[key].localKeys || []) {
+              const raw = localGet(lk);
+              if (raw === null) continue;
+              const lid = sanitiseKey(lk);
+              if (inQueue(lid) || inQueue(id)) { out.push({ key: lk, action: 'kept', why: 'waiting to upload' }); continue; }
+              const local = parse(raw);
+              if (!local || typeof local !== 'object' || Array.isArray(local)) { out.push({ key: lk, action: 'kept', why: 'not a date-keyed copy' }); continue; }
+              let all;
+              try {
+                const a = await readActive(key);
+                if (fromDevice.has(id) || inQueue(id)) { out.push({ key: lk, action: 'kept', why: "the cloud couldn't be read" }); continue; }
+                all = await getAllFrom(key, a);
+              } catch (e) { out.push({ key: lk, action: 'kept', why: reasonOf(e) }); continue; }
+              if (!all || !all.complete) { out.push({ key: lk, action: 'kept', why: "the cloud's history couldn't be read in full" }); continue; }
+              const cloud = parse(all.value) || {};
+              const differ = Object.keys(local).filter(d => !Object.prototype.hasOwnProperty.call(cloud, d) || JSON.stringify(cloud[d]) !== JSON.stringify(local[d]));
+              if (differ.length) {
+                const cid = `${lid}__conflict_${new Date().toISOString().replace(/[:.]/g, '_')}`;
+                try {
+                  await writeDoc(cid, { key: lk, value: raw, conflictOf: lid, deviceCopy: true, days: differ.slice(0, 200), savedAt: new Date() }, null);
+                  const back = await readRaw(cid);
+                  const v = back ? await assemble(cid, back) : null;
+                  if (v !== raw) throw nwErr('the copy read back from the cloud is not the same');
+                } catch (e) { out.push({ key: lk, action: 'kept', why: reasonOf(e) }); continue; }
+                if (localGet(lk) !== raw) { out.push({ key: lk, action: 'kept', why: 'it changed while checking' }); continue; }
+                try { localStorage.removeItem(lk); } catch (_) {}
+                roomNotes = roomNotes.concat([{ id: cid, key: lk, days: differ.length, at: Date.now() }]);
+                keep(ROOM_KEY, roomNotes);
+                out.push({ key: lk, action: 'saved-then-removed', copy: cid, days: differ });
+              } else {
+                if (localGet(lk) !== raw) { out.push({ key: lk, action: 'kept', why: 'it changed while checking' }); continue; }
+                try { localStorage.removeItem(lk); } catch (_) {}
+                out.push({ key: lk, action: 'removed' });
+              }
+              seenDrop(lid);
+            }
+          }
+          measureDevice(); emit();
+          return out;
+        })().finally(() => { roomBusy = null; });
+        return roomBusy;
+      };
+      const roomLater = () => { if (usage.pct >= ROOM_AT && db && !isOffline()) makeRoom().catch(() => {}); };
+
+      window.__dbReady.then(() => { measureDevice(); emit(); if (queue.length) flush(); roomLater(); });
+      window.addEventListener('online', () => { emit(); if (queue.length) flush(); roomLater(); });
       window.addEventListener('offline', () => emit());
 
       // set(), inside the doc's write chain. opts: what (words for banners), restore (may write a read-only
@@ -982,7 +1100,7 @@
           let cloud;
           try { cloud = await readRaw(id); } catch (e) { return deviceOnly(reasonOf(e), at); }
           const e = { at, firstAt: at, base: baseOf(id) };
-          if (changedSince(cloud, e, value)) {
+          if (!mergerOf(key) && changedSince(cloud, e, value)) {
             try { await saveConflict(key, id, what, value, e, cloud); }
             catch (err) { return deviceOnly(reasonOf(err), at); }
             // Kept as the conflict copy (its banner says so); later saves stay on this device until reload.
@@ -1317,10 +1435,15 @@
           if (kind === 'conflict') { conflicts = conflicts.filter(c => c.id !== id); keep(CONFLICTS_KEY, conflicts); }
           if (kind === 'size' && sizeWarn.has(id)) { dismissedSizes[id] = sizeWarn.get(id).bytes; keep(DISMISSED_KEY, dismissedSizes); }
           if (kind === 'big' && bigKeys.has(id)) { dismissedSizes['big:' + id] = bigKeys.get(id); keep(DISMISSED_KEY, dismissedSizes); }
+          if (kind === 'room') { roomNotes = roomNotes.filter(n => n.id !== id); keep(ROOM_KEY, roomNotes); }
           if (kind === 'device-full') usageDismissed = Math.floor(usage.pct);
           emit();
         },
         flush: () => flush(),
+        // Tidies the old Kaizen device copy (see makeRoom). force: run below 60% too (tests). Returns what it did.
+        makeRoom: (force) => makeRoom(!!force),
+        // The merge used for drafts and notes docs (null for any other key): merge(cloudValue, deviceValue).
+        mergerOf: (key) => mergerOf(key),
         docBytes, kindOf, hashOf, LIMIT, SAFE, SEALED_LOG_KEYS: SEALED_LOG_KEYS.slice(), DEVICE_LIMIT,
       };
     })();
@@ -1402,20 +1525,27 @@ function useDebouncedPersist(key, initialValue) {
     return () => { cancel = true; };
   }, [key]);
 
-  const setValue = __useCallback((next) => {
+  // cb(where), optional: runs once this value (or a later one that replaced it) is saved: 'cloud' | 'device-only' | false.
+  const cbsRef = __useRef([]);
+  const setValue = __useCallback((next, cb) => {
+    if (cb) cbsRef.current.push(cb);
     setValueRaw(prev => {
       const v = typeof next === 'function' ? next(prev) : next;
-      if (!loaded) return v;
+      if (!loaded) { const cbs = cbsRef.current; cbsRef.current = []; setTimeout(() => cbs.forEach(f => f(false)), 0); return v; }
       setStatus('saving');
       clearTimeout(timerRef.current);
       timerRef.current = setTimeout(async () => {
+        const cbs = cbsRef.current; cbsRef.current = [];
+        const tell = (w) => cbs.forEach(f => { try { f(w); } catch (_) {} });
         try {
           const where = await window.storage.set(key, JSON.stringify(v));
+          tell(where);
           if (!where) { setStatus('error'); return; }
           if (where !== 'cloud') { setStatus('device'); return; }
           setStatus('saved');
           setTimeout(() => setStatus('idle'), 1500);
         } catch {
+          tell(false);
           setStatus('error');
         }
       }, 350);
@@ -1856,7 +1986,7 @@ const nwClock = (ms) => {
 function NwStorageBanners() {
   const s = useNwSaveState();
   if (!s || !s.banners?.length) return null;
-  const tone = { 'device-only': ['#2a1f05', '#fbbf24'], failed: ['#2a0b0b', '#fca5a5'], conflict: ['#2a1f05', '#fbbf24'], size: ['#1f1a05', '#fde68a'], big: ['#1f1a05', '#fde68a'], 'device-full': ['#2a1f05', '#fbbf24'], read: ['#1f1a05', '#fde68a'] };
+  const tone = { 'device-only': ['#2a1f05', '#fbbf24'], failed: ['#2a0b0b', '#fca5a5'], conflict: ['#2a1f05', '#fbbf24'], size: ['#1f1a05', '#fde68a'], big: ['#1f1a05', '#fde68a'], 'device-full': ['#2a1f05', '#fbbf24'], room: ['#1f1a05', '#fde68a'], read: ['#1f1a05', '#fde68a'] };
   return (
     <div data-nw-banners style={{ flexShrink: 0, maxHeight: '40vh', overflowY: 'auto', position: 'relative', zIndex: 9998 }}>
       {s.banners.map(b => {
@@ -1908,6 +2038,387 @@ window.TodayStrip = TodayStrip;
 const __style = document.createElement('style');
 __style.textContent = `@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.4 } }`;
 document.head.appendChild(__style);
+  </script>
+
+  <!-- ─────────────────────────────────────────────────────────────
+       Drafts, notes and the Saved bar — shared by every tab (rules: CLAUDE.md)
+       • useDraft(tab, id, initial): a text box (or a form, or a flow in progress) that survives close and
+         reload. Saved about 1 s after typing stops into one small doc per tab (practice:drafts for the
+         Practice tab, drafts:<tab> elsewhere). Restored when the screen opens; clear() on submit.
+       • nwAddNote / nwListNotes / nwRemoveNote: timestamped notes in notes:<YYYY_MM_DD>.
+       • nwLog: runs a log/save/complete/rate action once (a repeat within 60 s asks "Log again") and shows
+         the shared bar "Saved · Add note · Undo" for 30 s.
+       • NwSavedBar, NwQuickNote: rendered once by the App shell.
+       Everything goes through window.storage; drafts and notes docs merge across devices there.
+       ───────────────────────────────────────────────────────────── -->
+  <script type="text/babel">
+const { useState: _nS, useEffect: _nE, useRef: _nR, useCallback: _nC } = React;
+
+const nwTwo = (n) => String(n).padStart(2, '0');
+const nwDayKey = (d = new Date()) => `${d.getFullYear()}_${nwTwo(d.getMonth() + 1)}_${nwTwo(d.getDate())}`;
+const nwISODate = (d = new Date()) => nwDayKey(d).replace(/_/g, '-');
+const nwHM = (d = new Date()) => `${nwTwo(d.getHours())}:${nwTwo(d.getMinutes())}`;
+const nwNewId = (p) => `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+// What a save result means, in words. Never "saved" unless the cloud has it.
+const nwWhereText = (where, done = 'Saved') => (where === 'cloud' ? done
+  : where === 'device-only' ? 'On this device only, not in the cloud yet'
+  : 'Not saved. Nothing was stored.');
+
+// One write at a time per key (two quick taps never race).
+const nwChains = {};
+const nwSerial = (key, fn) => {
+  const run = (nwChains[key] || Promise.resolve()).then(fn, fn);
+  nwChains[key] = run.catch(() => {});
+  return run;
+};
+
+// ── Drafts ─────────────────────────────────────────────────────
+const NW_DRAFT_SAVE_MS = 1000;     // saved about 1 second after typing stops
+const NW_DRAFT_MAX_CHARS = 20000;  // a single draft bigger than this isn't kept (the doc stays under 50 KB)
+const NW_DRAFT_DAYS = 7;
+const NW_DRAFT_RELOAD_MS = 5000;   // a screen opening re-reads the drafts doc if it was read longer ago
+const nwDraftKey = (tab) => (tab === 'practice' ? 'practice:drafts' : `drafts:${tab}`);
+const nwDraftDocs = {};
+function nwDraftDoc(tab) {
+  const key = nwDraftKey(tab);
+  const s = nwDraftDocs[key] || (nwDraftDocs[key] = { key, drafts: {}, loading: null, loadedAt: 0, timer: null, where: null });
+  if (!s.loading || Date.now() - s.loadedAt > NW_DRAFT_RELOAD_MS) {
+    s.loadedAt = Date.now();
+    s.loading = (async () => {
+      try {
+        const r = await window.storage.get(key);
+        const doc = r && r.value ? JSON.parse(r.value) : null;
+        const theirs = doc && doc.drafts && typeof doc.drafts === 'object' ? doc.drafts : {};
+        Object.keys(theirs).forEach(k => {
+          const t = theirs[k], m = s.drafts[k];
+          if (t && typeof t.at === 'number' && (!m || t.at > m.at)) s.drafts[k] = t;
+        });
+      } catch (_) {}
+      return s;
+    })();
+  }
+  return s;
+}
+async function nwDraftWrite(s) {
+  clearTimeout(s.timer); s.timer = null;
+  const cut = Date.now() - NW_DRAFT_DAYS * 86400000;
+  Object.keys(s.drafts).forEach(k => { if (!(s.drafts[k] && s.drafts[k].at >= cut)) delete s.drafts[k]; });
+  let value = JSON.stringify({ drafts: s.drafts });
+  const merge = window.storage && window.storage.mergerOf ? window.storage.mergerOf(s.key) : null;
+  if (merge) value = merge('{}', value); // prunes and keeps the doc under 50 KB
+  return nwSerial(s.key, async () => {
+    try { s.where = await window.storage.set(s.key, value); } catch (_) { s.where = false; }
+    return s.where;
+  });
+}
+const nwDraftSoon = (s, ms) => { clearTimeout(s.timer); s.timer = setTimeout(() => nwDraftWrite(s), ms); };
+const nwSame = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const nwEmpty = (v) => v == null || v === '' || (typeof v === 'object' && !Array.isArray(v) && Object.values(v).every(nwEmpty)) || (Array.isArray(v) && v.every(nwEmpty));
+const nwDrafts = {
+  // Stores a draft (an empty value, or the starting value, clears it).
+  put(tab, id, v, initial) {
+    const s = nwDraftDoc(tab);
+    if (nwEmpty(v) || (initial !== undefined && nwSame(v, initial))) s.drafts[id] = { v: null, at: Date.now() };
+    else {
+      if (JSON.stringify(v).length > NW_DRAFT_MAX_CHARS) return;
+      s.drafts[id] = { v, at: Date.now() };
+    }
+    nwDraftSoon(s, NW_DRAFT_SAVE_MS);
+  },
+  clear(tab, id) {
+    const s = nwDraftDoc(tab);
+    if (!s.drafts[id] || s.drafts[id].v != null) { s.drafts[id] = { v: null, at: Date.now() }; nwDraftSoon(s, 200); }
+  },
+  async peek(tab, id) { const s = nwDraftDoc(tab); await s.loading; const d = s.drafts[id]; return d && d.v != null ? d.v : null; },
+  // Every draft of a tab whose id starts with `prefix`: [{ id, v, at }].
+  async list(tab, prefix = '') { const s = nwDraftDoc(tab); await s.loading; return Object.keys(s.drafts).filter(k => k.startsWith(prefix) && s.drafts[k].v != null).map(k => ({ id: k, v: s.drafts[k].v, at: s.drafts[k].at })); },
+  flushAll() { Object.values(nwDraftDocs).forEach(s => { if (s.timer) nwDraftWrite(s); }); },
+};
+// Leaving the app (switching away, closing) saves any draft still waiting for its 1-second pause.
+window.addEventListener('pagehide', () => nwDrafts.flushAll());
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') nwDrafts.flushAll(); });
+
+// [value, setValue, clear]. The value is restored from the tab's drafts doc when the screen opens (unless
+// typing already started); every change is saved about 1 s after typing stops; clear() empties the box
+// and removes the draft (call it on submit). Works for a string, a form object or a flow's progress.
+function useDraft(tab, id, initial = '') {
+  const initRef = _nR(initial);
+  const [val, setVal] = _nS(initial);
+  const valRef = _nR(initial);
+  const touched = _nR(false);
+  const [restored, setRestored] = _nS(false);
+  _nE(() => {
+    let off = false;
+    touched.current = false;
+    valRef.current = initRef.current;
+    setVal(initRef.current);
+    setRestored(false);
+    if (!id) return undefined;
+    nwDraftDoc(tab).loading.then((s) => {
+      if (off || touched.current) return;
+      const d = s.drafts[id];
+      if (d && d.v != null) { valRef.current = d.v; setVal(d.v); setRestored(true); }
+    });
+    return () => { off = true; };
+  }, [tab, id]);
+  const set = _nC((next) => {
+    touched.current = true;
+    const v = typeof next === 'function' ? next(valRef.current) : next;
+    valRef.current = v;
+    setVal(v);
+    if (id) nwDrafts.put(tab, id, v, initRef.current);
+  }, [tab, id]);
+  const clear = _nC((to) => {
+    touched.current = true;
+    const v = to === undefined ? initRef.current : to;
+    valRef.current = v;
+    setVal(v);
+    setRestored(false);
+    if (id) nwDrafts.clear(tab, id);
+  }, [tab, id]);
+  return [val, set, clear, restored];
+}
+
+// A form as one draft: [values, field(name) → setter, clear, restored].
+function useDraftForm(tab, id, initial) {
+  const [v, set, clear, restored] = useDraft(tab, id, initial);
+  const field = (k) => (x) => set(cur => { const c = cur || initial; return { ...c, [k]: typeof x === 'function' ? x(c[k]) : x }; });
+  return [v || initial, field, clear, restored];
+}
+
+// ── Notes: notes:<YYYY_MM_DD> = { date, notes: [ { id, at, u, tab, screen?, practice?, step?, text, ref? } ] } ──
+const nwNotesKey = (d = new Date()) => `notes:${nwDayKey(d)}`;
+async function nwReadNotes(key) {
+  try {
+    const r = await window.storage.get(key);
+    const doc = r && r.value ? JSON.parse(r.value) : null;
+    return doc && typeof doc === 'object' ? doc : null;
+  } catch (_) { return null; }
+}
+// Adds one note to today's notes doc. Returns { where, note, key } (where: 'cloud' | 'device-only' | false).
+function nwAddNote({ tab, screen, practice, step, text, ref }) {
+  const now = new Date();
+  const key = nwNotesKey(now);
+  const note = { id: nwNewId('note'), at: now.toISOString(), u: now.getTime(), tab: tab || '', text: String(text || '').trim() };
+  if (screen) note.screen = screen;
+  if (practice) note.practice = practice;
+  if (step) note.step = step;
+  if (ref) note.ref = ref;
+  return nwSerial(key, async () => {
+    const doc = (await nwReadNotes(key)) || {};
+    const next = Object.assign({}, doc, { date: nwISODate(now), notes: (Array.isArray(doc.notes) ? doc.notes : []).concat([note]) });
+    let where = false;
+    try { where = await window.storage.set(key, JSON.stringify(next)); } catch (_) {}
+    return { where, note, key };
+  });
+}
+// Removes a note: it stays in the doc as { id, deleted: true, u }, so another device's copy can't bring it back.
+function nwRemoveNote(key, id) {
+  return nwSerial(key, async () => {
+    const doc = await nwReadNotes(key);
+    if (!doc || !Array.isArray(doc.notes)) return false;
+    const notes = doc.notes.map(n => (n && n.id === id ? { id, deleted: true, u: Date.now() } : n));
+    try { return await window.storage.set(key, JSON.stringify(Object.assign({}, doc, { notes }))); } catch (_) { return false; }
+  });
+}
+// Notes from today and the days before it, newest first (removed notes left out).
+async function nwListNotes(days = 2) {
+  const out = [];
+  for (let i = 0; i < days; i++) {
+    const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() - i);
+    const key = nwNotesKey(d);
+    const doc = await nwReadNotes(key);
+    (doc && Array.isArray(doc.notes) ? doc.notes : []).forEach(n => { if (n && !n.deleted && n.text) out.push(Object.assign({ key }, n)); });
+  }
+  return out.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+}
+
+// ── Where am I (for notes): each tab says its screen, and the Practice tab its practice and step ──
+const nwContext = {};
+const nwSetContext = (tab, ctx) => { nwContext[tab] = Object.assign({}, ctx || {}); };
+
+// ── The shared bar: "Saved · Add note · Undo" for 30 s after a log/save/complete/rate succeeds ──
+const NW_BAR_MS = 30000;
+const NW_REPEAT_MS = 60000;
+const NW_BAR_ARM_MS = 500;
+const nwBar = { cur: null, fns: new Set() };
+const nwShowBar = (opts) => { nwBar.cur = opts ? Object.assign({ shownAt: Date.now(), barId: nwNewId('bar') }, opts) : null; nwBar.fns.forEach(fn => fn(nwBar.cur)); };
+// The last logged entry per scope, for "Already logged · Log again".
+const nwLast = new Map();
+// Runs one log action. opts: { tab, what, scope, sig, force, run }. run({ force }) → { where, undo?, addNote?, ref? }
+// (or null/false when it failed and said so itself). A repeat of the same sig in the same scope within
+// 60 s isn't logged; the bar says "Already logged · Log again" and Log again logs it in one tap.
+async function nwLog(opts) {
+  const { tab, scope, sig, force, run } = opts;
+  const last = scope ? nwLast.get(scope) : null;
+  if (!force && sig != null && last && last.sig === sig && Date.now() - last.at < NW_REPEAT_MS) {
+    nwShowBar({ tab, mode: 'repeat', what: opts.what, again: () => nwLog(Object.assign({}, opts, { force: true })) });
+    return { repeat: true };
+  }
+  let r = null;
+  try { r = await run({ force: !!force }); } catch (e) { r = { where: false, error: e && e.message }; }
+  if (!r) return r;
+  if (r.where && scope) nwLast.set(scope, { sig, at: Date.now() });
+  nwShowBar(Object.assign({ tab, what: opts.what, mode: 'saved' }, r));
+  return r;
+}
+// [busy, wrap]: wrap(fn) runs fn once at a time; a second tap while it runs does nothing.
+function useBusy() {
+  const ref = _nR(false);
+  const [busy, setBusy] = _nS(false);
+  const wrap = _nC((fn) => async (...a) => {
+    if (ref.current) return undefined;
+    ref.current = true; setBusy(true);
+    try { return await fn(...a); } finally { ref.current = false; setBusy(false); }
+  }, []);
+  return [busy, wrap];
+}
+
+const nwBarBtn = { minHeight: 36, padding: '6px 12px', background: 'transparent', color: '#4ECDC4', border: '1px solid #4ECDC4', borderRadius: 8, fontSize: 13, fontWeight: 600, fontFamily: "'DM Sans', system-ui, sans-serif", cursor: 'pointer' };
+const nwBarInput = { width: '100%', minHeight: 60, padding: '8px 10px', fontSize: 15, background: '#0b0d12', color: '#e4e4e7', border: '1px solid #333', borderRadius: 8, boxSizing: 'border-box', fontFamily: "'DM Sans', system-ui, sans-serif", resize: 'vertical' };
+
+function NwSavedBar() {
+  const [cur, setCur] = _nS(nwBar.cur);
+  const [noteOpen, setNoteOpen] = _nS(false);
+  const [msg, setMsg] = _nS('');
+  const [busy, wrap] = useBusy();
+  const tab = cur?.tab || 'app';
+  const [note, setNote, clearNote] = useDraft(tab, cur ? 'bar-note' : null, '');
+  _nE(() => { const fn = (c) => { setCur(c); setNoteOpen(false); setMsg(''); }; nwBar.fns.add(fn); return () => nwBar.fns.delete(fn); }, []);
+  _nE(() => {
+    if (!cur || noteOpen) return undefined;
+    const left = Math.max(0, (msg ? 4000 : NW_BAR_MS) - (msg ? 0 : Date.now() - cur.shownAt));
+    const t = setTimeout(() => { if (nwBar.cur === cur) nwShowBar(null); }, left);
+    return () => clearTimeout(t);
+  }, [cur, noteOpen, msg]);
+  if (!cur) return null;
+  // The bar can appear under the finger of a double tap: its buttons ignore taps in its first 500 ms.
+  const fresh = () => Date.now() - cur.shownAt < NW_BAR_ARM_MS;
+  const close = () => nwShowBar(null);
+  const saveNote = wrap(async () => {
+    const text = note.trim();
+    if (!text) return;
+    let where = false;
+    if (cur.addNote) { try { where = await cur.addNote(text); } catch (_) { where = false; } }
+    else {
+      const ctx = nwContext[cur.tab] || {};
+      const ref = Object.assign({ tab: cur.tab, what: cur.what || '' }, cur.ref || {});
+      const r = await nwAddNote({ tab: cur.tab, screen: ctx.screen, practice: ctx.practice, step: ctx.step, text, ref });
+      where = r.where;
+    }
+    if (where) clearNote();
+    setNoteOpen(false);
+    setMsg(where === 'cloud' ? 'Note saved' : where === 'device-only' ? 'Note on this device only, not in the cloud yet' : 'Note not saved. Nothing was stored.');
+  });
+  const undo = wrap(async () => {
+    if (fresh()) return;
+    let where = false;
+    try { where = await cur.undo(); } catch (_) { where = false; }
+    setMsg(where === 'cloud' ? 'Removed' : where === 'device-only' ? 'Removed on this device only, not in the cloud yet' : "Undo didn't work. Nothing was changed.");
+  });
+  const again = wrap(async () => { if (fresh()) return; await cur.again(); });
+  const bar = { flexShrink: 0, padding: '8px 16px', background: '#10201f', borderTop: '1px solid #1f3f3c', color: '#e4e4e7', fontSize: 14, fontFamily: "'DM Sans', system-ui, sans-serif", position: 'relative', zIndex: 9997 };
+  const row = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' };
+  if (msg) return <div data-nw-savedbar role="status" style={bar}><div style={row}><span style={{ flex: 1 }}>{msg}</span><button style={nwBarBtn} onClick={close}>OK</button></div></div>;
+  if (cur.mode === 'repeat') return (
+    <div data-nw-savedbar role="status" style={bar}>
+      <div style={row}><span style={{ flex: 1 }}>Already logged</span>
+        <button style={nwBarBtn} disabled={busy} onClick={again}>Log again</button>
+        <button style={nwBarBtn} onClick={close}>OK</button></div>
+    </div>
+  );
+  if (!cur.where) return (
+    <div data-nw-savedbar role="alert" style={{ ...bar, background: '#2a0b0b', color: '#fca5a5' }}>
+      <div style={row}><span style={{ flex: 1 }}>{cur.error ? `Not saved: ${cur.error}` : 'Not saved. Nothing was stored.'}</span><button style={nwBarBtn} onClick={close}>OK</button></div>
+    </div>
+  );
+  return (
+    <div data-nw-savedbar role="status" style={bar}>
+      <div style={row}>
+        <span style={{ flex: 1, minWidth: 0, color: cur.where === 'cloud' ? '#86efac' : '#fbbf24' }}>{nwWhereText(cur.where)}</span>
+        {!noteOpen && <button style={nwBarBtn} disabled={busy} onClick={() => { if (!fresh()) setNoteOpen(true); }}>Add note</button>}
+        {cur.undo && !noteOpen && <button style={nwBarBtn} disabled={busy} onClick={undo}>Undo</button>}
+      </div>
+      {noteOpen && (
+        <div style={{ marginTop: 8 }}>
+          <textarea aria-label="Note for this entry" autoFocus rows={2} value={note} onChange={e => setNote(e.target.value)} placeholder="Note" style={nwBarInput} />
+          <div style={{ ...row, marginTop: 6 }}>
+            <button style={{ ...nwBarBtn, background: '#4ECDC4', color: '#0f1117' }} disabled={busy || !note.trim()} onClick={saveNote}>Save note</button>
+            <button style={nwBarBtn} onClick={() => setNoteOpen(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── The Note button: same place on every tab (left of the status line) ──
+const NW_TAB_NAMES = { roulette: 'Play', kaizen: 'Kaizen', food: 'Fuel', health: 'Vitals', practice: 'Practice', pending: 'Pending', system: 'System' };
+function NwQuickNote({ tab, children }) {
+  const [open, setOpen] = _nS(false);
+  const [text, setText, clearText] = useDraft(tab, 'quick-note', '');
+  const [notes, setNotes] = _nS(null);
+  const [msg, setMsg] = _nS('');
+  const [busy, wrap] = useBusy();
+  const refresh = async () => setNotes(await nwListNotes(2));
+  _nE(() => { if (open) refresh(); }, [open]);
+  _nE(() => { setOpen(false); setMsg(''); }, [tab]);
+  const save = wrap(async () => {
+    const t = text.trim();
+    if (!t) return;
+    const ctx = nwContext[tab] || {};
+    const r = await nwAddNote({ tab, screen: ctx.screen, practice: ctx.practice, step: ctx.step, text: t });
+    if (r.where) clearText();
+    setMsg(r.where === 'cloud' ? 'Note saved' : r.where === 'device-only' ? 'Note on this device only, not in the cloud yet' : 'Note not saved. Nothing was stored.');
+    refresh();
+  });
+  const when = (n) => { const d = new Date(n.at); return isNaN(d) ? '' : `${d.toDateString() === new Date().toDateString() ? 'Today' : 'Yesterday'} ${nwHM(d)}`; };
+  return (
+    <>
+      {open && (
+        <div data-nw-quicknote style={{ flexShrink: 0, maxHeight: '50vh', overflowY: 'auto', padding: '10px 16px', background: '#141414', borderTop: '1px solid #333', color: '#e4e4e7', fontFamily: "'DM Sans', system-ui, sans-serif", position: 'relative', zIndex: 9997 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <span style={{ flex: 1, fontSize: 13, color: '#9ca3af' }}>Note · {NW_TAB_NAMES[tab] || tab}{nwContext[tab]?.screen ? ` · ${nwContext[tab].screen}` : ''}</span>
+            <button style={nwBarBtn} onClick={() => setOpen(false)}>Close</button>
+          </div>
+          <textarea aria-label="Quick note" rows={3} value={text} onChange={e => { setText(e.target.value); setMsg(''); }} placeholder="Write a note" style={nwBarInput} />
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
+            <button style={{ ...nwBarBtn, background: '#4ECDC4', color: '#0f1117' }} disabled={busy || !text.trim()} onClick={save}>Save note</button>
+            {msg && <span role="status" style={{ fontSize: 13, color: /^Note saved/.test(msg) ? '#86efac' : '#fbbf24' }}>{msg}</span>}
+          </div>
+          <div style={{ fontSize: 11, color: '#9ca3af', letterSpacing: 1, margin: '12px 0 4px', fontFamily: "'Space Mono', monospace" }}>TODAY AND YESTERDAY</div>
+          {notes === null ? <div style={{ fontSize: 13, color: '#9ca3af' }}>Loading…</div>
+            : notes.length === 0 ? <div style={{ fontSize: 13, color: '#9ca3af' }}>No notes yet.</div>
+            : notes.map(n => (
+              <div key={n.id} data-nw-note style={{ fontSize: 14, lineHeight: 1.5, padding: '6px 0', borderBottom: '1px solid #262626' }}>
+                <div style={{ fontSize: 11, color: '#9ca3af' }}>{when(n)} · {NW_TAB_NAMES[n.tab] || n.tab}{n.screen ? ` · ${n.screen}` : ''}{n.practice ? ` · ${n.practice}` : ''}{n.step ? ` · step ${n.step}` : ''}{n.ref?.what ? ` · on: ${n.ref.what}` : ''}</div>
+                <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{n.text}</div>
+              </div>
+            ))}
+        </div>
+      )}
+      <div style={{ flexShrink: 0, display: 'flex', alignItems: 'stretch', background: '#141414', borderTop: '1px solid #262626' }}>
+        <button data-nw-notebtn aria-expanded={open} onClick={() => setOpen(o => !o)} style={{ flexShrink: 0, minWidth: 64, minHeight: 32, padding: '2px 12px', background: open ? '#1f3f3c' : 'transparent', color: '#4ECDC4', border: 'none', borderRight: '1px solid #262626', fontSize: 12, fontWeight: 700, fontFamily: "'Space Mono', monospace", cursor: 'pointer' }}>Note</button>
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>{children}</div>
+      </div>
+    </>
+  );
+}
+
+// "+ Note" on a step screen: closed by default; the text is a draft until the step's entry is saved.
+function NwStepNote({ tab, id, value, onChange, label = '+ Note', dark = true }) {
+  const [open, setOpen] = _nS(!!value);
+  _nE(() => { if (value) setOpen(true); }, [value]);
+  if (!open) return <button data-nw-stepnote onClick={() => setOpen(true)} style={{ ...nwBarBtn, color: dark ? '#a78bfa' : '#3d5a3d', borderColor: dark ? '#2a2e3d' : '#e8e0d0', marginTop: 8 }}>{label}</button>;
+  return <textarea aria-label="Note for this step" rows={2} value={value || ''} onChange={e => onChange(e.target.value)} placeholder="Note for this step" style={{ ...nwBarInput, marginTop: 8, ...(dark ? {} : { background: '#faf7f2', color: '#1a1814', borderColor: '#e8e0d0' }) }} />;
+}
+
+// Entries of one day in time order (entries with no time last); what's stored is not reordered.
+const nwByTime = (entries, timeOf) => (entries || []).map((e, i) => ({ e, i, t: timeOf(e) }))
+  .sort((a, b) => (a.t == null) - (b.t == null) || (a.t != null && b.t != null && a.t !== b.t ? (a.t < b.t ? -1 : 1) : a.i - b.i))
+  .map(x => x.e);
+
+Object.assign(window, { useDraft, useDraftForm, nwDrafts, nwAddNote, nwListNotes, nwRemoveNote, nwNotesKey, nwSetContext, nwLog, nwShowBar, useBusy, nwWhereText, nwByTime, nwDayKey, nwHM, nwNewId, NwSavedBar, NwQuickNote, NwStepNote });
   </script>
 
   <!-- KaizenApp -->
@@ -2112,6 +2623,7 @@ function KaizenApp() {
   const [logs,      setLogsRaw]     = useState({});
   const [archiveLogs, setArchiveLogs] = useState({});
   const [view,      setView]        = useState('today');
+  useEffect(() => { window.nwSetContext('kaizen', { screen: { today: 'Today', tasks: 'Tasks', projects: 'Projects', reflect: 'Reflect', trajectory: 'Arc', templates: 'Specs' }[view] || view }); }, [view]);
 
   // 'booting' | 'active' | 'offline'
   const [storeSt,   setStoreSt]   = useState('booting');
@@ -2205,12 +2717,17 @@ function KaizenApp() {
   }, []);
 
   // ── Debounced persist ────────────────────
-  const persist = (key, value) => {
-    if (storeSt !== 'active' || !loaded) return;
+  // cb(where) runs once this value (or a later one that replaced it) has been saved.
+  const saveCbs = useRef({});
+  const persist = (key, value, cb) => {
+    if (storeSt !== 'active' || !loaded) { if (cb) cb(false); return; }
     setSaveSt('saving');
+    if (cb) (saveCbs.current[key] = saveCbs.current[key] || []).push(cb);
     clearTimeout(saveTimers.current[key]);
     saveTimers.current[key] = setTimeout(async () => {
+      const cbs = saveCbs.current[key] || []; saveCbs.current[key] = [];
       const where = await storageSet(key, value);
+      cbs.forEach(f => { try { f(where); } catch (_) {} });
       setSaveSt(where === 'cloud' ? 'saved' : where ? 'device' : 'error');
       if (where === 'cloud') {
         setTimeout(() => setSaveSt('idle'), 1500);
@@ -2225,9 +2742,45 @@ function KaizenApp() {
   };
 
   // ── Wrapped setters ──────────────────────
-  const setProjects = v => { setProjectsRaw(v); persist(SK.projects, v); };
-  const setTasks    = v => { setTasksRaw(v);    persist(SK.tasks,    v); };
-  const setLogs     = v => { setLogsRaw(v);     persist(SK.logs,     v); };
+  const setProjects = (v, cb) => { setProjectsRaw(v); persist(SK.projects, v, cb); };
+  const setTasks    = (v, cb) => { tasksRef.current = v; setTasksRaw(v); persist(SK.tasks, v, cb); };
+  const setLogs     = (v, cb) => { logsRef.current = v; setLogsRaw(v); persist(SK.logs, v, cb); };
+  const tasksRef = useRef(tasks); tasksRef.current = tasks;
+  const logsRef = useRef(logs); logsRef.current = logs;
+  // A save as a promise of where it landed ('cloud' | 'device-only' | false), for the shared Saved bar.
+  const savedTasks = (v) => new Promise(res => setTasks(v, res));
+
+  // Marks a task (or one subtask) done or open. Done saves doneAt (ISO time); reopening removes it.
+  // Marking done shows the shared bar; its Undo reopens that one item and removes doneAt. A second tap on
+  // the same item while its save is in progress does nothing.
+  const pendingDone = useRef(new Set());
+  const toggleDone = (taskId, subId) => {
+    const k = taskId + ':' + (subId || '');
+    if (pendingDone.current.has(k)) return;
+    const flip = (o, done) => { const n = { ...o, status: done ? 'done' : 'open' }; if (done) n.doneAt = new Date().toISOString(); else delete n.doneAt; return n; };
+    const apply = (list, done) => list.map(x => x.id !== taskId ? x
+      : subId ? { ...x, subtasks: (x.subtasks || []).map(s => s.id === subId ? flip(s, done) : s) } : flip(x, done));
+    const cur = tasksRef.current;
+    const t = cur.find(x => x.id === taskId);
+    const item = t && (subId ? (t.subtasks || []).find(s => s.id === subId) : t);
+    if (!item) return;
+    const done = item.status !== 'done';
+    pendingDone.current.add(k);
+    const what = subId ? `Subtask done: ${item.name}` : `Task done: ${item.name}`;
+    if (!done) { savedTasks(apply(cur, false)).finally(() => pendingDone.current.delete(k)); return; }
+    window.nwLog({ tab: 'kaizen', what, run: async () => {
+      const where = await savedTasks(apply(cur, true));
+      pendingDone.current.delete(k);
+      return { where, ref: { id: subId || taskId, task: taskId, what }, undo: () => savedTasks(apply(tasksRef.current, false)) };
+    } });
+  };
+  // Ta-da list: adds one done item to today's log (a repeat of the same text within 60 s asks "Log again").
+  const addTada = (date, item) => window.nwLog({ tab: 'kaizen', what: `Ta-da: ${item.text}`, scope: 'kaizen-tada:' + date, sig: item.text + '|' + (item.domain || ''), run: () => new Promise(res => {
+    const curDay = (logsRef.current[date] || mergedLogs[date]) || { brainDump:'', highlight:'', micro:'', done:[], reflection:'' };
+    const withNew = { ...curDay, done: [...(curDay.done || []), item] };
+    setLogs({ ...logsRef.current, [date]: withNew }, (where) => res({ where, ref: { id: item.id, day: date, what: item.text },
+      undo: () => new Promise(r2 => { const d = (logsRef.current[date] || withNew); setLogs({ ...logsRef.current, [date]: { ...d, done: (d.done || []).filter(x => x.id !== item.id) } }, r2); }) }));
+  }) });
 
   // ── Logs: whole history (sealed parts + active) with in-memory edits on top, for reads ──
   const mergedLogs = useMemo(() => ({...archiveLogs, ...logs}), [archiveLogs, logs]);
@@ -2348,8 +2901,8 @@ function KaizenApp() {
   };
 
   const VIEWS = {
-    today:     <TodayView    log={todayLog} updateLog={updateTodayLog} tasks={sorted} allTasks={tasks} setTasks={setTasks} projects={projects}/>,
-    tasks:     <TasksView    tasks={sorted} allTasks={tasks} projects={projects} setTasks={setTasks}/>,
+    today:     <TodayView    log={todayLog} updateLog={updateTodayLog} tasks={sorted} allTasks={tasks} setTasks={setTasks} projects={projects} toggleDone={toggleDone} addTada={(item) => addTada(today, item)}/>,
+    tasks:     <TasksView    tasks={sorted} allTasks={tasks} projects={projects} setTasks={setTasks} toggleDone={toggleDone}/>,
     projects:  <ProjectsView projects={projects} tasks={tasks} setProjects={setProjects} setTasks={setTasks}/>,
     templates: <TemplatesView/>,
     reflect:   <ReflectView  logs={mergedLogs} updateLog={updateLog} tasks={enriched} allTasks={tasks} setTasks={setTasks} projects={projects} deletedDays={deletedDays} onDeleteDay={deleteLogDay} onRestoreDay={restoreLogDay}/>,
@@ -2478,13 +3031,27 @@ function Pill({icon,label,color}) {
   );
 }
 
+// After an edit (TaskEditor Save): a subtask or task newly marked done gets doneAt; one reopened loses it.
+// Items done before doneAt existed keep no doneAt.
+function kzWithDoneAt(before, after) {
+  const fix = (o, was) => {
+    if (o.status === 'done' && was && was.status !== 'done') return { ...o, doneAt: new Date().toISOString() };
+    if (o.status !== 'done' && o.doneAt) { const n = { ...o }; delete n.doneAt; return n; }
+    return o;
+  };
+  const subs = Array.isArray(after.subtasks) ? after.subtasks.map(s => fix(s, (before.subtasks || []).find(x => x.id === s.id) || { status: 'open' })) : after.subtasks;
+  return fix({ ...after, subtasks: subs }, before);
+}
+
 // ─────────────────────────────────────────────────────
 // TODAY VIEW
 // ─────────────────────────────────────────────────────
 
-function TodayView({ log, updateLog, tasks, allTasks, setTasks, projects }) {
-  const [doneInput,    setDoneInput]    = useState('');
-  const [doneDomain,   setDoneDomain]   = useState('');
+function TodayView({ log, updateLog, tasks, allTasks, setTasks, projects, toggleDone, addTada }) {
+  const [tada, setTada, clearTada] = window.useDraft('kaizen', 'tada', { text: '', domain: '' });
+  const doneInput = tada?.text || '', doneDomain = tada?.domain || '';
+  const setDoneInput = (v) => setTada(t => ({ ...t, text: v }));
+  const setDoneDomain = (v) => setTada(t => ({ ...t, domain: v }));
   const [brainOpen,    setBrainOpen]    = useState(false);
   const [reflectOpen,  setReflectOpen]  = useState(false);
   const [editingDoneId,setEditingDoneId]= useState(null);
@@ -2494,9 +3061,8 @@ function TodayView({ log, updateLog, tasks, allTasks, setTasks, projects }) {
   const addDone = () => {
     const text = doneInput.trim();
     if (!text) return;
-    updateLog({ done: [...(log.done||[]), {id:uid(),text,at:new Date().toISOString(),domain:doneDomain||undefined}] });
-    setDoneInput('');
-    setDoneDomain('');
+    addTada({id:uid(),text,at:new Date().toISOString(),domain:doneDomain||undefined});
+    clearTada();
   };
 
   const removeDone = id => updateLog({ done:(log.done||[]).filter(d=>d.id!==id) });
@@ -2507,11 +3073,10 @@ function TodayView({ log, updateLog, tasks, allTasks, setTasks, projects }) {
     updateLog({ done: (log.done||[]).map(d => d.id===id ? {...d, text:trimmed} : d) });
   };
 
-  const toggleTask = id =>
-    setTasks(allTasks.map(t => t.id===id ? {...t,status:t.status==='done'?'open':'done'} : t));
+  const toggleTask = id => toggleDone(id);
 
   const saveTask = (id, patch) => {
-    setTasks(allTasks.map(t => t.id===id ? {...t,...patch} : t));
+    setTasks(allTasks.map(t => t.id===id ? kzWithDoneAt(t, {...t,...patch}) : t));
     setEditingTaskId(null);
   };
 
@@ -2520,10 +3085,7 @@ function TodayView({ log, updateLog, tasks, allTasks, setTasks, projects }) {
     setEditingTaskId(null);
   };
 
-  const toggleSubtask = (taskId, subId) =>
-    setTasks(allTasks.map(t => t.id===taskId
-      ? {...t, subtasks:(t.subtasks||[]).map(s=>s.id===subId?{...s,status:s.status==='done'?'open':'done'}:s)}
-      : t));
+  const toggleSubtask = (taskId, subId) => toggleDone(taskId, subId);
 
   const toggleExpand = id => setExpandedSubs(s=>({...s,[id]:!s[id]}));
 
@@ -2698,23 +3260,23 @@ function TransitionTimer() {
   };
   const SUPPORT_URL = 'https://claude.ai/project/019c9369-3475-7481-a442-1f47bc5a196e';
 
-  const [phase, setPhase]   = useState('idle');   // idle | prep | running | stuck | done
-  const [from, setFrom]     = useState('');
-  const [to, setTo]         = useState('');
-  const [level, setLevel]   = useState('copilot');
-  const [bodyNeed, setBodyNeed] = useState(null);
-  const [steps, setSteps]   = useState([{text:'',done:false},{text:'',done:false},{text:'',done:false}]);
-  const [whatMoved, setWhatMoved] = useState('');
-  const [startAt, setStartAt] = useState(null);
+  // The gap in progress (names, steps, clock start, what moved) is a draft in drafts:kaizen ("witness"),
+  // so closing or reloading the app keeps it; "Log it" clears it.
+  const [w, wField, clearW] = window.useDraftForm('kaizen', 'witness', { phase:'idle', from:'', to:'', level:null, bodyNeed:null,
+    steps:[{text:'',done:false},{text:'',done:false},{text:'',done:false}], whatMoved:'', startAt:null, paused:false, stuckTool:null, voo:0, smallMove:'' });
+  const { phase, from, to, bodyNeed, steps, whatMoved, startAt, paused } = w;
+  const setPhase = wField('phase'), setFrom = wField('from'), setTo = wField('to'), setBodyNeed = wField('bodyNeed');
+  const setSteps = wField('steps'), setWhatMoved = wField('whatMoved'), setStartAt = wField('startAt'), setPaused = wField('paused');
+  const [suggested, setSuggested] = useState('copilot');
+  const level = w.level || suggested;
+  const setLevel = wField('level');
   const [elapsed, setElapsed] = useState(0);
-  const [paused, setPaused]   = useState(false);
   const [saved, setSaved]     = useState(false);
   const [savedWhere, setSavedWhere] = useState(null); // 'cloud' | 'device-only' | false
   const [allEntries, setAllEntries] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
-  const [stuckTool, setStuckTool] = useState(null); // null | 'A' | 'B' | 'C'
-  const [voo, setVoo]         = useState(0);
-  const [smallMove, setSmallMove] = useState('');
+  const { stuckTool, voo, smallMove } = w; // stuckTool: null | 'A' | 'B' | 'C'
+  const setStuckTool = wField('stuckTool'), setVoo = wField('voo'), setSmallMove = wField('smallMove');
   const [nudgeOff, setNudgeOff] = useState(false);
 
   // ── load history + suggest a starting level from past reps ──
@@ -2724,7 +3286,7 @@ function TransitionTimer() {
         const r = await window.storage.getAll('transition-log');
         if (r?.value) {
           const parsed = JSON.parse(r.value);
-          if (Array.isArray(parsed)) { setAllEntries(parsed); setLevel(suggestLevel(parsed)); }
+          if (Array.isArray(parsed)) { setAllEntries(parsed); setSuggested(suggestLevel(parsed)); }
         }
       } catch(e) {}
     })();
@@ -2765,7 +3327,8 @@ function TransitionTimer() {
     ? [...recent7d].sort((a,b)=>a.secs-b.secs)[Math.floor(recent7d.length/2)].secs
     : null;
 
-  const begin  = () => { setStartAt(Date.now()); setElapsed(0); setPaused(false); setPhase('running'); };
+  const begin  = () => { wField('phase')(() => 'running'); setStartAt(Date.now()); setElapsed(0); setPaused(false); };
+  useEffect(() => { if (phase === 'running' && startAt) setElapsed(Math.floor((Date.now()-startAt)/1000)); }, [phase, startAt]);
   const arrive = () => { setElapsed(startAt ? Math.floor((Date.now()-startAt)/1000) : 0); setPhase('done'); };
   const setStep    = (i,val) => setSteps(s => s.map((x,j)=> j===i ? {...x,text:val} : x));
   const toggleStep = (i)     => setSteps(s => s.map((x,j)=> j===i ? {...x,done:!x.done} : x));
@@ -2780,19 +3343,30 @@ function TransitionTimer() {
       whatMoved: (extra.whatMoved ?? whatMoved).trim() || null,
       paused: extra.paused || paused || false,
     };
+    if (savingRef.current) return;
+    savingRef.current = true;
     const next = [entry, ...allEntries].slice(0, 500);
-    setAllEntries(next); setElapsed(secs); setSaved(true); setPhase('done'); setSavedWhere(null);
-    let where = false;
-    try { where = await window.storage.set('transition-log', JSON.stringify(next)); } catch(e) {}
-    setSavedWhere(where);
+    setAllEntries(next); setElapsed(secs); setSaved(true); setSavedWhere(null);
+    // The finished gap stays on screen (not a draft any more) until New.
+    clearW({ ...w, phase:'done', whatMoved: entry.whatMoved || '', paused: entry.paused });
+    await window.nwLog({ tab: 'kaizen', what: `Gap: ${entry.from} → ${entry.to}`, run: async () => {
+      let where = false;
+      try { where = await window.storage.set('transition-log', JSON.stringify(next)); } catch(e) {}
+      setSavedWhere(where);
+      return { where, ref: { time: entry.at, what: `${entry.from} → ${entry.to}` }, undo: async () => {
+        const r = await window.storage.get('transition-log');
+        const list = r?.value ? JSON.parse(r.value) : [];
+        const left = (Array.isArray(list) ? list : []).filter(e => !(e.at === entry.at && e.from === entry.from && e.to === entry.to));
+        const w2 = await window.storage.set('transition-log', JSON.stringify(left));
+        if (w2) { setAllEntries(left); reset(); }
+        return w2;
+      } };
+    } });
+    savingRef.current = false;
   };
+  const savingRef = useRef(false);
 
-  const reset = () => {
-    setPhase('idle'); setFrom(''); setTo(''); setBodyNeed(null);
-    setSteps([{text:'',done:false},{text:'',done:false},{text:'',done:false}]);
-    setWhatMoved(''); setElapsed(0); setStartAt(null); setPaused(false);
-    setSaved(false); setStuckTool(null); setVoo(0); setSmallMove('');
-  };
+  const reset = () => { clearW(); setElapsed(0); setSaved(false); };
 
   // small shared styles
   const inputS = {flex:'1 1 80px',padding:'6px 8px',fontSize:12,border:'1px solid #e8e0d0',borderRadius:8,minWidth:60};
@@ -3057,7 +3631,7 @@ function TaskRow({task,onToggle,expanded,onToggleExpand,onToggleSubtask}) {
   return (
     <div className="card" style={{padding:'14px 16px',marginBottom:8}}>
       <div style={{display:'flex',gap:12,alignItems:'flex-start'}}>
-        <button onClick={onToggle} style={{background:'none',border:'none',cursor:'pointer',padding:0,marginTop:2,flexShrink:0}}>
+        <button aria-label={`${task.status==='done'?'Reopen':'Mark done'}: ${task.name}`} onClick={onToggle} style={{background:'none',border:'none',cursor:'pointer',padding:0,marginTop:2,flexShrink:0}}>
           {task.status==='done'
             ? <CheckCircle2 size={20} style={{color:'#3d5a3d'}}/>
             : <Circle      size={20} style={{color:'#6b6660'}}/>}
@@ -3094,7 +3668,7 @@ function TaskRow({task,onToggle,expanded,onToggleExpand,onToggleSubtask}) {
         <div style={{marginTop:10,marginLeft:32,paddingLeft:8,borderLeft:'2px solid #e8e0d0',display:'flex',flexDirection:'column',gap:5}}>
           {subs.map(s=>(
             <div key={s.id} style={{display:'flex',alignItems:'center',gap:8}}>
-              <button onClick={()=>onToggleSubtask&&onToggleSubtask(s.id)} style={{background:'none',border:'none',cursor:'pointer',padding:0,flexShrink:0,display:'flex'}}>
+              <button aria-label={`${s.status==='done'?'Reopen':'Mark done'}: ${s.name}`} onClick={()=>onToggleSubtask&&onToggleSubtask(s.id)} style={{background:'none',border:'none',cursor:'pointer',padding:0,flexShrink:0,display:'flex'}}>
                 {s.status==='done'
                   ? <CheckCircle2 size={14} style={{color:'#3d5a3d'}}/>
                   : <Circle size={14} style={{color:'#6b6660'}}/>}
@@ -3114,23 +3688,19 @@ function TaskRow({task,onToggle,expanded,onToggleExpand,onToggleSubtask}) {
 // TASKS VIEW
 // ─────────────────────────────────────────────────────
 
-function TasksView({tasks,allTasks,projects,setTasks}) {
+function TasksView({tasks,allTasks,projects,setTasks,toggleDone}) {
   const [filter,  setFilter]  = useState('open');
   const [editing, setEditing] = useState(null);
   const [adding,  setAdding]  = useState(false);
   const [expandedSubs, setExpandedSubs] = useState({});
 
-  const toggleTask = id =>
-    setTasks(allTasks.map(t=>t.id===id?{...t,status:t.status==='done'?'open':'done'}:t));
+  const toggleTask = id => toggleDone(id);
 
-  const toggleSubtask = (taskId, subId) =>
-    setTasks(allTasks.map(t => t.id===taskId
-      ? {...t, subtasks:(t.subtasks||[]).map(s=>s.id===subId?{...s,status:s.status==='done'?'open':'done'}:s)}
-      : t));
+  const toggleSubtask = (taskId, subId) => toggleDone(taskId, subId);
 
   const toggleExpand = id => setExpandedSubs(s=>({...s,[id]:!s[id]}));
 
-  const saveTask  = (id,patch) => { setTasks(allTasks.map(t=>t.id===id?{...t,...patch}:t)); setEditing(null); };
+  const saveTask  = (id,patch) => { setTasks(allTasks.map(t=>t.id===id?kzWithDoneAt(t,{...t,...patch}):t)); setEditing(null); };
   const deleteTask = id => { setTasks(allTasks.filter(t=>t.id!==id)); setEditing(null); };
 
   const addTask = patch => {
@@ -3213,11 +3783,9 @@ function TasksView({tasks,allTasks,projects,setTasks}) {
 }
 
 function NewTaskForm({projects,onSave,onCancel}) {
-  const [name,    setName]    = useState('');
-  const [projId,  setProjId]  = useState(projects[0]?.id || '');
-  const [sprint,  setSprint]  = useState('S3');
-  const [ld,      setLd]      = useState(0);
-  const [est,     setEst]     = useState(30);
+  const [f, field, clearF] = window.useDraftForm('kaizen', 'new-task', { name:'', projId: projects[0]?.id || '', sprint:'S3', ld:0, est:30 });
+  const { name, projId, sprint, ld, est } = f;
+  const setName = field('name'), setProjId = field('projId'), setSprint = field('sprint'), setLd = field('ld'), setEst = field('est');
 
   return (
     <div className="card" style={{padding:16,marginBottom:12}}>
@@ -3246,28 +3814,25 @@ function NewTaskForm({projects,onSave,onCancel}) {
         </label>
       </div>
       <div style={{display:'flex',gap:8}}>
-        <button onClick={()=>onSave({name,projectId:projId,sprint,leadDays:ld,estimatedTime:est})}
+        <button onClick={()=>{ if (!name.trim()) return; onSave({name,projectId:projId,sprint,leadDays:ld,estimatedTime:est}); clearF(); }}
           style={{...solidBtn,flex:1,justifyContent:'center',borderRadius:10,padding:9}}>
           <Save size={13}/> Add task
         </button>
-        <button onClick={onCancel} style={{...ghostBtn,borderRadius:10,padding:'9px 14px'}}>Cancel</button>
+        <button onClick={()=>{ clearF(); onCancel(); }} style={{...ghostBtn,borderRadius:10,padding:'9px 14px'}}>Cancel</button>
       </div>
     </div>
   );
 }
 
 function TaskEditor({task,projects,onSave,onCancel,onDelete}) {
-  const [name,    setName]    = useState(task.name);
-  const [ld,      setLd]      = useState(task.leadDays);
-  const [sprint,  setSprint]  = useState(task.sprint);
-  const [est,     setEst]     = useState(task.est||task.estimatedTime||30);
-  const [actual,  setActual]  = useState(task.actualTime||'');
-  const [projId,  setProjId]  = useState(task.projectId);
+  const [f, field, clearF] = window.useDraftForm('kaizen', `task:${task.id}`, {
+    name: task.name, ld: task.leadDays, sprint: task.sprint, est: task.est||task.estimatedTime||30, actual: task.actualTime||'',
+    projId: task.projectId, subs: task.subtasks || [], subInput: '', stuckReason: task.stuckReason || '' });
+  const { name, ld, sprint, est, actual, projId, subs, subInput, stuckReason } = f;
+  const setName = field('name'), setLd = field('ld'), setSprint = field('sprint'), setEst = field('est'), setActual = field('actual');
+  const setProjId = field('projId'), setSubs = field('subs'), setSubInput = field('subInput'), setStuckReason = field('stuckReason');
   const [conf,    setConf]    = useState(false);
-  const [subs,    setSubs]    = useState(task.subtasks || []);
-  const [subInput,setSubInput]= useState('');
   const [editingSubId, setEditingSubId] = useState(null);
-  const [stuckReason, setStuckReason] = useState(task.stuckReason || '');
   const [copied, setCopied] = useState(false);
 
   const STUCK_OPTS = [
@@ -3403,13 +3968,13 @@ function TaskEditor({task,projects,onSave,onCancel,onDelete}) {
       </div>
 
       <div style={{display:'flex',gap:8}}>
-        <button onClick={()=>onSave({name,leadDays:ld,sprint,estimatedTime:est,est,actualTime:actual?+actual:null,projectId:projId,subtasks:subs,stuckReason})}
+        <button onClick={()=>{ onSave({name,leadDays:ld,sprint,estimatedTime:est,est,actualTime:actual?+actual:null,projectId:projId,subtasks:subs,stuckReason}); clearF(); }}
           style={{...solidBtn,flex:1,justifyContent:'center',borderRadius:10,padding:'9px'}}>
           <Save size={13}/> Save
         </button>
-        <button onClick={onCancel} style={{...ghostBtn,borderRadius:10,padding:'9px 14px'}}>Cancel</button>
+        <button onClick={()=>{ clearF(); onCancel(); }} style={{...ghostBtn,borderRadius:10,padding:'9px 14px'}}>Cancel</button>
         {conf
-          ? <button onClick={onDelete} style={{padding:'9px 14px',borderRadius:10,background:'#fee2e2',color:'#991b1b',border:'none',cursor:'pointer',fontSize:13}}>Sure?</button>
+          ? <button onClick={()=>{ clearF(); onDelete(); }} style={{padding:'9px 14px',borderRadius:10,background:'#fee2e2',color:'#991b1b',border:'none',cursor:'pointer',fontSize:13}}>Sure?</button>
           : <button onClick={()=>setConf(true)} style={{padding:'9px 12px',borderRadius:10,border:'1px solid #fecaca',background:'none',color:'#dc2626',cursor:'pointer'}}>
               <Trash2 size={14}/>
             </button>
@@ -3515,9 +4080,9 @@ function ProjectsView({projects,tasks,setProjects,setTasks}) {
 }
 
 function ProjectEditor({project,onSave,onCancel}) {
-  const [name,     setName]     = useState(project.name);
-  const [archetype,setArchetype]= useState(project.archetype);
-  const [deadline, setDeadline] = useState(project.finalDeadline);
+  const [f, field, clearF] = window.useDraftForm('kaizen', `project:${project.id}`, { name: project.name, archetype: project.archetype, deadline: project.finalDeadline });
+  const { name, archetype, deadline } = f;
+  const setName = field('name'), setArchetype = field('archetype'), setDeadline = field('deadline');
 
   return (
     <div className="card" style={{padding:16,marginBottom:8}}>
@@ -3539,11 +4104,11 @@ function ProjectEditor({project,onSave,onCancel}) {
         Editing the deadline shifts every task's auto-deadline (lead-day chain). Existing tasks stay; archetype change does not auto-rebuild.
       </p>
       <div style={{display:'flex',gap:8}}>
-        <button onClick={()=>name.trim()&&onSave({name:name.trim(),archetype,finalDeadline:deadline})}
+        <button onClick={()=>{ if (!name.trim()) return; onSave({name:name.trim(),archetype,finalDeadline:deadline}); clearF(); }}
           style={{...solidBtn,flex:1,justifyContent:'center',borderRadius:10,padding:9}}>
           <Save size={13}/> Save
         </button>
-        <button onClick={onCancel} style={{...ghostBtn,borderRadius:10,padding:'9px 14px'}}>Cancel</button>
+        <button onClick={()=>{ clearF(); onCancel(); }} style={{...ghostBtn,borderRadius:10,padding:'9px 14px'}}>Cancel</button>
       </div>
     </div>
   );
@@ -3551,9 +4116,9 @@ function ProjectEditor({project,onSave,onCancel}) {
 
 function ProjectForm({onSave,onCancel}) {
   const def = (() => { const d=new Date(); d.setDate(d.getDate()+7); return d.toISOString().slice(0,10); })();
-  const [name,     setName]     = useState('');
-  const [archetype,setArchetype]= useState(ARCHETYPES[0]);
-  const [deadline, setDeadline] = useState(def);
+  const [f, field, clearF] = window.useDraftForm('kaizen', 'new-project', { name: '', archetype: ARCHETYPES[0], deadline: def });
+  const { name, archetype, deadline } = f;
+  const setName = field('name'), setArchetype = field('archetype'), setDeadline = field('deadline');
 
   return (
     <div className="card" style={{padding:16,marginBottom:12}}>
@@ -3573,11 +4138,11 @@ function ProjectForm({onSave,onCancel}) {
       </div>
       <p style={{fontSize:11,color:'#6b6660',fontStyle:'italic',marginBottom:12}}>Auto-creates task chain from template. Edit any task after.</p>
       <div style={{display:'flex',gap:8}}>
-        <button onClick={()=>name.trim()&&onSave({name:name.trim(),archetype,finalDeadline:deadline})}
+        <button onClick={()=>{ if (!name.trim()) return; onSave({name:name.trim(),archetype,finalDeadline:deadline}); clearF(); }}
           style={{...solidBtn,flex:1,justifyContent:'center',borderRadius:10,padding:9}}>
           Create + auto-build tasks
         </button>
-        <button onClick={onCancel} style={{...ghostBtn,borderRadius:10,padding:'9px 14px'}}>Cancel</button>
+        <button onClick={()=>{ clearF(); onCancel(); }} style={{...ghostBtn,borderRadius:10,padding:'9px 14px'}}>Cancel</button>
       </div>
     </div>
   );
@@ -3649,9 +4214,10 @@ function SessionsPanel() {
   const [foci,        setFoci]        = useState(null);
   const [analyzing,   setAnalyzing]   = useState(false);
   const [syncStatus,  setSyncStatus]  = useState('');
-  const [pasteOpen,   setPasteOpen]   = useState(false);
-  const [pasteText,   setPasteText]   = useState('');
-  const [pasteMeta,   setPasteMeta]   = useState({ type: 'Brighton', date: new Date().toISOString().slice(0,10) });
+  const [paste, pField, clearPaste] = window.useDraftForm('kaizen', 'session-paste', { open: false, text: '', meta: { type: 'Brighton', date: new Date().toISOString().slice(0,10) } });
+  const pasteOpen = !!paste.open, pasteText = paste.text || '', pasteMeta = paste.meta || { type: 'Brighton', date: new Date().toISOString().slice(0,10) };
+  const setPasteOpen = (v) => { if (!v && !pasteText.trim()) clearPaste(); else pField('open')(v); };
+  const setPasteText = pField('text'), setPasteMeta = pField('meta');
   const [expanded,    setExpanded]    = useState(null);
 
   useEffect(() => {
@@ -3667,8 +4233,10 @@ function SessionsPanel() {
     })();
   }, []);
 
+  const summariesRef = useRef(summaries); summariesRef.current = summaries;
   // 'cloud' | 'device-only' | false
   const saveSummaries = async (next) => {
+    summariesRef.current = next;
     setSummaries(next);
     try { return await window.storage.set(SESSIONS_KEY, JSON.stringify(next)); } catch(e) { return false; }
   };
@@ -3692,8 +4260,9 @@ function SessionsPanel() {
     const next = [entry, ...summaries].slice(0, 50);
     const where = await saveSummaries(next);
     if (!where) { setSyncStatus("❌ Session notes weren't saved. Nothing was stored; try again."); return; }
-    setPasteText('');
-    setPasteOpen(false);
+    clearPaste();
+    window.nwShowBar({ tab: 'kaizen', mode: 'saved', what: entry.title, where, ref: { id: entry.id, what: entry.title },
+      undo: async () => { const left = summariesRef.current.filter(x => x.id !== entry.id); return saveSummaries(left); } });
     setSyncStatus(where === 'cloud' ? '✅ Session notes saved.' : '⚠️ Session notes saved on this device only, not in the cloud yet.');
     setTimeout(() => setSyncStatus(''), 3000);
   };
@@ -3741,7 +4310,10 @@ Return 3-5 foci. Focus on what's genuinely active, not historical.`,
           messages: [{ role: 'user', content: `Here are my recent sessions:\n\n${sessionDump}\n\nAnalyze my current foci.` }]
         })
       });
+      if (resp.status !== 200) throw new Error(`The AI proxy answered ${resp.status}.`);
       const data = await resp.json();
+      // Saved like every other Claude call (practice:asks:<today>, kind "kaizen-foci"), so the cost tracker counts it.
+      if (window.pSaveAsk) await window.pSaveAsk({ kind: 'kaizen-foci', words: `${Math.min(summaries.length, 20)} sessions` }, `Here are my recent sessions:\n\n${sessionDump}\n\nAnalyze my current foci.`, data, AI_MODEL);
       const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) throw new Error('Analysis failed — no JSON returned');
@@ -3911,6 +4483,9 @@ function TrajectoryView({ logs, updateLog, tasks }) {
         const r = await window.storage.get('trajectory-bigpicture');
         if (r?.value) setBigPicture(r.value);
       } catch(e) {}
+      // Typed but not saved yet (the box saves when you leave it): the draft wins.
+      const d = await window.nwDrafts.peek('kaizen', 'big-picture');
+      if (d != null) setBigPicture(d);
       try {
         const c = await window.storage.getAll('creative-catch');
         if (c?.value) setCatchEntries(JSON.parse(c.value));
@@ -3922,6 +4497,7 @@ function TrajectoryView({ logs, updateLog, tasks }) {
     setBigPicture(val);
     let where = false;
     try { where = await window.storage.set('trajectory-bigpicture', val); } catch(e) {}
+    if (where) window.nwDrafts.clear('kaizen', 'big-picture');
     setBpSaved(where === 'cloud' ? 'cloud' : where ? 'device' : 'failed');
     if (where === 'cloud') setTimeout(() => setBpSaved(false), 1500);
   };
@@ -4014,7 +4590,7 @@ function TrajectoryView({ logs, updateLog, tasks }) {
         </div>
         <textarea
           value={bigPicture}
-          onChange={e => setBigPicture(e.target.value)}
+          onChange={e => { setBigPicture(e.target.value); window.nwDrafts.put('kaizen', 'big-picture', e.target.value); }}
           onBlur={e => saveBigPicture(e.target.value)}
           placeholder="Not goals. Direction. What kind of person are you becoming? What are you moving toward — in your body, your work, your creative life, your relationships?"
           rows={4}
@@ -4327,6 +4903,7 @@ function ReflectView({logs, updateLog, tasks, allTasks, setTasks, projects, dele
             {isOpen && (
               <div style={{marginTop:14,paddingTop:14,borderTop:'1px solid #e8e0d0'}}>
                 <DayLogEditor
+                  date={d}
                   log={l}
                   updateLog={patch=>updateLog(d,patch)}
                 />
@@ -4369,15 +4946,15 @@ function ReflectView({logs, updateLog, tasks, allTasks, setTasks, projects, dele
   );
 }
 
-function DayLogEditor({ log, updateLog }) {
-  const [doneInput,    setDoneInput]    = useState('');
+function DayLogEditor({ log, updateLog, date }) {
+  const [doneInput, setDoneInput, clearDone] = window.useDraft('kaizen', `tada:${date}`, '');
   const [editingDoneId,setEditingDoneId]= useState(null);
 
   const addDone = () => {
     const text = doneInput.trim();
     if (!text) return;
     updateLog({ done: [...(log.done||[]), {id:uid(),text,at:new Date().toISOString()}] });
-    setDoneInput('');
+    clearDone();
   };
   const removeDone = id => updateLog({ done:(log.done||[]).filter(d=>d.id!==id) });
   const updateDone = (id, text) => {
@@ -4503,7 +5080,7 @@ window.KaizenApp = KaizenApp;
 
   <!-- FoodLog -->
   <script type="text/babel">
-const { useState, useEffect } = React;
+const { useState, useEffect, useRef } = React;
 
 
 const STORAGE_KEY = "nikhil-food-log-v1";
@@ -5484,7 +6061,18 @@ function MealCard({ meal, accent, bg, onEdit, editable }) {
   );
 }
 
-function DayView({ date, data, editable, onUpdate, onDeleteDay }) {
+// A meal's time as minutes, for showing a day's meals in time order: a clock time ("8:30 AM", "14:00") or a
+// part of the day ("Morning", "Afternoon/Evening" → its first word). "All day" and anything else: no time (last).
+const FOOD_PART_MIN = { breakfast: 8 * 60, morning: 9 * 60, lunch: 12 * 60 + 30, afternoon: 14 * 60, evening: 18 * 60, dinner: 19 * 60, late: 22 * 60, night: 22 * 60 };
+function foodMealMinutes(meal) {
+  const t = String(meal?.time || '').trim().toLowerCase();
+  const m = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+  if (m && (m[2] || m[3])) { const h = m[3] ? (+m[1] % 12) + (m[3] === 'pm' ? 12 : 0) : +m[1]; return h < 24 ? h * 60 + (+m[2] || 0) : null; }
+  const w = t.split(/[\/\s]/)[0];
+  return FOOD_PART_MIN[w] ?? null;
+}
+
+function DayView({ date, data, editable, onUpdate, onDeleteDay, getDay }) {
   const [editingMealId, setEditingMealId] = useState(null);
   const [addingMeal, setAddingMeal] = useState(false);
   const [editingHealth, setEditingHealth] = useState(false);
@@ -5511,8 +6099,12 @@ function DayView({ date, data, editable, onUpdate, onDeleteDay }) {
     setEditingMealId(null);
   };
   const addMeal = (meal) => {
-    onUpdate({ ...data, meals: [...data.meals, { ...meal, id: 'm_'+Math.random().toString(36).slice(2,8) }] });
+    const id = 'm_'+Math.random().toString(36).slice(2,8);
+    const label = meal.label || 'Meal';
     setAddingMeal(false);
+    window.nwLog({ tab: 'food', what: `Meal: ${label}`, scope: 'food-meal:' + date, sig: JSON.stringify({ ...meal, id: null }), run: () => new Promise(res =>
+      onUpdate({ ...data, meals: [...data.meals, { ...meal, id }] }, where => res({ where, ref: { id, day: date, what: label },
+        undo: () => new Promise(r2 => { const d = (getDay && getDay()) || data; onUpdate({ ...d, meals: (d.meals || []).filter(m => m.id !== id) }, r2); }) }))) });
   };
   const saveHealth = (h) => {
     onUpdate({ ...data, health: h });
@@ -5608,15 +6200,15 @@ function DayView({ date, data, editable, onUpdate, onDeleteDay }) {
       <NutrientPanel date={date} data={data} />
 
       {editingDayMeta && (
-        <DayMetaEditor data={data} onSave={saveDayMeta} onCancel={()=>setEditingDayMeta(false)}/>
+        <DayMetaEditor data={data} draftId={`day-label:${date}`} onSave={saveDayMeta} onCancel={()=>setEditingDayMeta(false)}/>
       )}
 
       {editingHealth && (
-        <HealthEditor health={data.health} onSave={saveHealth} onCancel={()=>setEditingHealth(false)}/>
+        <HealthEditor health={data.health} draftId={`health:${date}`} onSave={saveHealth} onCancel={()=>setEditingHealth(false)}/>
       )}
 
-      {data.meals.map((meal, i) => editingMealId === meal.id ? (
-        <MealEditor key={meal.id} meal={meal} onSave={p=>updateMeal(meal.id,p)} onCancel={()=>setEditingMealId(null)} onDelete={()=>deleteMeal(meal.id)}/>
+      {window.nwByTime(data.meals, foodMealMinutes).map((meal, i) => editingMealId === meal.id ? (
+        <MealEditor key={meal.id} meal={meal} draftId={`meal:${date}:${meal.id}`} onSave={p=>updateMeal(meal.id,p)} onCancel={()=>setEditingMealId(null)} onDelete={()=>deleteMeal(meal.id)}/>
       ) : (
         <MealCard
           key={meal.id} meal={meal}
@@ -5629,7 +6221,7 @@ function DayView({ date, data, editable, onUpdate, onDeleteDay }) {
 
       {editable && (
         addingMeal ? (
-          <MealEditor meal={null} onSave={addMeal} onCancel={()=>setAddingMeal(false)}/>
+          <MealEditor meal={null} draftId={`new-meal:${date}`} onSave={addMeal} onCancel={()=>setAddingMeal(false)}/>
         ) : (
           <button onClick={()=>setAddingMeal(true)} style={{
             width:'100%', padding:'14px 16px', marginBottom:12,
@@ -5651,8 +6243,8 @@ function DayView({ date, data, editable, onUpdate, onDeleteDay }) {
   );
 }
 
-function DayMetaEditor({ data, onSave, onCancel }) {
-  const [label, setLabel] = useState(data.label || '');
+function DayMetaEditor({ data, onSave, onCancel, draftId }) {
+  const [label, setLabel, clearLabel] = window.useDraft('food', draftId || null, data.label || '');
   return (
     <div style={{ background:'#fffdf9', border:'1px solid #e8e0d0', borderRadius:14, padding:16, marginBottom:14 }}>
       <div style={{ fontSize: 11, color:'#6b6660', textTransform:'uppercase', letterSpacing:1, marginBottom:8 }}>Day label</div>
@@ -5660,15 +6252,15 @@ function DayMetaEditor({ data, onSave, onCancel }) {
         style={{ width:'100%', padding:'8px 10px', fontSize:14, border:'1px solid #e8e0d0', borderRadius:8, background:'#faf7f2', boxSizing:'border-box', marginBottom:10, fontFamily:'Georgia,serif' }}
       />
       <div style={{ display:'flex', gap:8 }}>
-        <button onClick={()=>onSave({ label })} style={{ flex:1, padding:'9px 14px', background:'#0f1f35', color:'#fff', border:'none', borderRadius:8, fontWeight:700, cursor:'pointer', fontSize:13 }}>Save</button>
-        <button onClick={onCancel} style={{ padding:'9px 14px', background:'transparent', color:'#6b6660', border:'1px solid #e8e0d0', borderRadius:8, cursor:'pointer', fontSize:13 }}>Cancel</button>
+        <button onClick={()=>{ onSave({ label }); clearLabel(); }} style={{ flex:1, padding:'9px 14px', background:'#0f1f35', color:'#fff', border:'none', borderRadius:8, fontWeight:700, cursor:'pointer', fontSize:13 }}>Save</button>
+        <button onClick={()=>{ clearLabel(); onCancel(); }} style={{ padding:'9px 14px', background:'transparent', color:'#6b6660', border:'1px solid #e8e0d0', borderRadius:8, cursor:'pointer', fontSize:13 }}>Cancel</button>
       </div>
     </div>
   );
 }
 
-function HealthEditor({ health, onSave, onCancel }) {
-  const [h, setH] = useState({
+function HealthEditor({ health, onSave, onCancel, draftId }) {
+  const [h, setH, clearH] = window.useDraft('food', draftId || null, {
     steps: health.steps ?? '',
     active_kcal: health.active_kcal ?? '',
     basal_kcal: health.basal_kcal ?? '',
@@ -5711,21 +6303,20 @@ function HealthEditor({ health, onSave, onCancel }) {
           steps: num(h.steps), active_kcal: num(h.active_kcal), basal_kcal: num(h.basal_kcal),
           rhr: num(h.rhr), hrv: num(h.hrv), sleep_hours: num(h.sleep_hours), sodium_mg: num(h.sodium_mg),
           notes: h.notes, sleep_note: h.sleep_note,
-        })} style={{ flex:1, padding:'9px 14px', background:'#0f1f35', color:'#fff', border:'none', borderRadius:8, fontWeight:700, cursor:'pointer', fontSize:13 }}>Save</button>
-        <button onClick={onCancel} style={{ padding:'9px 14px', background:'transparent', color:'#6b6660', border:'1px solid #e8e0d0', borderRadius:8, cursor:'pointer', fontSize:13 }}>Cancel</button>
+        }) || clearH()} style={{ flex:1, padding:'9px 14px', background:'#0f1f35', color:'#fff', border:'none', borderRadius:8, fontWeight:700, cursor:'pointer', fontSize:13 }}>Save</button>
+        <button onClick={()=>{ clearH(); onCancel(); }} style={{ padding:'9px 14px', background:'transparent', color:'#6b6660', border:'1px solid #e8e0d0', borderRadius:8, cursor:'pointer', fontSize:13 }}>Cancel</button>
       </div>
     </div>
   );
 }
 
-function MealEditor({ meal, onSave, onCancel, onDelete }) {
-  const [label, setLabel]   = useState(meal?.label || '');
-  const [time,  setTime]    = useState(meal?.time  || 'All day');
-  const [hungerTag, setHungerTag] = useState(meal?.hungerTag || '');
-  const [photoLink, setPhotoLink] = useState(meal?.photoLink || '');
-  const [note,  setNote]    = useState(meal?.note  || '');
-  const [highlight, setHighlight] = useState(meal?.protein_highlight ?? false);
-  const [items, setItems] = useState(meal?.items?.length ? meal.items : [{ name:'', kcal:0, notes:'' }]);
+function MealEditor({ meal, onSave, onCancel, onDelete, draftId }) {
+  const [f, field, clearF] = window.useDraftForm('food', draftId || null, {
+    label: meal?.label || '', time: meal?.time || 'All day', hungerTag: meal?.hungerTag || '', photoLink: meal?.photoLink || '',
+    note: meal?.note || '', highlight: meal?.protein_highlight ?? false, items: meal?.items?.length ? meal.items : [{ name:'', kcal:0, notes:'' }] });
+  const { label, time, hungerTag, photoLink, note, highlight, items } = f;
+  const setLabel = field('label'), setTime = field('time'), setHungerTag = field('hungerTag'), setPhotoLink = field('photoLink');
+  const setNote = field('note'), setHighlight = field('highlight'), setItems = field('items');
   const [conf, setConf] = useState(false);
   const [suggestions, setSuggestions] = useState({});
 
@@ -5835,13 +6426,13 @@ function MealEditor({ meal, onSave, onCancel, onDelete }) {
       <input value={note} onChange={e=>setNote(e.target.value)} placeholder="Note (optional — what made this stand out?)"
         style={{ width:'100%', padding:'7px 10px', fontSize:11, border:'1px solid #e8e0d0', borderRadius:6, marginBottom:10, boxSizing:'border-box', fontStyle:'italic' }}/>
       <div style={{ display:'flex', gap:8 }}>
-        <button onClick={()=>onSave({ label, time, hungerTag: hungerTag || undefined, photoLink, note, protein_highlight: highlight, items: items.filter(it=>it.name.trim()) })}
+        <button onClick={()=>{ onSave({ label, time, hungerTag: hungerTag || undefined, photoLink, note, protein_highlight: highlight, items: items.filter(it=>it.name.trim()) }); clearF(); }}
           style={{ flex:1, padding:'9px 14px', background:'#3da35d', color:'#fff', border:'none', borderRadius:8, fontWeight:700, cursor:'pointer', fontSize:13 }}>
           Save
         </button>
-        <button onClick={onCancel} style={{ padding:'9px 14px', background:'transparent', color:'#6b6660', border:'1px solid #e8e0d0', borderRadius:8, cursor:'pointer', fontSize:13 }}>Cancel</button>
+        <button onClick={()=>{ clearF(); onCancel(); }} style={{ padding:'9px 14px', background:'transparent', color:'#6b6660', border:'1px solid #e8e0d0', borderRadius:8, cursor:'pointer', fontSize:13 }}>Cancel</button>
         {onDelete && (conf
-          ? <button onClick={onDelete} style={{ padding:'9px 14px', background:'#fee2e2', color:'#991b1b', border:'none', borderRadius:8, cursor:'pointer', fontSize:13 }}>Sure?</button>
+          ? <button onClick={()=>{ clearF(); onDelete(); }} style={{ padding:'9px 14px', background:'#fee2e2', color:'#991b1b', border:'none', borderRadius:8, cursor:'pointer', fontSize:13 }}>Sure?</button>
           : <button onClick={()=>setConf(true)} style={{ padding:'9px 14px', background:'transparent', color:'#dc2626', border:'1px solid #fecaca', borderRadius:8, cursor:'pointer', fontSize:13 }}>Delete</button>
         )}
       </div>
@@ -5985,9 +6576,11 @@ function FoodLog() {
   const glance = window.useGlanceData();
   const todayKey = (() => { const d = new Date(); d.setHours(0,0,0,0); return d.toISOString().slice(0,10); })();
   const [activeDate, setActiveDate] = useState(todayKey);
+  useEffect(() => { window.nwSetContext('food', { screen: `Day ${activeDate}` }); }, [activeDate]);
   const [showSummary, setShowSummary] = useState(false);
   const [creatingDay, setCreatingDay] = useState(false);
   const [pickerDate, setPickerDate] = useState(todayKey);
+  const logRef = useRef(log); logRef.current = log;
 
   // Seed initialLog on first run, default activeDate to today
   useEffect(() => {
@@ -6008,7 +6601,8 @@ function FoodLog() {
   );
 
   const dates = logDateKeys(log).sort().reverse();
-  const updateDay = (newDayData) => setLog({ ...log, [activeDate]: newDayData });
+  // cb(where) after it is saved. getLog() gives the latest log (for Undo).
+  const updateDay = (newDayData, cb) => { const n = { ...logRef.current, [activeDate]: newDayData }; logRef.current = n; setLog(n, cb); };
   const deleteDay = (date) => {
     const n = { ...log }; delete n[date];
     setLog(n);
@@ -6114,7 +6708,7 @@ function FoodLog() {
         {showSummary
           ? <WeekSummary log={log} />
           : log?.[activeDate]
-            ? <DayView date={activeDate} data={log[activeDate]} editable={true} onUpdate={updateDay} onDeleteDay={deleteDay}/>
+            ? <DayView date={activeDate} data={log[activeDate]} editable={true} onUpdate={updateDay} onDeleteDay={deleteDay} getDay={() => logRef.current[activeDate]}/>
             : <div style={{ background:'#fff', borderRadius:12, padding:24, color:'#999', textAlign:'center', fontStyle:'italic' }}>No data for this day. Use the date picker above to start a new day.</div>
         }
         <div style={{ marginTop:32, textAlign:"center", fontSize:10, color:"#ccc", letterSpacing:2, textTransform:"uppercase" }}>
@@ -6126,14 +6720,14 @@ function FoodLog() {
 }
 
 function NewDayQuickForm({ date, onCreate, onCancel }) {
-  const [label, setLabel] = useState('');
+  const [label, setLabel, clearLabel] = window.useDraft('food', 'new-day-label', '');
   return (
     <div>
       <input value={label} onChange={e=>setLabel(e.target.value)} placeholder="Day label (optional, e.g. 'Travel day' or 'Long ski')"
         style={{ width:'100%', padding:'8px 10px', fontSize:13, border:'1px solid #e8e0d0', borderRadius:8, marginBottom:8, boxSizing:'border-box', fontFamily:'Georgia,serif' }}/>
       <div style={{ display:'flex', gap:8 }}>
-        <button onClick={()=>onCreate(date, label)} style={{ flex:1, padding:'9px 14px', background:'#3da35d', color:'#fff', border:'none', borderRadius:8, fontWeight:700, cursor:'pointer', fontSize:13 }}>Create day</button>
-        <button onClick={onCancel} style={{ padding:'9px 14px', background:'transparent', color:'#6b6660', border:'1px solid #e8e0d0', borderRadius:8, cursor:'pointer', fontSize:13 }}>Cancel</button>
+        <button onClick={()=>{ onCreate(date, label); clearLabel(); }} style={{ flex:1, padding:'9px 14px', background:'#3da35d', color:'#fff', border:'none', borderRadius:8, fontWeight:700, cursor:'pointer', fontSize:13 }}>Create day</button>
+        <button onClick={()=>{ clearLabel(); onCancel(); }} style={{ padding:'9px 14px', background:'transparent', color:'#6b6660', border:'1px solid #e8e0d0', borderRadius:8, cursor:'pointer', fontSize:13 }}>Cancel</button>
       </div>
     </div>
   );
@@ -6708,9 +7302,19 @@ const MedsTab = ({ medLog = {}, setMedLog }) => {
   const today = (() => { const d = new Date(); d.setHours(0,0,0,0); return d.toISOString().slice(0,10); })();
   const trackedMeds = ['Etilaam','Bupropion','Dutasteride','Minoxidil','Ksheerabala','Dhanavantaram','M.S. Ayurvedic'];
   const todayLog = medLog[today] || {};
+  // Marking a med taken shows the shared bar (Undo un-marks it). A second tap while it saves does nothing.
+  const pendingMed = React.useRef(new Set());
   const toggleMed = (m) => {
-    if (!setMedLog) return;
-    setMedLog({ ...medLog, [today]: { ...todayLog, [m]: !todayLog[m] } });
+    if (!setMedLog || pendingMed.current.has(m)) return;
+    const taken = !todayLog[m];
+    const set = (v) => new Promise(res => setMedLog(prev => ({ ...prev, [today]: { ...((prev || {})[today] || {}), [m]: v } }), res));
+    pendingMed.current.add(m);
+    if (!taken) { set(false).finally(() => pendingMed.current.delete(m)); return; }
+    window.nwLog({ tab: 'health', what: `Taken: ${m}`, run: async () => {
+      const where = await set(true);
+      pendingMed.current.delete(m);
+      return { where, ref: { day: today, what: `Taken: ${m}` }, undo: () => set(false) };
+    } });
   };
 
   // Adherence streak per med (last 14 days) — display only, not gamified
@@ -6821,7 +7425,7 @@ const MedsTab = ({ medLog = {}, setMedLog }) => {
 
 // ── TAB: LIVE (new) ──────────────────────────────────
 const LiveTab = ({ healthImport = {}, setHealthImport, medLog = {}, setMedLog }) => {
-  const [importText, setImportText] = useState("");
+  const [importText, setImportText, clearImportText] = window.useDraft('health', 'import', "");
   const [importStatus, setImportStatus] = useState("");
   const [foodLog, setFoodLog] = useState(null);
   const [anomalyClip, setAnomalyClip] = useState('idle');
@@ -6962,7 +7566,7 @@ const LiveTab = ({ healthImport = {}, setHealthImport, medLog = {}, setMedLog })
       }
       next.lastImportAt = new Date().toISOString();
       setHealthImport(next);
-      setImportText("");
+      clearImportText();
       setImportStatus("✅ Imported. Numbers updated.");
       setTimeout(()=>setImportStatus(""), 4000);
     } catch (e) {
@@ -7568,6 +8172,7 @@ Brighton ~April. Need something NOW. Seven Centers ($5K/6mo) considered. Alterna
 // ── MAIN ──────────────────────────────────────────
 function HealthDashboard() {
   const [tab, setTab] = useState("live");
+  useEffect(() => { window.nwSetContext('health', { screen: tab }); }, [tab]);
   const [healthImport, setHealthImport, healthStatus] = window.useDebouncedPersist('apple-health-import', { daily: {}, workouts: [], lastImportAt: null });
   const [medLog, setMedLog, medStatus] = window.useDebouncedPersist('med-log-daily', {});
   const glance = window.useGlanceData();
@@ -7874,32 +8479,34 @@ function NoteCapture({ placeholder, value, onChange, nudge, accentColor, onNewNu
 
 function CreativeRoulette() {
   const [view, setView] = useState("home");
-  const [currentPrompt, setCurrentPrompt] = useState(null);
+  useEffect(() => { window.nwSetContext('roulette', { screen: view }); }, [view]);
+  // Drafts (drafts:roulette): the prompt and what's typed for it survive close and reload.
+  const [currentPrompt, setCurrentPrompt] = window.useDraft('roulette', 'prompt', null);
   const [garbageRule, setGarbageRule] = useState(GARBAGE_RULES[0]);
   const [spinCount, setSpinCount] = useState(0);
   const [spinning, setSpinning] = useState(false);
   const [log, setLog] = useState([]);
   const [filter, setFilter] = useState("all");
-  const [buildItem, setBuildItem] = useState("");
-  const [buildNotes, setBuildNotes] = useState("");
+  const [buildItem, setBuildItem] = window.useDraft('roulette', 'build-item', "");
+  const [buildNotes, setBuildNotes] = window.useDraft('roulette', 'build-notes', "");
   const [streak, setStreak] = useState(0);
-  const [senseNotes, setSenseNotes] = useState("");
-  const [rouletteNotes, setRouletteNotes] = useState("");
+  const [senseNotes, setSenseNotes] = window.useDraft('roulette', 'sense-notes', "");
+  const [rouletteNotes, setRouletteNotes] = window.useDraft('roulette', 'roulette-notes', "");
   const [currentNudge, setCurrentNudge] = useState("");
   const [expandedLog, setExpandedLog] = useState(null);
   const [logFilter, setLogFilter] = useState("all");
   const [editingIdx, setEditingIdx] = useState(null);
   const [editText, setEditText] = useState("");
   const [editFileLink, setEditFileLink] = useState("");
-  const [currentFileLink, setCurrentFileLink] = useState("");
+  const [currentFileLink, setCurrentFileLink] = window.useDraft('roulette', 'file-link', "");
   const [gatekeeperName, setGatekeeperName] = useState("Greg");
-  const [huhInput, setHuhInput] = useState("");
+  const [huhInput, setHuhInput] = window.useDraft('roulette', 'huh', "");
   const [emergencyMode, setEmergencyMode] = useState(false);
   const [saveStatus, setSaveStatus] = useState('booting');
   const [catchEntries, setCatchEntries] = useState([]);
-  const [catchInput, setCatchInput] = useState("");
+  const [catchInput, setCatchInput] = window.useDraft('roulette', 'catch', "");
   const [catchType, setCatchType] = useState("text"); // 'text' | 'voice' | 'image'
-  const [catchFileLink, setCatchFileLink] = useState("");
+  const [catchFileLink, setCatchFileLink] = window.useDraft('roulette', 'catch-link', "");
   const [recording, setRecording] = useState(false);
   const [recordedBlob, setRecordedBlob] = useState(null);
   const [recordError, setRecordError] = useState("");
@@ -8125,18 +8732,27 @@ function CreativeRoulette() {
     const st = ok1 === 'cloud' && ok2 === 'cloud' ? 'saved' : ok1 || ok2 ? 'device' : 'error';
     setSaveStatus(st);
     if (st === 'saved') setTimeout(() => setSaveStatus('idle'), 1500);
+    return st === 'saved' ? 'cloud' : st === 'device' ? 'device-only' : false;
   }, []);
+  const logRef = useRef(log); logRef.current = log;
+  const catchRef = useRef(catchEntries); catchRef.current = catchEntries;
+  // The shared bar for one new log entry; Undo removes that entry (by its date stamp).
+  const logWithBar = (entry, what) => window.nwLog({ tab: 'roulette', what, scope: 'play-log', sig: JSON.stringify({ ...entry, date: null }), run: async () => {
+    const where = await saveLog([entry, ...logRef.current]);
+    return { where, ref: { time: entry.date, what }, undo: () => saveLog(logRef.current.filter(e => e.date !== entry.date)) };
+  } });
 
   const saveCatchEntries = useCallback(async (newEntries) => {
     setCatchEntries(newEntries);
     setSaveStatus('saving');
-    let st = 'error';
+    let st = 'error', where = false;
     try {
-      const where = await window.storage.set("creative-catch", JSON.stringify(newEntries));
+      where = await window.storage.set("creative-catch", JSON.stringify(newEntries));
       st = where === 'cloud' ? 'saved' : where ? 'device' : 'error';
     } catch { st = 'error'; }
     setSaveStatus(st);
     if (st === 'saved') setTimeout(() => setSaveStatus('idle'), 1500);
+    return where;
   }, []);
 
   const today = new Date();
@@ -8145,8 +8761,7 @@ function CreativeRoulette() {
   const randomNudge = () => CAPTURE_NUDGES[Math.floor(Math.random() * CAPTURE_NUDGES.length)];
 
   const spin = () => {
-    setSpinning(true);
-    setRouletteNotes("");
+    setSpinning(true); // what's typed stays (it is a draft); clear it by hand if it was for the last prompt
     setCurrentNudge(randomNudge());
     const filtered = filter === "all" ? ROULETTE_PROMPTS : ROULETTE_PROMPTS.filter(p => p.category.toLowerCase() === filter);
     const pool = filtered.length > 0 ? filtered : ROULETTE_PROMPTS;
@@ -8161,8 +8776,7 @@ function CreativeRoulette() {
 
   const logEntry = (type, prompt, notes, fileLink) => {
     const entry = { date: new Date().toISOString(), type, prompt: prompt || "", category: currentPrompt?.category || type, notes: notes || "", fileLink: fileLink || "" };
-    const newLog = [entry, ...log];
-    saveLog(newLog);
+    logWithBar(entry, `${type}: ${prompt || ''}`.slice(0, 80));
     setStreak(s => { const n = s + 1; try { window.storage.set("creative-streak", n.toString()); } catch(e) {} return n; });
     if (notes?.trim()) {
       const d = new Date();
@@ -8192,7 +8806,7 @@ function CreativeRoulette() {
   const logHuh = (text) => {
     if (!text?.trim()) return;
     const entry = { date: new Date().toISOString(), type: "huh", prompt: "Huh.", category: "huh", notes: text.trim(), fileLink: "" };
-    saveLog([entry, ...log]);
+    logWithBar(entry, 'Huh: ' + text.trim().slice(0, 60));
     setHuhInput("");
   };
 
@@ -8221,7 +8835,11 @@ function CreativeRoulette() {
       blobURL: blob ? URL.createObjectURL(blob) : '',
       hasAudio: !!blob,
     };
-    saveCatchEntries([entry, ...catchEntries]);
+    window.nwLog({ tab: 'roulette', what: 'Creative catch', scope: 'play-catch', sig: JSON.stringify([kind, entry.text, entry.fileLink]), run: async () => {
+      catchRef.current = [entry, ...catchRef.current];
+      const where = await saveCatchEntries(catchRef.current);
+      return { where, ref: { id: entry.id, what: 'Creative catch' }, undo: () => { catchRef.current = catchRef.current.filter(c => c.id !== entry.id); return saveCatchEntries(catchRef.current); } };
+    } });
     setCatchInput("");
     setCatchFileLink("");
     setRecordedBlob(null);
@@ -8383,7 +9001,7 @@ function CreativeRoulette() {
           </div>
 
           <div style={{ background: "#1a1a1a", border: "1px solid #4ECDC4", borderRadius: 12, padding: 20, marginBottom: 16, cursor: "pointer" }}
-            onClick={() => { setView("sense"); setSenseNotes(""); setCurrentNudge(randomNudge()); }}>
+            onClick={() => { setView("sense"); setCurrentNudge(randomNudge()); }}>
             <div style={{ fontSize: 32, marginBottom: 8 }}>{senseToday.icon}</div>
             <div style={{ fontSize: 13, color: "#888", marginBottom: 4 }}>Today's Sense Scan</div>
             <div style={{ fontSize: 16, fontWeight: 700 }}>{senseToday.sense}</div>
@@ -8391,7 +9009,7 @@ function CreativeRoulette() {
           </div>
 
           <div style={{ background: "#1a1a1a", border: "1px solid #FFE66D", borderRadius: 12, padding: 20, marginBottom: 16, cursor: "pointer" }}
-            onClick={() => { setView("roulette"); setRouletteNotes(""); }}>
+            onClick={() => { setView("roulette"); }}>
             <div style={{ fontSize: 32, marginBottom: 8 }}>🎰</div>
             <div style={{ fontSize: 13, color: "#888", marginBottom: 4 }}>Creative Roulette</div>
             <div style={{ fontSize: 16, fontWeight: 700 }}>Spin for a prompt</div>
@@ -8407,7 +9025,7 @@ function CreativeRoulette() {
           </div>
 
           <div style={{ background: "#1a1a1a", border: "1px solid #95E1D3", borderRadius: 12, padding: 20, marginBottom: 16, cursor: "pointer" }}
-            onClick={() => { setView("build"); setBuildNotes(""); setBuildItem(""); }}>
+            onClick={() => { setView("build"); }}>
             <div style={{ fontSize: 32, marginBottom: 8 }}>🔧</div>
             <div style={{ fontSize: 13, color: "#888", marginBottom: 4 }}>Weekly Build</div>
             <div style={{ fontSize: 16, fontWeight: 700 }}>What Would I Build?</div>
@@ -8990,10 +9608,11 @@ window.CreativeRoulette = CreativeRoulette;
 const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
 // ─────────────────────────────────────────────────────
-// DATA LAYER — every key read or written here starts with "practice:"
+// DATA LAYER — every key read or written here starts with "practice:" (notes go to "notes:")
 // ─────────────────────────────────────────────────────
 
 const P_PREFIX = 'practice:';
+const P_NOTES_PREFIX = 'notes:';
 const P_KEYS = {
   playbook:   'practice:playbook',
   homework:   'practice:homework',
@@ -9016,7 +9635,7 @@ const pTimeHM = (d = new Date()) => `${pTwo(d.getHours())}:${pTwo(d.getMinutes()
 const pDaysAgo = (n, from = new Date()) => { const d = new Date(from.getFullYear(), from.getMonth(), from.getDate()); d.setDate(d.getDate() - n); return d; };
 
 const pCheckKey = (key) => {
-  if (typeof key !== 'string' || !key.startsWith(P_PREFIX)) throw new Error(`Practice tab may only touch "practice:" keys (got "${key}")`);
+  if (typeof key !== 'string' || !(key.startsWith(P_PREFIX) || key.startsWith(P_NOTES_PREFIX))) throw new Error(`Practice tab may only touch "practice:" and "notes:" keys (got "${key}")`);
   return key;
 };
 
@@ -9074,16 +9693,73 @@ function pUpdate(key, makeEmpty, mutate) {
   });
 }
 
-// Append one rep to today's per-day log (created on first rep).
-function pAppendLog(entry, when = new Date()) {
+// What an entry says, without when it was logged (for "Already logged").
+const pEntrySig = (e) => JSON.stringify(['practiceId', 'level', 'before', 'after', 'note', 'myNote', 'stepNotes', 'source']
+  .map(k => (e && e[k] !== undefined && e[k] !== null && e[k] !== '' ? e[k] : null)));
+const P_REPEAT_MS = 60000;
+// The time an entry was logged, in ms: its `at`, else its HH:MM on that day's date.
+const pEntryMs = (e, dateISO) => {
+  const t = e && e.at ? Date.parse(e.at) : NaN;
+  if (!isNaN(t)) return t;
+  const hm = pTimeOf(e);
+  return hm && dateISO ? new Date(`${dateISO}T${hm}:00`).getTime() : null;
+};
+
+// Append one rep to today's per-day log (created on first rep). Each new entry gets an id (for Undo and
+// edits) and `at` (when it was logged). An entry identical to the previous one within 60 seconds is not
+// added (an Error with .repeat = true), unless opts.force.
+function pAppendLog(entry, when = new Date(), opts = {}) {
   const clean = { time: entry.time || pTimeHM(when), practiceId: entry.practiceId };
-  ['before', 'after', 'level', 'note'].forEach(k => {
+  ['before', 'after', 'level', 'note', 'myNote'].forEach(k => {
     if (entry[k] !== undefined && entry[k] !== null && entry[k] !== '') clean[k] = entry[k];
   });
+  const steps = Array.isArray(entry.stepNotes) ? entry.stepNotes.filter(s => s && String(s.note || '').trim())
+    .map(s => ({ step: Number(s.step), text: String(s.text || ''), note: String(s.note).trim() })) : [];
+  if (steps.length) clean.stepNotes = steps;
   clean.source = entry.source || 'app';
+  clean.id = entry.id || `e_${when.getTime().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  clean.at = when.toISOString();
   return pUpdate(P_KEYS.log(pDayKey(when)), () => ({ date: pLocalISO(when), entries: [] }), (doc) => {
     if (!Array.isArray(doc.entries)) doc.entries = [];
+    const prev = doc.entries[doc.entries.length - 1];
+    const prevMs = prev ? pEntryMs(prev, doc.date || pLocalISO(when)) : null;
+    if (!opts.force && prev && pEntrySig(prev) === pEntrySig(clean) && prevMs != null && Math.abs(when.getTime() - prevMs) < P_REPEAT_MS) {
+      throw Object.assign(new Error('Already logged'), { repeat: true });
+    }
     doc.entries.push(clean);
+    return doc;
+  });
+}
+
+// Finds an entry of a day's log by id, or by its position for entries written before ids.
+const pFindEntry = (doc, ref) => {
+  const list = Array.isArray(doc?.entries) ? doc.entries : [];
+  if (ref && ref.id) return list.find(e => e && e.id === ref.id) || null;
+  return ref && typeof ref.index === 'number' ? list[ref.index] || null : null;
+};
+// Removes exactly one entry (Undo). Returns the doc.
+function pRemoveEntry(dayKey, ref) {
+  return pUpdate(P_KEYS.log(dayKey), null, (doc) => {
+    const hit = pFindEntry(doc, ref);
+    if (!hit) throw new Error('That entry is no longer there.');
+    doc.entries = doc.entries.filter(e => e !== hit);
+    return doc;
+  });
+}
+// Changes an entry's time and/or myNote; the old values go in its edits list ({ at, field, from }).
+function pEditEntry(dayKey, ref, patch) {
+  return pUpdate(P_KEYS.log(dayKey), null, (doc) => {
+    const hit = pFindEntry(doc, ref);
+    if (!hit) throw new Error('That entry is no longer there.');
+    const at = new Date().toISOString();
+    Object.keys(patch).forEach(field => {
+      const to = patch[field];
+      const from = hit[field] === undefined ? null : hit[field];
+      if ((from ?? '') === (to ?? '')) return;
+      hit.edits = Array.isArray(hit.edits) ? hit.edits : [];
+      hit.edits.push({ at, field, from });
+      if (to === '' || to == null) delete hit[field]; else hit[field] = to;
+    });
     return doc;
   });
 }
@@ -9181,46 +9857,50 @@ function WakingQuickLog({ onLog }) {
   // Empty = "now"; the field shows the current time until he changes it.
   const [upAt, setUpAt] = useState('');
   const [, setTick] = useState(0);
+  const [busy, wrap] = window.useBusy();
   useEffect(() => { const iv = setInterval(() => setTick(t => t + 1), 30000); return () => clearInterval(iv); }, []);
-  const logUp = async () => {
+  const logUp = wrap(async () => {
     const t = upAt || pTimeHM();
     const ok = await onLog({ practiceId: 'waking-ladder', level: 4, time: t, note: `up at ${t}` });
     if (ok) setUpAt('');
-  };
+  });
+  const logLevel = wrap((l) => onLog({ practiceId: 'waking-ladder', level: l }));
   return (
     <div style={pCard()}>
       <div style={pLabel}>Waking ladder — log where you got to</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 10 }}>
         {[1, 2, 3, 4].map(l => (
-          <button key={l} style={pBtn('ghost', { minHeight: 52 })} onClick={() => onLog({ practiceId: 'waking-ladder', level: l })}>Level {l}</button>
+          <button key={l} style={pBtn('ghost', { minHeight: 52 })} disabled={busy} onClick={() => logLevel(l)}>Level {l}</button>
         ))}
       </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         <label style={{ fontSize: 14, color: PC.muted, whiteSpace: 'nowrap' }} htmlFor="pr-upat">Up at</label>
         <input id="pr-upat" type="time" value={upAt || pTimeHM()} onChange={e => setUpAt(e.target.value)} style={{ ...pInput, flex: 1 }} />
-        <button style={pBtn('solid')} onClick={logUp}>Log</button>
+        <button style={pBtn('solid')} disabled={busy} onClick={logUp}>Log</button>
       </div>
     </div>
   );
 }
 
 function ForgotBox({ onLog }) {
-  const [txt, setTxt] = useState('');
-  const send = async () => { if (!txt.trim()) return; const ok = await onLog({ practiceId: 'forgot-log', note: txt.trim() }); if (ok) setTxt(''); };
+  const [txt, setTxt, clearTxt] = window.useDraft('practice', 'forgot', '');
+  const [busy, wrap] = window.useBusy();
+  const send = wrap(async () => { if (!txt.trim()) return; const ok = await onLog({ practiceId: 'forgot-log', note: txt.trim() }); if (ok) clearTxt(); });
   return (
     <div style={pCard()}>
       <label style={pLabel} htmlFor="pr-forgot">Forgot something?</label>
       <div style={{ display: 'flex', gap: 8 }}>
         <input id="pr-forgot" value={txt} onChange={e => setTxt(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') send(); }} placeholder="What, and where it is" style={{ ...pInput, flex: 1 }} />
-        <button style={pBtn('solid')} disabled={!txt.trim()} onClick={send}>Log</button>
+        <button style={pBtn('solid')} disabled={!txt.trim() || busy} onClick={send}>Log</button>
       </div>
     </div>
   );
 }
 
 function HomeworkStrip({ homework, missing, onAddUpdate }) {
-  const [openId, setOpenId] = useState(null);
-  const [txt, setTxt] = useState('');
+  const [openId, setOpenId, clearOpen] = window.useDraft('practice', 'homework-open', null);
+  const [txt, setTxt, clearTxt] = window.useDraft('practice', openId ? `homework:${openId}` : null, '');
+  const [busy, wrap] = window.useBusy();
   const items = homework?.items || [];
   return (
     <div style={{ marginBottom: 14 }}>
@@ -9242,12 +9922,12 @@ function HomeworkStrip({ homework, missing, onAddUpdate }) {
             <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
               <input aria-label={`Update for ${it.title}`} value={txt} onChange={e => setTxt(e.target.value)} placeholder="What happened" style={pInput} />
               <div style={{ display: 'flex', gap: 8 }}>
-                <button style={pBtn('solid', { flex: 1 })} disabled={!txt.trim()} onClick={async () => { const ok = await onAddUpdate(it.id, txt.trim()); if (ok) { setTxt(''); setOpenId(null); } }}>Save update</button>
-                <button style={pBtn()} onClick={() => { setOpenId(null); setTxt(''); }}>Cancel</button>
+                <button style={pBtn('solid', { flex: 1 })} disabled={!txt.trim() || busy} onClick={wrap(async () => { const ok = await onAddUpdate(it.id, txt.trim()); if (ok) { clearTxt(); clearOpen(); } })}>Save update</button>
+                <button style={pBtn()} onClick={() => { clearTxt(); clearOpen(); }}>Cancel</button>
               </div>
             </div>
           ) : (
-            <button style={pBtn('ghost', { marginTop: 10 })} onClick={() => { setOpenId(it.id); setTxt(''); }}>Add update</button>
+            <button style={pBtn('ghost', { marginTop: 10 })} onClick={() => setOpenId(it.id)}>Add update</button>
           )}
         </div>
       ))}
@@ -9256,6 +9936,7 @@ function HomeworkStrip({ homework, missing, onAddUpdate }) {
 }
 
 function PracticeCard({ p, name, why, trigger, firstStep, onStart, onLog }) {
+  const [busy, wrap] = window.useBusy();
   return (
     <div style={pCard()}>
       <div style={{ fontSize: 17, color: PC.text, fontWeight: 700, marginBottom: 4 }}>{name || p?.name || p?.id} {p && <PStageTag p={p} />}</div>
@@ -9264,13 +9945,83 @@ function PracticeCard({ p, name, why, trigger, firstStep, onStart, onLog }) {
       {firstStep && <div style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, background: PC.accentDim, borderRadius: 8, padding: '8px 10px', marginBottom: 10 }}><strong>First step:</strong> {pText(firstStep)}</div>}
       <div style={{ display: 'flex', gap: 8 }}>
         <button style={pBtn('solid', { flex: 1 })} onClick={onStart}>Start</button>
-        <button style={pBtn('ghost', { flex: 1 })} onClick={onLog}>Log</button>
+        <button style={pBtn('ghost', { flex: 1 })} disabled={busy} onClick={wrap(onLog)}>Log</button>
       </div>
     </div>
   );
 }
 
-function TodayScreen({ data, onLog, onStart, onWaking, onAddUpdate }) {
+// One of today's entries; tap it to change its time or note (the old values go in its edits list).
+function PEntryRow({ e, index, nameOf, dayKey, onEdit }) {
+  const ref = e.id ? { id: e.id } : { index };
+  const [open, setOpen, clearOpen] = window.useDraft('practice', `edit-open:${dayKey}:${e.id || index}`, false);
+  const [form, setForm, clearForm] = window.useDraft('practice', open ? `edit:${dayKey}:${e.id || index}` : null, { time: pTimeOf(e), myNote: e.myNote || '' });
+  const [busy, wrap] = window.useBusy();
+  const line = (
+    <>
+      {pTimeOf(e) && <span style={{ color: PC.muted, fontFamily: pMono }}>{pTimeOf(e)} </span>}{nameOf(e.practiceId) || 'Entry'}
+      {pLevel(e.level) != null ? ` · level ${pLevel(e.level)}` : ''}
+      {e.before != null || e.after != null ? ` · ${e.before ?? '–'} → ${e.after ?? '–'}` : ''}
+      {e.note ? ` · ${e.note}` : ''}
+      {e.myNote ? <span style={{ color: PC.accent }}> · {e.myNote}</span> : null}
+      {(e.stepNotes || []).length ? <span style={{ color: PC.muted }}> · {e.stepNotes.length} step note{e.stepNotes.length === 1 ? '' : 's'}</span> : null}
+      {(e.edits || []).length ? <span style={{ color: PC.muted }}> · edited</span> : null}
+    </>
+  );
+  if (!open) return (
+    <button data-pr-entry onClick={() => setOpen(true)} style={{ display: 'block', width: '100%', textAlign: 'left', background: 'transparent', border: 'none', borderBottom: `1px solid ${PC.border}`, padding: '6px 0', fontSize: 13, color: PC.text, lineHeight: 1.6, fontFamily: pFont, cursor: 'pointer', minHeight: 36 }}>{line}</button>
+  );
+  const f = form || {};
+  return (
+    <div style={{ borderBottom: `1px solid ${PC.border}`, padding: '8px 0' }}>
+      <div style={{ fontSize: 13, color: PC.text, marginBottom: 8 }}>{line}</div>
+      <label style={pLabel} htmlFor={`pr-edit-time-${index}`}>Time</label>
+      <input id={`pr-edit-time-${index}`} aria-label="Entry time" type="time" value={f.time || ''} onChange={ev => setForm({ ...f, time: ev.target.value })} style={{ ...pInput, marginBottom: 8 }} />
+      <label style={pLabel} htmlFor={`pr-edit-note-${index}`}>My note</label>
+      <textarea id={`pr-edit-note-${index}`} aria-label="Entry note" rows={2} value={f.myNote || ''} onChange={ev => setForm({ ...f, myNote: ev.target.value })} style={{ ...pInput, minHeight: 60, marginBottom: 8, resize: 'vertical' }} />
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button style={pBtn('solid', { flex: 1 })} disabled={busy || !f.time} onClick={wrap(async () => {
+          const ok = await onEdit(ref, { time: f.time, myNote: (f.myNote || '').trim() });
+          if (ok) { clearForm(); clearOpen(); }
+        })}>Save</button>
+        <button style={pBtn()} onClick={() => { clearForm(); clearOpen(); }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// A day's entries in time order (entries with no time last). What's stored is not reordered.
+const pSortByTime = (entries) => window.nwByTime(entries, (e) => pTimeOf(e) || null);
+
+// Flows left unfinished (guided flow or Waking up), from the drafts doc: Continue or Discard.
+function PUnfinished({ playbook, onContinue }) {
+  const [list, setList] = useState([]);
+  const load = useCallback(async () => {
+    const ds = await window.nwDrafts.list('practice', 'flow:');
+    const wk = await window.nwDrafts.peek('practice', 'waking');
+    setList([...ds.map(d => ({ id: d.id, v: d.v })), ...(wk && wk.stage && wk.stage !== 'q1' && wk.stage !== 'up' ? [{ id: 'waking', v: wk }] : [])]);
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  if (!list.length) return null;
+  return list.map(d => {
+    const isWaking = d.id === 'waking';
+    const p = isWaking ? null : pFindPractice(playbook, d.v.practiceId);
+    const n = (p?.steps || []).length || 1;
+    const where = isWaking ? 'Waking up' : `${p?.name || d.v.practiceId} · ${d.v.i < 0 ? 'before rating' : d.v.i >= n ? 'after rating' : `step ${d.v.i + 1} of ${n}`}`;
+    return (
+      <div key={d.id} data-pr-unfinished style={pCard({ borderLeft: `3px solid ${PC.warn}` })}>
+        <div style={{ fontSize: 13, color: PC.muted, marginBottom: 4 }}>Not finished</div>
+        <div style={{ fontSize: 15, color: PC.text, fontWeight: 600, marginBottom: 8 }}>{where}</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button style={pBtn('solid', { flex: 1 })} onClick={() => onContinue(d)}>Continue</button>
+          <button style={pBtn('ghost')} onClick={() => { window.nwDrafts.clear('practice', d.id); setList(l => l.filter(x => x.id !== d.id)); }}>Discard</button>
+        </div>
+      </div>
+    );
+  });
+}
+
+function TodayScreen({ data, onLog, onStart, onWaking, onAddUpdate, onEditEntry, onContinue, unfinishedKey }) {
   const { playbook, homework, homeworkMissing, today, todayMissing, todayError, todayLog } = data;
   const now = new Date();
   // Only while he could still be waking up: 04:00–11:59, and not once he's up or has done an after-level-4 practice.
@@ -9286,6 +10037,7 @@ function TodayScreen({ data, onLog, onStart, onWaking, onAddUpdate }) {
 
   return (
     <div>
+      <PUnfinished key={unfinishedKey} playbook={playbook} onContinue={onContinue} />
       {showWaking && (
         <button onClick={onWaking} style={pBtn('warn', { width: '100%', minHeight: 72, fontSize: 22, fontWeight: 700, marginBottom: 14 })}>
           Waking up
@@ -9342,14 +10094,9 @@ function TodayScreen({ data, onLog, onStart, onWaking, onAddUpdate }) {
 
       {entries.length > 0 && (
         <div style={pCard()}>
-          <div style={pLabel}>Logged today ({entries.length})</div>
-          {entries.map((e, i) => (
-            <div key={i} style={{ fontSize: 13, color: PC.text, lineHeight: 1.7 }}>
-              {pTimeOf(e) && <span style={{ color: PC.muted, fontFamily: pMono }}>{pTimeOf(e)} </span>}{nameOf(e.practiceId) || 'Entry'}
-              {pLevel(e.level) != null ? ` · level ${pLevel(e.level)}` : ''}
-              {e.before != null || e.after != null ? ` · ${e.before ?? '–'} → ${e.after ?? '–'}` : ''}
-              {e.note ? ` · ${e.note}` : ''}
-            </div>
+          <div style={pLabel}>Logged today ({entries.length}) · tap one to change it</div>
+          {pSortByTime(entries).map(e => (
+            <PEntryRow key={e.id || entries.indexOf(e)} e={e} index={entries.indexOf(e)} nameOf={nameOf} dayKey={data.dayKey || pDayKey()} onEdit={onEditEntry} />
           ))}
         </div>
       )}
@@ -9369,11 +10116,14 @@ const P_WHERE = [
 ];
 
 function StatusChanger({ p, onChange }) {
-  const [open, setOpen] = useState(false);
-  const [to, setTo] = useState('');
-  const [reason, setReason] = useState('');
+  const [open, setOpen, clearOpen] = window.useDraft('practice', `status-open:${p.id}`, false);
+  const [form, setForm, clearForm] = window.useDraft('practice', `status:${p.id}`, { to: '', reason: '' });
+  const to = form?.to || '', reason = form?.reason || '';
+  const setTo = (v) => setForm({ to: v, reason });
+  const setReason = (v) => setForm({ to, reason: v });
   const [busy, setBusy] = useState(false);
-  if (!open) return <button style={pBtn('ghost', { flex: 1 })} onClick={() => { setOpen(true); setTo(''); setReason(''); }}>Change status</button>;
+  const setOpenFalse = () => { clearForm(); clearOpen(); };
+  if (!open) return <button style={pBtn('ghost', { flex: 1 })} onClick={() => setOpen(true)}>Change status</button>;
   return (
     <div style={{ ...pCard({ marginTop: 10, marginBottom: 0 }), width: '100%' }}>
       <label style={pLabel} htmlFor="pr-status">New status (now: {p.status})</label>
@@ -9385,16 +10135,42 @@ function StatusChanger({ p, onChange }) {
       <textarea id="pr-reason" rows={3} value={reason} onChange={e => setReason(e.target.value)} placeholder="Why the change" style={{ ...pInput, minHeight: 80, marginBottom: 8, resize: 'vertical' }} />
       <div style={{ display: 'flex', gap: 8 }}>
         <button style={pBtn('solid', { flex: 1 })} disabled={!to || !reason.trim() || busy}
-          onClick={async () => { setBusy(true); const ok = await onChange(p.id, to, reason.trim()); setBusy(false); if (ok) setOpen(false); }}>
+          onClick={async () => { if (busy) return; setBusy(true); const ok = await onChange(p.id, to, reason.trim()); setBusy(false); if (ok) setOpenFalse(); }}>
           Save status
         </button>
-        <button style={pBtn()} onClick={() => setOpen(false)}>Cancel</button>
+        <button style={pBtn()} onClick={setOpenFalse}>Cancel</button>
       </div>
     </div>
   );
 }
 
-function PracticeDetail({ p, onBack, onStart, onLog, onStatus }) {
+// The last 5 reps of one practice in the last 30 days, newest first, with their notes.
+function PRecentReps({ practiceId, refreshKey }) {
+  const { loading, logs } = useLogs(30, refreshKey);
+  const reps = [];
+  logs.slice().sort((a, b) => a.n - b.n).forEach(day => {
+    pSortByTime(day.entries).filter(e => e && e.practiceId === practiceId).reverse().forEach(e => reps.push({ iso: day.iso, e }));
+  });
+  const last = reps.slice(0, 5);
+  return (
+    <div data-pr-recent style={{ marginBottom: 12 }}>
+      <div style={pLabel}>Last reps (30 days)</div>
+      {loading ? <div style={{ fontSize: 13, color: PC.muted }}>Reading the logs…</div>
+        : !last.length ? <div style={{ fontSize: 13, color: PC.muted }}>No reps in the last 30 days.</div>
+        : last.map(({ iso, e }, k) => (
+          <div key={k} data-pr-rep style={{ fontSize: 13, color: PC.text, lineHeight: 1.6, borderBottom: `1px solid ${PC.border}`, padding: '6px 0' }}>
+            <div><span style={{ fontFamily: pMono, color: PC.muted }}>{iso}{pTimeOf(e) ? ` ${pTimeOf(e)}` : ''}</span>
+              {e.before != null || e.after != null ? ` · before ${e.before ?? '–'}, after ${e.after ?? '–'}` : ''}</div>
+            {e.myNote && <div>Note: {e.myNote}</div>}
+            {(e.stepNotes || []).map((sn, j) => <div key={j} style={{ color: PC.muted }}>Step {sn.step}{sn.text ? ` (${sn.text})` : ''}: <span style={{ color: PC.text }}>{sn.note}</span></div>)}
+          </div>
+        ))}
+    </div>
+  );
+}
+
+function PracticeDetail({ p, onBack, onStart, onLog, onStatus, refreshKey }) {
+  const [busy, wrap] = window.useBusy();
   const Row = ({ label, children }) => children ? (
     <div style={{ marginBottom: 12 }}>
       <div style={pLabel}>{label}</div>
@@ -9423,9 +10199,10 @@ function PracticeDetail({ p, onBack, onStart, onLog, onStatus }) {
         <Row label="History">{(p.history || []).length ? p.history.map((h, i) => (
           <div key={i} style={{ fontSize: 13, color: PC.muted }}>{h.date} — {pText(h.change)}{h.reason ? ` (${h.reason})` : ''}{h.by ? ` · ${h.by}` : ''}</div>
         )) : null}</Row>
+        <PRecentReps practiceId={p.id} refreshKey={refreshKey} />
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button style={pBtn('solid', { flex: 1 })} onClick={() => onStart(p.id)}>Start</button>
-          <button style={pBtn('ghost', { flex: 1 })} onClick={() => onLog({ practiceId: p.id })}>Log rep</button>
+          <button style={pBtn('ghost', { flex: 1 })} disabled={busy} onClick={wrap(() => onLog({ practiceId: p.id }))}>Log rep</button>
           <StatusChanger p={p} onChange={onStatus} />
         </div>
       </div>
@@ -9433,14 +10210,14 @@ function PracticeDetail({ p, onBack, onStart, onLog, onStatus }) {
   );
 }
 
-function LibraryScreen({ data, detailId, setDetailId, onStart, onLog, onStatus }) {
+function LibraryScreen({ data, detailId, setDetailId, onStart, onLog, onStatus, refreshKey }) {
   const { playbook, playbookMissing, playbookError } = data;
   const [q, setQ] = useState('');
   const [where, setWhere] = useState('all');
   const practices = playbook?.practices || [];
 
   const detail = detailId ? pFindPractice(playbook, detailId) : null;
-  if (detail) return <PracticeDetail p={detail} onBack={() => setDetailId(null)} onStart={onStart} onLog={onLog} onStatus={onStatus} />;
+  if (detail) return <PracticeDetail p={detail} onBack={() => setDetailId(null)} onStart={onStart} onLog={onLog} onStatus={onStatus} refreshKey={refreshKey} />;
 
   if (!playbook) return <div style={pCard()}><div style={{ fontSize: 14, color: PC.muted }}>{playbookError ? `The playbook is ${playbookError}.` : playbookMissing ? 'No playbook found yet.' : 'Loading…'}</div></div>;
 
@@ -9527,7 +10304,7 @@ const pClock = (d = new Date()) => `${d.toLocaleDateString('en-US', { weekday: '
 
 const pContextLine = (log) => {
   const lvl = pLastWakingLevel(log);
-  const reps = (log?.entries || []).filter(e => e?.practiceId && e.practiceId !== 'waking-ladder' && e.practiceId !== 'forgot-log').map(e => {
+  const reps = pSortByTime(log?.entries || []).filter(e => e?.practiceId && e.practiceId !== 'waking-ladder' && e.practiceId !== 'forgot-log').map(e => {
     const r = (e.before != null || e.after != null) ? ` (before ${e.before ?? '-'}, after ${e.after ?? '-'})` : '';
     return `${e.practiceId}${r}`;
   });
@@ -9536,7 +10313,7 @@ const pContextLine = (log) => {
 
 const pOnline = () => (typeof navigator === 'undefined' || navigator.onLine !== false);
 
-const P_ASK_KINDS = { 'stuck': 'Ask Claude', 'stuck-else': 'Something else', 'coach-me': 'Coach me', 'outside': 'Look outside', 'draft-shobha': 'Draft for Dr. Shobha' };
+const P_ASK_KINDS = { 'stuck': 'Ask Claude', 'stuck-else': 'Something else', 'coach-me': 'Coach me', 'outside': 'Look outside', 'draft-shobha': 'Draft for Dr. Shobha', 'kaizen-foci': 'Kaizen session patterns' };
 
 // Appends one record of a Claude reply to practice:asks:<today>. Append-only; never throws.
 // Returns 'cloud', 'device-only' or false (not saved).
@@ -9756,19 +10533,28 @@ function PStepWidget({ w }) {
   return null;
 }
 
+// One step per screen. The flow in progress (step, ratings, step notes, "Anything else?") is a draft in
+// practice:drafts (flow:<practice id>), so closing or reloading the app keeps it; saving the rep clears it.
+const P_FLOW_START = { i: -1, before: null, after: null, notes: {}, myNote: '' };
 function GuidedFlow({ practiceId, source, note, playbook, onSave, onClose }) {
   const p = pFindPractice(playbook, practiceId);
-  const [i, setI] = useState(-1); // -1 = before rating, steps.length = after rating
-  const [before, setBefore] = useState(null);
-  const [after, setAfter] = useState(null);
+  const [flow, setFlow, clearFlow] = window.useDraft('practice', `flow:${practiceId}`, { ...P_FLOW_START, practiceId, source: source || 'app', note: note || null });
   const [busy, setBusy] = useState(false);
+  const i = typeof flow?.i === 'number' ? flow.i : -1;
+  const before = flow?.before ?? null, after = flow?.after ?? null;
+  const notes = flow?.notes || {};
+  const upd = (patch) => setFlow(f => ({ ...P_FLOW_START, practiceId, source: source || 'app', note: note || null, ...(f || {}), ...patch }));
+  const setI = (n) => upd({ i: n });
+  const steps = p ? ((p.steps || []).length ? p.steps : ['Do the practice the way you know it.']) : [];
+  useEffect(() => {
+    window.nwSetContext('practice', { screen: 'Guided flow', practice: practiceId, step: i >= 0 && i < steps.length ? i + 1 : null });
+  }, [practiceId, i, steps.length]);
   if (!p) return (
     <div style={pCard()}>
       <div style={{ fontSize: 15, color: PC.text, marginBottom: 10 }}>"{practiceId}" isn't in the playbook.</div>
       <button style={pBtn()} onClick={onClose}>← Back</button>
     </div>
   );
-  const steps = (p.steps || []).length ? p.steps : ['Do the practice the way you know it.'];
   const label = pRatingLabel(p, playbook);
   const n = steps.length;
   const w = i >= 0 && i < n ? pStepWidget(p, steps, i) : null;
@@ -9784,25 +10570,34 @@ function GuidedFlow({ practiceId, source, note, playbook, onSave, onClose }) {
         {i < 0 && (
           <>
             {pTrigger(p) && <div style={{ fontSize: 16, color: PC.text, lineHeight: 1.5, marginBottom: 14 }}>{pText(pTrigger(p))}</div>}
-            <PRating label={label} value={before} onChange={setBefore} when="Before" />
+            <PRating label={label} value={before} onChange={v => upd({ before: v })} when="Before" />
           </>
         )}
         {i >= 0 && i < n && (
           <>
             <div style={{ fontSize: 24, color: PC.text, lineHeight: 1.4, fontWeight: 600, marginBottom: 14 }}>{pText(steps[i])}</div>
             <PStepWidget key={i} w={w} />
+            <window.NwStepNote key={`n${i}`} value={notes[i] || ''} onChange={v => upd({ notes: { ...notes, [i]: v } })} />
           </>
         )}
-        {i >= n && <PRating label={label} value={after} onChange={setAfter} when="After" />}
+        {i >= n && (
+          <>
+            <PRating label={label} value={after} onChange={v => upd({ after: v })} when="After" />
+            <label style={pLabel} htmlFor="pr-anything-else">Anything else? (optional)</label>
+            <textarea id="pr-anything-else" aria-label="Anything else?" rows={2} value={flow?.myNote || ''} onChange={e => upd({ myNote: e.target.value })} style={{ ...pInput, minHeight: 60, marginBottom: 10, resize: 'vertical' }} />
+          </>
+        )}
         <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
           {i >= 0 && <button style={pBtn('ghost', { flex: 1 })} onClick={() => setI(i - 1)}>Back</button>}
           {i < n && <button style={pBtn('solid', { flex: 2 })} onClick={() => setI(i + 1)}>{i < 0 ? 'Begin' : 'Next'}</button>}
           {i >= n && (
             <button style={pBtn('solid', { flex: 2 })} disabled={busy} onClick={async () => {
+              if (busy) return;
               setBusy(true);
-              const ok = await onSave({ practiceId: p.id, before: before ?? undefined, after: after ?? undefined, source, note: note || undefined });
+              const stepNotes = steps.map((st, k) => ({ step: k + 1, text: pText(st), note: String(notes[k] || '').trim() })).filter(x => x.note);
+              const ok = await onSave({ practiceId: p.id, before: before ?? undefined, after: after ?? undefined, source: flow?.source || source, note: (flow?.note || note) || undefined, myNote: String(flow?.myNote || '').trim() || undefined, stepNotes });
               setBusy(false);
-              if (ok) onClose();
+              if (ok) { clearFlow(); onClose(); }
             }}>Save rep</button>
           )}
         </div>
@@ -9911,16 +10706,31 @@ function pWakingAlternates(playbook) {
   return P_WAKING_ALTERNATES.filter(a => pFindPractice(playbook, a.from));
 }
 
+// Waking up in progress (answers, step, notes) is a draft in practice:drafts ("waking"): closing or
+// reloading keeps it; "I'm up and moving" clears it.
+const P_WAKING_START = { where: null, blocks: [], other: '', stage: 'q1', queue: [], idx: 0, tried: [], noMore: false, notes: {} };
+const P_WAKING_Q = { q1: 'Where are you?', q2: "What's in the way?" };
 function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, onStart, onClose }) {
-  const [where, setWhere] = useState(null);
-  const [blocks, setBlocks] = useState([]);
-  const [other, setOther] = useState('');
-  const [stage, setStage] = useState('q1'); // q1 | q2 | steps | up
-  const [queue, setQueue] = useState([]);
-  const [idx, setIdx] = useState(0);
-  const [tried, setTried] = useState([]);
-  const [noMore, setNoMore] = useState(false);
+  const [wk, setWk, clearWk] = window.useDraft('practice', 'waking', P_WAKING_START);
+  const st = { ...P_WAKING_START, ...(wk || {}) };
+  const { where, blocks, other, stage, queue, idx, tried, noMore, notes } = st;
+  const upd = (patch) => setWk(cur => ({ ...P_WAKING_START, ...(cur || {}), ...(typeof patch === 'function' ? patch({ ...P_WAKING_START, ...(cur || {}) }) : patch) }));
+  const setWhere = (v) => upd({ where: v });
+  const setBlocks = (fn) => upd(c => ({ blocks: typeof fn === 'function' ? fn(c.blocks) : fn }));
+  const setOther = (v) => upd({ other: v });
+  const setStage = (v) => upd({ stage: v });
+  const setIdx = (v) => upd({ idx: v });
   const [coach, setCoach] = useState({ busy: false, err: '', picks: null });
+  const [busy, wrap] = window.useBusy();
+  // Step notes: { q1, q2, <step index>: { text, note } }. Numbered in the order shown: Q1 = 1, Q2 = 2, steps from 3.
+  const noteOf = (k) => (notes[k] && notes[k].note) || '';
+  const setNote = (k, text, v) => upd(c => ({ notes: { ...c.notes, [k]: { text, note: v } } }));
+  const stepNotes = () => Object.keys(notes).map(k => ({ k, n: notes[k] })).filter(x => x.n && String(x.n.note || '').trim())
+    .map(x => ({ step: x.k === 'q1' ? 1 : x.k === 'q2' ? 2 : Number(x.k) + 3, text: x.n.text, note: String(x.n.note).trim() }))
+    .sort((a, b) => a.step - b.step);
+  useEffect(() => {
+    window.nwSetContext('practice', { screen: 'Waking up', practice: 'waking-ladder', step: stage === 'q1' ? 1 : stage === 'q2' ? 2 : stage === 'steps' ? idx + 3 : null });
+  }, [stage, idx]);
 
   const answers = () => {
     const w = P_WHERE_Q.find(x => x.id === where)?.label || '-';
@@ -9931,25 +10741,23 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
 
   const begin = () => {
     const q = pWakingSteps(where, blocks, playbook, today, homework);
-    setQueue(q.length ? q : [{ text: P_FEET }]);
-    setIdx(0); setTried([]); setNoMore(false); setStage('steps');
+    upd({ queue: q.length ? q : [{ text: P_FEET }], idx: 0, tried: [], noMore: false, stage: 'steps' });
   };
 
-  const imUp = async () => {
-    const ok = await onLog({ practiceId: 'waking-ladder', level: 4, note: answers(), source: 'app-waking' });
-    if (ok) setStage('up');
-  };
+  const imUp = wrap(async () => {
+    const ok = await onLog({ practiceId: 'waking-ladder', level: 4, note: answers(), source: 'app-waking', stepNotes: stepNotes() });
+    if (ok) { clearWk({ ...P_WAKING_START, stage: 'up' }); }
+  });
 
-  const startOver = () => { setWhere(null); setBlocks([]); setOther(''); setNoMore(false); setCoach({ busy: false, err: '', picks: null }); setStage('q1'); };
+  const startOver = () => { clearWk(); setCoach({ busy: false, err: '', picks: null }); };
 
   // Skips any alternate whose text was already shown (or is still queued) this run.
   const tryAnother = () => {
     const cur = queue[idx];
     const used = new Set([...tried, ...queue.map(s => s.text)]);
     const alt = pWakingAlternates(playbook).find(a => !used.has(a.text));
-    setTried(t => [...t, cur.text]);
-    if (alt) setQueue(q => q.map((s, k) => (k === idx ? alt : s)));
-    else setNoMore(true);
+    if (alt) upd({ tried: [...tried, cur.text], queue: queue.map((s, k) => (k === idx ? alt : s)) });
+    else upd({ tried: [...tried, cur.text], noMore: true });
   };
 
   const coachMe = async () => {
@@ -9974,13 +10782,15 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
         <button style={pBtn()} onClick={onClose}>✕ Close</button>
+        {(stage === 'q2' || stage === 'steps') && <button style={pBtn('ghost', { fontSize: 13 })} onClick={startOver}>Start over</button>}
         <span style={{ fontSize: 13, color: PC.muted, fontFamily: pMono }}>Waking up</span>
       </div>
 
       {stage === 'q1' && (
         <div>
           <div style={{ fontSize: 26, fontWeight: 700, color: PC.text, marginBottom: 14 }}>Where are you?</div>
-          {P_WHERE_Q.map(o => <button key={o.id} style={big()} onClick={() => { setWhere(o.id); setStage('q2'); }}>{o.label}</button>)}
+          {P_WHERE_Q.map(o => <button key={o.id} style={big()} onClick={() => upd({ where: o.id, stage: 'q2' })}>{o.label}</button>)}
+          <window.NwStepNote key="q1" value={noteOf('q1')} onChange={v => setNote('q1', P_WAKING_Q.q1, v)} />
         </div>
       )}
 
@@ -9994,6 +10804,7 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
               onClick={() => setBlocks(b => on ? b.filter(x => x !== o.id) : [...b, o.id])}>{on ? '✓ ' : ''}{o.label}</button>;
           })}
           {blocks.includes('other') && <input aria-label="Something else" value={other} onChange={e => setOther(e.target.value)} placeholder="What is it" style={{ ...pInput, marginBottom: 10 }} />}
+          <div style={{ marginBottom: 10 }}><window.NwStepNote key="q2" value={noteOf('q2')} onChange={v => setNote('q2', P_WAKING_Q.q2, v)} /></div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button style={pBtn('ghost', { flex: 1 })} onClick={() => setStage('q1')}>Back</button>
             <button style={pBtn('solid', { flex: 2, minHeight: 56, fontSize: 17 })} onClick={begin}>Next</button>
@@ -10004,7 +10815,7 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
       {stage === 'steps' && noMore && (
         <div>
           <div style={{ fontSize: 26, fontWeight: 700, color: PC.text, marginBottom: 16 }}>No more alternates.</div>
-          <button style={pBtn('warn', { width: '100%', minHeight: 64, fontSize: 20, marginBottom: 10 })} onClick={imUp}>I'm up and moving</button>
+          <button style={pBtn('warn', { width: '100%', minHeight: 64, fontSize: 20, marginBottom: 10 })} disabled={busy} onClick={imUp}>I'm up and moving</button>
           <button style={pBtn('ghost', { width: '100%' })} onClick={startOver}>Not yet, start over</button>
         </div>
       )}
@@ -10014,19 +10825,20 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
           <div style={{ fontSize: 13, color: PC.muted, marginBottom: 8, fontFamily: pMono }}>Step {idx + 1} of {queue.length}</div>
           <div style={{ fontSize: 28, fontWeight: 700, color: PC.text, lineHeight: 1.35, marginBottom: 16 }}>{queue[idx].text}</div>
           {queue[idx].kind === 'count' ? <PHiddenCount key={`c${idx}`} target={60} /> : (pDuration(queue[idx].text) ? <PTimer key={`t${idx}-${queue[idx].text}`} seconds={pDuration(queue[idx].text)} /> : null)}
+          <div style={{ marginBottom: 10 }}><window.NwStepNote key={`s${idx}`} value={noteOf(idx)} onChange={v => setNote(idx, queue[idx].text, v)} /></div>
           {idx < queue.length - 1 ? (
             <>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
                 <button style={pBtn('solid', { minHeight: 60, fontSize: 16 })} onClick={() => setIdx(idx + 1)}>Done, next</button>
                 <button style={pBtn('ghost', { minHeight: 60, fontSize: 16 })} onClick={tryAnother}>Didn't work, try another</button>
               </div>
-              <button style={pBtn('warn', { width: '100%', minHeight: 64, fontSize: 20, marginBottom: 14 })} onClick={imUp}>I'm up and moving</button>
+              <button style={pBtn('warn', { width: '100%', minHeight: 64, fontSize: 20, marginBottom: 14 })} disabled={busy} onClick={imUp}>I'm up and moving</button>
             </>
           ) : (
             <>
               {/* Last step: tapping it means he's up, so it logs straight away. */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
-                <button style={pBtn('warn', { minHeight: 60, fontSize: 16 })} onClick={imUp}>I'm up and moving</button>
+                <button style={pBtn('warn', { minHeight: 60, fontSize: 16 })} disabled={busy} onClick={imUp}>I'm up and moving</button>
                 <button style={pBtn('ghost', { minHeight: 60, fontSize: 16 })} onClick={tryAnother}>Didn't work, try another</button>
               </div>
               <button style={pBtn('ghost', { width: '100%', marginBottom: 14 })} onClick={startOver}>Not yet, start over</button>
@@ -10134,8 +10946,8 @@ function EarlierAnswers({ playbook, tick }) {
 
 function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onWaking, onSaveProposal, onClose }) {
   const [open, setOpen] = useState(null);
-  const [askText, setAskText] = useState('');
-  const [elseText, setElseText] = useState('');
+  const [askText, setAskText, clearAsk] = window.useDraft('practice', 'ask', '');
+  const [elseText, setElseText, clearElse] = window.useDraft('practice', 'else', '');
   const [ask, setAsk] = useState({ busy: false, err: '', picks: null });
   const [out, setOut] = useState({ busy: false, err: '', res: null, saved: false });
   const askRef = useRef(null);
@@ -10160,6 +10972,8 @@ function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onW
       const { picks, saved } = await pChoosePractices({ playbook, text: `${w}\n${pContextLine(todayLog)}`, ask: { kind, words: w } });
       setAsk({ busy: false, err: '', picks, saved, words: w });
     } catch (e) { setAsk({ busy: false, err: e.message, picks: null, saved: e.saved }); }
+    // Sent: the words stay in the box (Look outside uses them) but are no longer a draft.
+    clearAsk(w); if (kind === 'stuck-else') clearElse(elseText);
     setAsksTick(t => t + 1);
   };
 
@@ -10438,7 +11252,8 @@ async function pCopy(text) {
 
 function ShobhaScreen({ data, onAddQueue, onCover, onAddUpdate, flash }) {
   const { playbook, homework, homeworkMissing, queue, queueMissing, queueError } = data;
-  const [txt, setTxt] = useState('');
+  const [txt, setTxt, clearTxt] = window.useDraft('practice', 'queue', '');
+  const [busy, wrap] = window.useBusy();
   const [coverFor, setCoverFor] = useState(null);
   const [coverDate, setCoverDate] = useState(pLocalISO());
   const [draft, setDraft] = useState({ busy: false, err: '', text: '' });
@@ -10491,7 +11306,7 @@ function ShobhaScreen({ data, onAddQueue, onCover, onAddUpdate, flash }) {
         <label style={pLabel} htmlFor="pr-queue-add">Add to the queue</label>
         <div style={{ display: 'flex', gap: 8 }}>
           <input id="pr-queue-add" value={txt} onChange={e => setTxt(e.target.value)} placeholder="Something to bring up" style={{ ...pInput, flex: 1 }} />
-          <button style={pBtn('solid')} disabled={!txt.trim() || !!queueError} onClick={async () => { if (await onAddQueue(txt.trim())) setTxt(''); }}>Add</button>
+          <button style={pBtn('solid')} disabled={!txt.trim() || !!queueError || busy} onClick={wrap(async () => { if (await onAddQueue(txt.trim())) clearTxt(); })}>Add</button>
         </div>
       </div>
       {open.map((q, i) => (
@@ -10501,7 +11316,7 @@ function ShobhaScreen({ data, onAddQueue, onCover, onAddUpdate, flash }) {
           {coverFor === q ? (
             <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' }}>
               <input type="date" aria-label="Covered on" value={coverDate} onChange={e => setCoverDate(e.target.value)} style={{ ...pInput, flex: 1 }} />
-              <button style={pBtn('solid')} disabled={!coverDate} onClick={async () => { if (await onCover(q, coverDate)) setCoverFor(null); }}>Save</button>
+              <button style={pBtn('solid')} disabled={!coverDate || busy} onClick={wrap(async () => { if (await onCover(q, coverDate)) setCoverFor(null); })}>Save</button>
               <button style={pBtn()} onClick={() => setCoverFor(null)}>Cancel</button>
             </div>
           ) : <button style={pBtn('ghost', { marginTop: 10 })} onClick={() => { setCoverFor(q); setCoverDate(pLocalISO()); }}>Mark covered</button>}
@@ -10532,9 +11347,11 @@ function ShobhaScreen({ data, onAddQueue, onCover, onAddUpdate, flash }) {
 
 function GapsScreen({ data, onAddGap }) {
   const { outside, outsideMissing, outsideError } = data;
-  const [theme, setTheme] = useState('');
-  const [owners, setOwners] = useState('');
-  const [options, setOptions] = useState('');
+  const [gap, setGap, clearGap] = window.useDraft('practice', 'gap', { theme: '', owners: '', options: '' });
+  const theme = gap?.theme || '', owners = gap?.owners || '', options = gap?.options || '';
+  const setTheme = (v) => setGap(g => ({ ...g, theme: v }));
+  const setOwners = (v) => setGap(g => ({ ...g, owners: v }));
+  const setOptions = (v) => setGap(g => ({ ...g, options: v }));
   const [busy, setBusy] = useState(false);
   const items = outside?.items || [];
   return (
@@ -10567,6 +11384,7 @@ function GapsScreen({ data, onAddGap }) {
         <input aria-label="Gap owners" value={owners} onChange={e => setOwners(e.target.value)} placeholder="Who could help (comma-separated, optional)" style={{ ...pInput, marginBottom: 8 }} />
         <textarea aria-label="Gap options" rows={3} value={options} onChange={e => setOptions(e.target.value)} placeholder="Options, one per line (optional)" style={{ ...pInput, minHeight: 80, marginBottom: 8, resize: 'vertical' }} />
         <button style={pBtn('solid', { width: '100%' })} disabled={!theme.trim() || busy || !!outsideError} onClick={async () => {
+          if (busy) return;
           setBusy(true);
           const ok = await onAddGap({
             theme: theme.trim(),
@@ -10574,7 +11392,7 @@ function GapsScreen({ data, onAddGap }) {
             options: options.split('\n').map(x => x.trim()).filter(Boolean),
           });
           setBusy(false);
-          if (ok) { setTheme(''); setOwners(''); setOptions(''); }
+          if (ok) clearGap();
         }}>Add</button>
       </div>
     </div>
@@ -10664,7 +11482,7 @@ function PracticeApp() {
       pRead(P_KEYS.stuckMap), pRead(P_KEYS.log(yk)), pRead(P_KEYS.queue), pRead(P_KEYS.outside), pRead(P_KEYS.progress),
     ]);
     setData({
-      loaded: true, dayKey: dk,
+      loaded: true, dayKey: dk, loadTick: Date.now(),
       playbook: pb.data, playbookMissing: pb.missing, playbookError: pb.error,
       homework: hw.data, homeworkMissing: hw.missing,
       today: td.data, todayMissing: td.missing, todayError: td.error,
@@ -10691,18 +11509,64 @@ function PracticeApp() {
   const push = (o) => { setStack(st => [...st, { ...o, key: `${o.type}-${Date.now()}-${st.length}` }]); toTop(); };
   const pop = () => { setStack(st => st.slice(0, -1)); toTop(); };
 
-  const logRep = async (entry) => {
-    try {
-      const doc = await pAppendLog(entry);
-      setData(d => ({ ...d, todayLog: doc, todayLogError: null, dayKey: pDayKey() }));
-      const name = pFindPractice(data.playbook, entry.practiceId)?.name || entry.practiceId;
-      flash(pSavedMsg(doc, `Logged: ${name}${pLevel(entry.level) != null ? ` · level ${pLevel(entry.level)}` : ''}`));
-      return true;
-    } catch (e) {
-      flash(`❌ ${e.message}`);
-      return false;
-    }
+  // Puts a changed log doc on screen if it is today's.
+  const showLog = (dayKey, doc) => { if (dayKey === pDayKey()) setData(d => ({ ...d, todayLog: doc, todayLogError: null, dayKey })); };
+  // Undo and "Add note" for one logged entry (by its id), for the shared Saved bar.
+  const entryActions = (dayKey, ref) => ({
+    undo: async () => { const doc = await pRemoveEntry(dayKey, ref); showLog(dayKey, doc); return pWhere.get(doc) || 'cloud'; },
+    addNote: async (text) => {
+      const doc = await pUpdate(P_KEYS.log(dayKey), null, (d) => {
+        const hit = pFindEntry(d, ref);
+        if (!hit) throw new Error('That entry is no longer there.');
+        hit.myNote = hit.myNote ? `${hit.myNote}\n${text}` : text;
+        return d;
+      });
+      showLog(dayKey, doc);
+      return pWhere.get(doc) || 'cloud';
+    },
+  });
+
+  // Logs one rep once: a double tap or a repeat within 60 seconds shows "Already logged · Log again".
+  const logRep = async (entry, opts = {}) => {
+    const name = pFindPractice(data.playbook, entry.practiceId)?.name || entry.practiceId;
+    const what = `${name}${pLevel(entry.level) != null ? ` · level ${pLevel(entry.level)}` : ''}`;
+    const r = await window.nwLog({
+      tab: 'practice', what, scope: 'practice-log', sig: pEntrySig({ ...entry, source: entry.source || 'app' }), force: opts.force,
+      run: async (o) => {
+        const when = new Date();
+        const dayKey = pDayKey(when);
+        try {
+          const doc = await pAppendLog(entry, when, { force: opts.force || (o && o.force) });
+          showLog(dayKey, doc);
+          flash(pSavedMsg(doc, `Logged: ${what}`));
+          const saved = doc.entries[doc.entries.length - 1];
+          return { where: pWhere.get(doc) || 'cloud', ref: { id: saved.id, time: saved.time, day: dayKey }, ...entryActions(dayKey, { id: saved.id }) };
+        } catch (e) {
+          if (e.repeat) { window.nwShowBar({ tab: 'practice', mode: 'repeat', what, again: () => logRep(entry, { force: true }) }); return null; }
+          flash(`❌ ${e.message}`);
+          return null;
+        }
+      },
+    });
+    return !!(r && r.where);
   };
+
+  // Changes one of today's entries (time / my note); the old values go in its edits list.
+  const editEntry = async (ref, patch) => {
+    const dayKey = data.dayKey || pDayKey();
+    try {
+      const doc = await pEditEntry(dayKey, ref, patch);
+      showLog(dayKey, doc);
+      flash(pSavedMsg(doc, 'Entry changed'));
+      return true;
+    } catch (e) { flash(`❌ ${e.message}`); return false; }
+  };
+
+  // The shared bar after any other save on this tab. undo: () => Promise<doc>.
+  const savedBar = (doc, what, undo) => window.nwShowBar({
+    tab: 'practice', mode: 'saved', what, where: pWhere.get(doc) || 'cloud',
+    undo: undo ? async () => { const d = await undo(); return pWhere.get(d) || 'cloud'; } : undefined,
+  });
 
   const changeStatus = async (id, to, reason) => {
     try {
@@ -10717,6 +11581,17 @@ function PracticeApp() {
       });
       setData(d => ({ ...d, playbook: pb }));
       flash(pSavedMsg(pb, `Status changed to ${to}`));
+      const mine = (pb.practices || []).find(x => x.id === id)?.history?.slice(-1)[0];
+      savedBar(pb, `Status of ${id}`, () => pUpdate(P_KEYS.playbook, null, (doc) => {
+        const p = (doc.practices || []).find(x => x.id === id);
+        if (!p) throw new Error(`"${id}" is no longer in the playbook.`);
+        const k = (p.history || []).findIndex(h => JSON.stringify(h) === JSON.stringify(mine));
+        if (k < 0) throw new Error('That status change is no longer there.');
+        const from = String(mine.change || '').match(/^status (.*) → /);
+        if (from && p.status === to) p.status = from[1];
+        p.history.splice(k, 1);
+        return doc;
+      }).then(doc => { setData(d => ({ ...d, playbook: doc })); return doc; }));
       return true;
     } catch (e) { flash(`❌ ${e.message}`); return false; }
   };
@@ -10732,6 +11607,14 @@ function PracticeApp() {
       });
       setData(d => ({ ...d, homework: hw }));
       flash(pSavedMsg(hw, 'Update added'));
+      const mine = (hw.items || []).find(x => x.id === itemId)?.updates?.slice(-1)[0];
+      savedBar(hw, 'Homework update', () => pUpdate(P_KEYS.homework, null, (doc) => {
+        const it = (doc.items || []).find(x => x.id === itemId);
+        const k = (it?.updates || []).findIndex(u => JSON.stringify(u) === JSON.stringify(mine));
+        if (k < 0) throw new Error('That update is no longer there.');
+        it.updates.splice(k, 1);
+        return doc;
+      }).then(doc => { setData(d => ({ ...d, homework: doc })); return doc; }));
       return true;
     } catch (e) { flash(`❌ ${e.message}`); return false; }
   };
@@ -10745,9 +11628,18 @@ function PracticeApp() {
         return doc;
       }).then(doc => { setData(d => ({ ...d, outside: doc, outsideMissing: false })); return doc; });
       flash(pSavedMsg(saved, 'Saved to Gaps as a proposal'));
+      savedBar(saved, 'Proposal', () => removeItem(P_KEYS.outside, saved.items[saved.items.length - 1], 'outside'));
       return true;
     } catch (e) { flash(`❌ ${e.message}`); return false; }
   };
+
+  // Undo of an item appended to a doc's items list: removes that exact item.
+  const removeItem = (key, item, field) => pUpdate(key, null, (doc) => {
+    const k = (doc.items || []).findIndex(x => JSON.stringify(x) === JSON.stringify(item));
+    if (k < 0) throw new Error('That item is no longer there.');
+    doc.items.splice(k, 1);
+    return doc;
+  }).then(doc => { setData(d => ({ ...d, [field]: doc })); return doc; });
 
   const addQueueItem = async (item) => {
     try {
@@ -10758,6 +11650,7 @@ function PracticeApp() {
       });
       setData(d => ({ ...d, queue: doc, queueMissing: false }));
       flash(pSavedMsg(doc, 'Added to the queue'));
+      savedBar(doc, 'Queue item', () => removeItem(P_KEYS.queue, doc.items[doc.items.length - 1], 'queue'));
       return true;
     } catch (e) { flash(`❌ ${e.message}`); return false; }
   };
@@ -10774,6 +11667,13 @@ function PracticeApp() {
       });
       setData(d => ({ ...d, queue: doc }));
       flash(pSavedMsg(doc, 'Marked covered'));
+      savedBar(doc, 'Marked covered', () => pUpdate(P_KEYS.queue, null, (d) => {
+        const it = (d.items || []).find(x => x.item === q.item && x.since === q.since && x.coveredOn === date);
+        if (!it) throw new Error('That queue item changed.');
+        if (q.status === undefined) delete it.status; else it.status = q.status;
+        if (q.coveredOn === undefined) delete it.coveredOn; else it.coveredOn = q.coveredOn;
+        return d;
+      }).then(doc2 => { setData(d => ({ ...d, queue: doc2 })); return doc2; }));
       return true;
     } catch (e) { flash(`❌ ${e.message}`); return false; }
   };
@@ -10787,12 +11687,20 @@ function PracticeApp() {
       });
       setData(d => ({ ...d, outside: doc, outsideMissing: false }));
       flash(pSavedMsg(doc, 'Gap added'));
+      savedBar(doc, 'Gap', () => removeItem(P_KEYS.outside, doc.items[doc.items.length - 1], 'outside'));
       return true;
     } catch (e) { flash(`❌ ${e.message}`); return false; }
   };
 
   const start = (id, source = 'app', note) => push({ type: 'flow', id, source, note });
   const top = stack[stack.length - 1];
+  // "Continue" on an unfinished flow (from the drafts doc).
+  const continueDraft = (d) => (d.id === 'waking' ? push({ type: 'waking' }) : start(d.v.practiceId, d.v.source || 'app', d.v.note || undefined));
+  // Where am I, for the Note button (flows and Waking up say their own step).
+  useEffect(() => {
+    if (!top) window.nwSetContext('practice', { screen: (P_SCREENS.find(x => x.id === screen) || {}).label + (detailId ? ` · ${detailId}` : ''), practice: detailId || null });
+    else if (top.type === 'stuck') window.nwSetContext('practice', { screen: 'Stuck' });
+  }, [top, screen, detailId]);
 
   // Lower layers stay mounted (hidden) so going back keeps their state, e.g. Claude's picks on Stuck.
   const renderOverlay = (o) => {
@@ -10810,8 +11718,8 @@ function PracticeApp() {
 
   let base;
   if (!data.loaded) base = <div style={{ fontSize: 14, color: PC.muted }}>Loading…</div>;
-  else if (screen === 'today') base = <TodayScreen data={data} onLog={logRep} onStart={start} onWaking={() => push({ type: 'waking' })} onAddUpdate={addHomeworkUpdate} />;
-  else if (screen === 'library') base = <LibraryScreen data={data} detailId={detailId} setDetailId={setDetailId} onStart={start} onLog={logRep} onStatus={changeStatus} />;
+  else if (screen === 'today') base = <TodayScreen data={data} onLog={logRep} onStart={start} onWaking={() => push({ type: 'waking' })} onAddUpdate={addHomeworkUpdate} onEditEntry={editEntry} onContinue={continueDraft} unfinishedKey={`${data.loadTick || 0}-${stack.length}`} />;
+  else if (screen === 'library') base = <LibraryScreen data={data} detailId={detailId} setDetailId={setDetailId} onStart={start} onLog={logRep} onStatus={changeStatus} refreshKey={refreshKey} />;
   else if (screen === 'learn') base = <LearnScreen data={data} onStart={start} refreshKey={refreshKey} />;
   else if (screen === 'shobha') base = <ShobhaScreen data={data} onAddQueue={addQueueItem} onCover={markCovered} onAddUpdate={addHomeworkUpdate} flash={flash} />;
   else if (screen === 'gaps') base = <GapsScreen data={data} onAddGap={addGap} />;
@@ -10854,6 +11762,7 @@ function PracticeApp() {
 }
 
 window.PracticeApp = PracticeApp;
+window.pSaveAsk = pSaveAsk; // Kaizen's session-pattern analysis saves its answer the same way
   </script>
 
   <!-- App Shell -->
@@ -11344,6 +12253,89 @@ function NwAppInfo({ active }) {
   );
 }
 
+// ── Claude cost tracker (System tab) ──
+// ESTIMATES — update these when Anthropic's prices change. US dollars per million tokens, Sonnet 5.5.
+// Cache writes cost 1.25× input; cache reads 0.1× input.
+const NW_CLAUDE_PRICES_USD_PER_MTOK = { input: 2, output: 10, cacheWrite: 2 * 1.25, cacheRead: 2 * 0.1 };
+// The monthly spend limit set in the Anthropic Console.
+const MONTHLY_LIMIT_USD = 5;
+const NW_ASK_KIND_NAMES = { 'stuck': 'Ask Claude (Stuck)', 'stuck-else': 'Something else', 'coach-me': 'Coach me', 'outside': 'Look outside', 'draft-shobha': 'Draft for Dr. Shobha', 'kaizen-foci': 'Kaizen session patterns' };
+
+// Every saved Claude answer this month (practice:asks:<YYYY_MM_DD>), counted by kind.
+function nwClaudeCost(records, prices = NW_CLAUDE_PRICES_USD_PER_MTOK) {
+  const zero = () => ({ calls: 0, input: 0, output: 0, cacheWrite: 0, cacheRead: 0, usd: 0 });
+  const total = zero(), byKind = {};
+  records.forEach(r => {
+    const u = r && r.usage ? r.usage : {};
+    const t = { input: +u.input_tokens || 0, output: +u.output_tokens || 0, cacheWrite: +u.cache_creation_input_tokens || 0, cacheRead: +u.cache_read_input_tokens || 0 };
+    const usd = (t.input * prices.input + t.output * prices.output + t.cacheWrite * prices.cacheWrite + t.cacheRead * prices.cacheRead) / 1e6;
+    const k = (r && r.kind) || 'unknown';
+    [total, byKind[k] || (byKind[k] = zero())].forEach(x => { x.calls++; x.input += t.input; x.output += t.output; x.cacheWrite += t.cacheWrite; x.cacheRead += t.cacheRead; x.usd += usd; });
+  });
+  // What the cache reads would have cost as plain input, minus the extra paid to write the cache.
+  const readSaved = total.cacheRead * (prices.input - prices.cacheRead) / 1e6;
+  const writeExtra = total.cacheWrite * (prices.cacheWrite - prices.input) / 1e6;
+  return { total, byKind, readSaved, writeExtra, net: readSaved - writeExtra, cacheReadUsd: total.cacheRead * prices.cacheRead / 1e6, cacheWriteUsd: total.cacheWrite * prices.cacheWrite / 1e6 };
+}
+async function nwMonthAsks(now = new Date()) {
+  const ym = `${now.getFullYear()}_${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const prefix = `practice:asks:${ym}_`;
+  let rows = null;
+  try { rows = window.storage.listPrefix ? await window.storage.listPrefix(prefix) : null; } catch (_) { rows = null; }
+  let fromDevice = false;
+  if (!Array.isArray(rows)) {
+    // Offline or the list failed: each day of this month, as this device has it.
+    fromDevice = true;
+    rows = [];
+    for (let d = 1; d <= now.getDate(); d++) {
+      const key = `${prefix}${String(d).padStart(2, '0')}`;
+      try { const r = await window.storage.get(key); if (r && r.value) rows.push({ key, value: r.value }); } catch (_) {}
+    }
+  }
+  const records = [];
+  let unreadable = 0;
+  rows.forEach(r => { try { const doc = JSON.parse(r.value); (Array.isArray(doc?.entries) ? doc.entries : []).forEach(e => records.push(e)); } catch (_) { unreadable++; } });
+  return { records, days: rows.length, unreadable, fromDevice };
+}
+const nwUsd = (x) => `$${x < 0.01 && x > 0 ? x.toFixed(4) : x.toFixed(2)}`;
+function NwClaudeCost({ active }) {
+  const [st, setSt] = useState(null);
+  useEffect(() => { if (!active) return; let off = false; nwMonthAsks().then(r => { if (!off) setSt(r); }); return () => { off = true; }; }, [active]);
+  const row = { display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 12, padding: '4px 0', color: '#ddd' };
+  const box = { background: '#1a1a1a', padding: 16, borderRadius: 12, border: '1px solid #333', marginBottom: 16 };
+  if (!st) return <div data-nw-cost style={box}><div style={{ color: '#aaa', fontSize: 11, letterSpacing: 1 }}>CLAUDE THIS MONTH</div><div style={{ fontSize: 12, color: '#888', marginTop: 8 }}>Reading…</div></div>;
+  const c = nwClaudeCost(st.records);
+  const pct = c.total.usd / MONTHLY_LIMIT_USD * 100;
+  const kinds = Object.keys(c.byKind).sort((a, b) => c.byKind[b].usd - c.byKind[a].usd);
+  return (
+    <div data-nw-cost style={box}>
+      <div style={{ color: '#aaa', fontSize: 11, letterSpacing: 1, marginBottom: 8 }}>CLAUDE THIS MONTH (ESTIMATE)</div>
+      <div style={row}><span>Calls</span><span data-nw-cost-calls>{c.total.calls}</span></div>
+      <div style={row}><span>Estimated cost</span><span data-nw-cost-total>{nwUsd(c.total.usd)}</span></div>
+      <div style={{ ...row, marginTop: 4 }}><span>Monthly limit</span><span data-nw-cost-limit>{nwUsd(c.total.usd)} of {nwUsd(MONTHLY_LIMIT_USD)} ({Math.round(pct)}%)</span></div>
+      <div style={{ height: 6, background: '#2a2a2a', borderRadius: 3, overflow: 'hidden', marginTop: 4 }}>
+        <div style={{ width: `${Math.min(100, pct)}%`, height: '100%', background: pct >= 80 ? '#fbbf24' : '#4ECDC4' }} />
+      </div>
+      <div style={{ color: '#aaa', fontSize: 11, letterSpacing: 1, margin: '12px 0 4px' }}>BY KIND</div>
+      {kinds.length === 0 && <div style={{ fontSize: 12, color: '#888' }}>No calls saved this month.</div>}
+      {kinds.map(k => (
+        <div key={k} data-nw-cost-kind={k} style={row}><span>{NW_ASK_KIND_NAMES[k] || k}</span><span>{c.byKind[k].calls} call{c.byKind[k].calls === 1 ? '' : 's'} · {nwUsd(c.byKind[k].usd)}</span></div>
+      ))}
+      <div style={{ color: '#aaa', fontSize: 11, letterSpacing: 1, margin: '12px 0 4px' }}>CACHING</div>
+      <div style={row}><span>Cache reads</span><span data-nw-cache-reads>{c.total.cacheRead.toLocaleString('en-US')} tokens · {nwUsd(c.cacheReadUsd)}</span></div>
+      <div style={row}><span>Cache writes</span><span data-nw-cache-writes>{c.total.cacheWrite.toLocaleString('en-US')} tokens · {nwUsd(c.cacheWriteUsd)}</span></div>
+      <div style={{ ...row, color: c.net > 0 ? '#86efac' : '#fbbf24' }} data-nw-cache-net>
+        <span>{c.net > 0 ? 'Caching is paying off' : c.total.cacheRead || c.total.cacheWrite ? 'Caching is not paying off yet' : 'No caching yet'}</span>
+        <span>{c.net >= 0 ? 'saves' : 'costs'} {nwUsd(Math.abs(c.net))}</span>
+      </div>
+      <div style={{ fontSize: 11, color: '#888', marginTop: 6, lineHeight: 1.5 }}>
+        From the usage saved with each answer ({st.days} day{st.days === 1 ? '' : 's'} with calls{st.fromDevice ? ", this device's copy" : ''}{st.unreadable ? `, ${st.unreadable} unreadable` : ''}). Prices are estimates: ${NW_CLAUDE_PRICES_USD_PER_MTOK.input}/M input, ${NW_CLAUDE_PRICES_USD_PER_MTOK.output}/M output, cache writes 1.25× input, cache reads 0.1× input.
+      </div>
+    </div>
+  );
+}
+window.nwClaudeCost = nwClaudeCost;
+
 // System tab: every doc and part with its size as a % of Firestore's 1,048,576-byte limit, largest first.
 function NwDocSizes({ active }) {
   const [st, setSt] = useState({ busy: false, rows: null, err: '' });
@@ -11612,6 +12604,7 @@ function App() {
       <div style={{ ...paneStyle('system'), display: activeTab === 'system' ? 'flex' : 'none', flexDirection: 'column', padding: 24, color: '#eee', fontFamily: "'Space Mono', monospace" }}>
         <h2 style={{ fontSize: 22, color: '#FF6B6B', marginBottom: 16 }}>System Maintenance</h2>
         <NwAppInfo active={activeTab === 'system'} />
+        <NwClaudeCost active={activeTab === 'system'} />
         <p style={{ fontSize: 13, color: '#888', marginBottom: 24, lineHeight: 1.6 }}>
           Backs up everything in the database, including the Practice tab and anything added later. Run weekly and drop the file into Google Drive as "Elite Maintenance."
         </p>
@@ -11714,7 +12707,10 @@ function App() {
         <NwDocSizes active={activeTab === 'system'} />
       </div>
 
-      {window.NwSaveStatusLine && <window.NwSaveStatusLine />}
+      {window.NwSavedBar && <window.NwSavedBar />}
+      {window.NwQuickNote
+        ? <window.NwQuickNote tab={activeTab}>{window.NwSaveStatusLine && <window.NwSaveStatusLine />}</window.NwQuickNote>
+        : window.NwSaveStatusLine && <window.NwSaveStatusLine />}
 
       <nav style={{ background: '#1a1a1a', borderTop: '1px solid #333', paddingBottom: 'env(safe-area-inset-bottom)', flexShrink: 0, position: 'relative', zIndex: 9999 }}>
         <div style={{ maxWidth: 720, margin: '0 auto', display: 'flex' }}>

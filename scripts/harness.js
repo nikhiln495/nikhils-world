@@ -6,6 +6,8 @@
 //                             sizes and banners, the device meter, offline reads
 // 5. backup-test.js all     — backup format 3, safe Drive sync, local-time file names, the Apps Script
 // 6. sw-test.js             — opens offline at / and /nikhils-world/ (service worker, manifest, new deploys)
+// 7. notes-test.js all      — drafts in every tab, notes, the Saved / Add note / Undo bar, log tidy, Kaizen
+//                             doneAt, two-device merges, the Claude cost tracker, room on this device, offline
 // Plus: index.html must not call api.anthropic.com directly (everything goes through the AI proxy).
 // The live Firestore is never touched: every run uses an in-memory mock or fake Firestore.
 const { spawnSync } = require('child_process');
@@ -20,6 +22,7 @@ const steps = [
   ['storage layer', ['storage-test.js', 'all']],
   ['backups and Drive', ['backup-test.js', 'all']],
   ['offline (service worker)', ['sw-test.js']],
+  ['drafts, notes, saved bar, cost, device room', ['notes-test.js', 'all']],
 ];
 const results = [];
 const html = fs.readFileSync(path.join(dir, '..', 'index.html'), 'utf8');

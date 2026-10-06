@@ -187,6 +187,64 @@ The same check runs when a screen saves a key whose last read came from this dev
 cloud couldn't be reached. The app shows a banner naming the copy and never reads it on its own. Compare
 it with the main doc by hand. Backups keep it.
 
+The exception is **drafts and notes docs** (`practice:drafts`, `drafts:<tab>`, `notes:<YYYY_MM_DD>`):
+they never get a conflict copy. Every save of them (online or uploaded later) is merged with the cloud
+copy first, as described next.
+
+## Drafts and notes (merged, never a conflict copy)
+
+**Drafts** — `practice:drafts` (the Practice tab) and `drafts:<tab>` for the other tabs (`drafts:kaizen`,
+`drafts:food`, `drafts:health`, `drafts:roulette`, `drafts:pending`, `drafts:system`). One small doc per tab:
+
+```json
+{ "drafts": { "forgot": { "v": "Keys in the car", "at": 1791133209696 },
+              "flow:sc-break": { "v": { "practiceId": "sc-break", "i": 1, "before": 7, "notes": { "0": "Tight chest" }, "myNote": "" }, "at": 1791133210000 },
+              "tada": { "v": null, "at": 1791133211216 } } }
+```
+
+`v` is what is typed (a string, a form object, or a flow's progress); `at` is when it was typed (ms).
+`v: null` is a cleared draft (cleared on submit); it is kept so it beats an older copy from another device.
+Merge: per draft id, the larger `at` wins. Drafts older than 7 days are dropped; the doc is kept under 50 KB
+(cleared drafts are dropped first, then the oldest). A single draft over 20,000 characters isn't kept.
+
+**Notes** — `notes:<YYYY_MM_DD>` (the device's local date):
+
+```json
+{ "date": "2026-10-04",
+  "notes": [ { "id": "note_mux…", "at": "2026-10-04T17:00:44.866Z", "u": 1791133244866, "tab": "practice",
+               "screen": "Guided flow", "practice": "countdown", "step": 1, "text": "…" },
+             { "id": "note_…", "at": "…", "u": 1791133250000, "tab": "health", "text": "With breakfast",
+               "ref": { "tab": "health", "what": "Taken: Etilaam", "day": "2026-10-04" } },
+             { "id": "note_old", "deleted": true, "u": 1791133260000 } ] }
+```
+
+`tab` is the app tab (`roulette` = Play, `kaizen`, `food` = Fuel, `health` = Vitals, `practice`, `pending`,
+`system`); `screen`, `practice`, `step` say where the Note button was pressed; `ref` names the entry a note
+from the Saved bar's "Add note" belongs to, when that entry has no note field of its own (tab, what, and its
+id, time or day). Merge: per note id, the larger `u` wins; a removed note stays as `{ id, deleted, u }`.
+Notes are listed by `at`.
+
+## Practice log entries (practice:log:<YYYY_MM_DD>)
+
+New entries also carry `id` (for Undo and edits), `at` (ISO time it was logged), and when given `myNote`
+(his own note: "Anything else?", the Saved bar's Add note, or an edit) and `stepNotes:
+[{ step: <1-based>, text: <step text>, note }]` (only steps with a note; for Waking up, Q1 = 1, Q2 = 2,
+steps from 3). `note` keeps its old meaning (e.g. the "Asked Claude" context). An edit of `time` or `myNote`
+keeps the old value in `edits: [{ at, field, from }]`. Entries are stored in the order logged; screens show
+them in time order (no time last).
+
+## Kaizen tasks
+
+A task or subtask marked done in the app gets `doneAt` (ISO time); reopening it (or Undo) removes it. Tasks
+finished before this have no `doneAt`.
+
+## Claude answers (practice:asks:<YYYY_MM_DD>)
+
+Every Claude call saves `{ time, kind, words, prompt, text, tools, sources, model, usage }`; `usage` has
+`input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`. Kinds: `stuck`,
+`stuck-else`, `coach-me`, `outside`, `draft-shobha` (Practice) and `kaizen-foci` (Kaizen's session-pattern
+analysis). The System tab's cost tracker reads this month's docs.
+
 ## On the device (localStorage)
 
 - Each key's latest value is kept under the key itself: what this device saved, refreshed from the cloud on
@@ -202,6 +260,13 @@ it with the main doc by hand. Backups keep it.
   many parts the doc had.
 - `__nw_deleted` — `{ key: [markers] }`: this device's copy of each sealed log's `deleted` list.
 - `__nw_last_cloud_save`, `__nw_conflicts`, `__nw_dismissed_sizes` — for the status line and banners.
+- `__nw_room_notes` — conflict copies made when the old `kaizen3:logs` device copy was tidied (one banner each).
+- **Room on this device:** `kaizen3:logs` (the old Kaizen log, only used offline for pre-July history) is
+  removed from the device once the device's saved data passes 60% of the 5 MB estimate and the device is
+  online: if every day in it matches the cloud's whole Kaizen history, it is removed; if any day is missing
+  or different, the whole copy is first written as `kaizen3_logs__conflict_<time>` (fields: `key`, `value`,
+  `conflictOf: "kaizen3_logs"`, `deviceCopy: true`, `days`: the days that differed, `savedAt`), read back to
+  confirm, and only then removed. Never while something for it (or for `kaizen4:logs`) waits to upload.
 
 ## Other docs
 
