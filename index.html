@@ -10673,6 +10673,15 @@ function pWakingSteps(where, blocks, playbook, today, homework) {
   }
   const dizzy = { text: 'Stay sitting, 5 slow breaths, then stand up slowly with a hand on something.' };
   const feet = pFindPractice(playbook, 'waking-ladder') ? { text: P_FEET, from: 'waking-ladder' } : null; // single step; allowed even if the ladder is not-working
+  // Waking sequence from the playbook (practice 'wake-sequence', field 'flow'). When present and usable, it replaces
+  // the fixed in-bed steps, so the sequence can change by editing the playbook, without a code change.
+  const seq = has('wake-sequence');
+  if (seq && Array.isArray(seq.flow) && seq.flow.length && where !== 'standing') {
+    const flow = seq.flow.filter(s => s && s.text).map(s => ({ text: pText(s.text), kind: s.kind, from: seq.id }));
+    const pre = out.filter(s => !/^Name only the first step/.test(s.text) && !/face down out of reach/.test(s.text));
+    if (blocks.includes('dizzy')) flow.splice(Math.max(flow.length - 1, 0), 0, dizzy);
+    return [...pre, ...flow];
+  }
   if (where === 'closed' || where === 'open') {
     if (has('passage-of-time')) out.push({ text: 'Count to 60 in your head. The clock stays hidden.', kind: 'count', from: 'passage-of-time' });
     if (has('countdown')) out.push({ text: 'Count down out loud: 5, 4, 3, 2, 1. Move on 1.', from: 'countdown' });

@@ -363,6 +363,44 @@ async function step3() {
     await finish(ctx, 'waking-timer');
   }
 
+  console.log('\n[Waking up: steps from the playbook wake-sequence flow]');
+  {
+    const flow = [
+      { text: 'Sit up and pull the sweater around you.' },
+      { text: 'Count to 60.', kind: 'count' },
+      { text: 'Count to 60 again.', kind: 'count' },
+      { text: 'Count to 60 a third time.', kind: 'count' },
+      { text: 'Stretch, with cyclic sighs.' },
+      { text: 'Put on music.' },
+      { text: 'Do the 5A.' },
+      { text: 'Feet down and turn on the light.' },
+    ];
+    const withSeq = (status) => { const pb = JSON.parse(F.base()['practice:playbook']); pb.practices.push({ id: 'wake-sequence', cat: 'wake', name: 'Wake sequence', status, stage: 'pre4', when: 'In bed', steps: [], flow }); return { ...F.base(), 'practice:playbook': JSON.stringify(pb), 'practice:today:2026_10_04': JSON.stringify(F.todayDoc('2026-10-04')) }; };
+    let ctx = await openPractice({ seed: withSeq('active'), now: '2026-10-04T07:10:00' });
+    let page = ctx.page;
+    await clickName(page, 'Waking up'); await clickName(page, 'Eyes open, lying down'); await clickName(page, 'Cold'); await clickName(page, 'Phone or video in hand'); await clickName(page, 'Dizzy or lightheaded'); await clickName(page, 'Next');
+    let seen = await stepsThrough(page);
+    const want = ['Pull the sweater or blanket around you first.', ...flow.slice(0, 7).map(f => f.text), 'Stay sitting, 5 slow breaths, then stand up slowly with a hand on something.', flow[7].text];
+    ok(JSON.stringify(seen) === JSON.stringify(want), 'wake-sequence flow replaces the in-bed steps (cold kept, phone step dropped, dizzy before the last) → ' + JSON.stringify(seen));
+    await clickName(page, 'Not yet, start over');
+    await clickName(page, 'Eyes open, lying down'); await clickName(page, 'Cold'); await clickName(page, 'Next');
+    let t = await visibleText(page);
+    seen = await stepsThrough(page);
+    ok(seen.length === 9 && /Step 1 of 9/.test(t) && seen[8] === flow[7].text, 'cold + lying, no dizzy: 9 steps');
+    await clickName(page, 'Not yet, start over');
+    await clickName(page, 'Standing'); await clickName(page, 'Next');
+    t = await visibleText(page);
+    ok(t.includes("First thing on today's plan: Self-compassion break"), 'standing ignores the flow');
+    await finish(ctx, 'waking-seq');
+
+    ctx = await openPractice({ seed: withSeq('not-working'), now: '2026-10-04T07:10:00' });
+    page = ctx.page;
+    await clickName(page, 'Waking up'); await clickName(page, 'Eyes open, lying down'); await clickName(page, 'Cold'); await clickName(page, 'Next');
+    seen = await stepsThrough(page);
+    ok(JSON.stringify(seen) === JSON.stringify(['Pull the sweater or blanket around you first.', 'Count to 60 in your head. The clock stays hidden.', 'Count down out loud: 5, 4, 3, 2, 1. Move on 1.', 'Sit up and put your feet on the floor.']), 'wake-sequence not-working → old in-bed steps');
+    await finish(ctx, 'waking-seq-off');
+  }
+
   console.log('\n[Stuck: stuck-map doc]');
   {
     let reply = toolUse([{ id: 'thought-stop', why: 'Say stop out loud and look at three things in the room.' }, { id: 'task-drop-reset', why: 'Stand still, then name the next task.' }, { id: 'elbow-prop', why: 'nw' }, { id: 'nope', why: 'x' }, { id: 'sc-break', why: 'Hand on chest, three sentences.' }, { id: 'one-word', why: 'Write one word.' }]);
