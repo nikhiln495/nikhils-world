@@ -85,6 +85,7 @@ function pageInit({ seed, now, offline, noList, fakeFirestore }) {
       });
       const coll = {
         doc: (id) => ({
+          id,
           get: () => { calls.push(['get', id]); return gate('get', id) || Promise.resolve(docSnap(id)); },
           // Stored as given (Dates stay Dates), like the SDK; merge isn't used by the app.
           set: (v) => {
@@ -104,7 +105,29 @@ function pageInit({ seed, now, offline, noList, fakeFirestore }) {
         where: (f, op, v) => query([[f, op, v]]),
         get: async () => { calls.push(['getAll']); return snapOf([...docs.keys()].map(docSnap)); },
       };
-      const db = { settings() {}, collection: () => coll };
+      // runTransaction like the SDK's: tx.get remembers which version of the doc was read, tx.set is applied
+      // only if the doc is still that version (else the function runs again, up to 5 times). A test can set
+      // window.__fakeBeforeCommit = (attempt) => {...} to change a doc just before the commit check, as another
+      // device would. Counted in window.__fakeTx = { runs, commits }.
+      window.__fakeTx = { runs: 0, commits: 0 };
+      const runTransaction = async (fn) => {
+        for (let attempt = 1; attempt <= 5; attempt++) {
+          window.__fakeTx.runs++;
+          const read = new Map(), pending = [];
+          const tx = {
+            get: async (r) => { calls.push(['tx.get', r.id]); read.set(r.id, docs.get(r.id)); return docSnap(r.id); },
+            set: (r, v) => { pending.push([r.id, v]); return tx; },
+          };
+          await fn(tx);
+          if (typeof window.__fakeBeforeCommit === 'function') await window.__fakeBeforeCommit(attempt);
+          if ([...read].some(([id, v]) => docs.get(id) !== v)) continue;
+          pending.forEach(([id, v]) => { calls.push(['tx.set', id]); order.push('set ' + id); docs.set(id, v); });
+          window.__fakeTx.commits++;
+          return;
+        }
+        throw Object.assign(new Error('transaction kept conflicting'), { code: 'aborted' });
+      };
+      const db = { settings() {}, collection: () => coll, runTransaction };
       const fs = () => db;
       fs.FieldPath = { documentId: () => ID };
       window.firebase = { apps: [], initializeApp() { this.apps.push({}); }, firestore: fs };
