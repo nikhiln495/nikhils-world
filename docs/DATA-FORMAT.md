@@ -187,9 +187,12 @@ The same check runs when a screen saves a key whose last read came from this dev
 cloud couldn't be reached. The app shows a banner naming the copy and never reads it on its own. Compare
 it with the main doc by hand. Backups keep it.
 
-The exception is **drafts and notes docs** (`practice:drafts`, `drafts:<tab>`, `notes:<YYYY_MM_DD>`):
-they never get a conflict copy. Every save of them (online or uploaded later) is merged with the cloud
-copy first, as described next.
+The exception is **drafts, notes and practice entries docs** (`practice:drafts`, `drafts:<tab>`,
+`notes:<YYYY_MM_DD>`, `practice:log:<YYYY_MM_DD>`, `practice:asks:<YYYY_MM_DD>`): they never get a conflict
+copy. Every save of them (online or uploaded later) is merged with the cloud copy first, as described next.
+(Before the practice entries docs were merged, a save from a device whose copy was behind the cloud was
+kept as `practice_asks_<day>__conflict_<time>` / `practice_log_<day>__conflict_<time>`. Those copies are
+still in `appdata`; their entries are not in the main doc.)
 
 ## Drafts and notes (merged, never a conflict copy)
 
@@ -223,6 +226,24 @@ Merge: per draft id, the larger `at` wins. Drafts older than 7 days are dropped;
 from the Saved bar's "Add note" belongs to, when that entry has no note field of its own (tab, what, and its
 id, time or day). Merge: per note id, the larger `u` wins; a removed note stays as `{ id, deleted, u }`.
 Notes are listed by `at`.
+
+## Practice entries from two devices (practice:log:<day>, practice:asks:<day>)
+
+Both docs are `{ "date", "entries": [ … ] }`. Every save is one Firestore transaction: read the cloud doc,
+join this device's entries into it, write it back only if the doc is still the version that was read (if
+another device wrote in between, Firestore runs it again). Merge: entries are joined by `id`; none is
+dropped; per id the larger `u` (ms; else `at`) wins, and on a tie this device's copy wins. A doc that is
+split, has sealed parts or would pass 900,000 bytes is merged by reading it first and writing it with the
+usual splitting. Offline, the save waits on the device and goes through the same merge when it uploads.
+
+- `id` — on every entry. Claude answers: `a_<time><random>`. Reps: `e_<time><random>`. An entry saved before
+  ids gets `h_<hash of its text>` (the same on every device) the first time it is saved.
+- `device` — a name for the device that saved it, e.g. `"iPhone Safari k3f9"` (kept in this device's
+  `__nw_device`). Entries saved before this have none.
+- `u` — when the entry was last changed on a device, in ms (it changes on an edit).
+- `at` — when it was first saved (ISO). Claude answers now have `at`; old ones only have `time` (HH:MM).
+- A removed entry (Undo) stays as `{ "id", "deleted": true, "u" }`, so an older copy from another device
+  cannot bring it back. Readers leave these out (`pRead`, `pLive`); a backup keeps them.
 
 ## Practice log entries (practice:log:<YYYY_MM_DD>)
 
