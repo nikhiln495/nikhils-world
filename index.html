@@ -807,7 +807,8 @@
       const entriesWrite = async (key, id, value, at) => {
         if (!db || typeof db.runTransaction !== 'function') return null;
         let merged = value, written = null;
-        await timed(db.runTransaction(async (tx) => {
+        try {
+          await timed(db.runTransaction(async (tx) => {
           written = null;
           const s = await tx.get(ref(id));
           const cur = s.exists ? (s.data() || {}) : null;
@@ -817,7 +818,14 @@
           if (docBytes(id, next) > SAFE) return;
           tx.set(ref(id), next);
           written = next;
-        }), id);
+          }), id);
+        } catch (e) {
+          // Offline or timed out: the save waits on this device as before. Any other refusal (e.g. the database
+          // rules don't allow transactions): fall back to the read-merge-write in cloudWrite, which merges too.
+          if (e && (e.nwTimeout || e.nwReason)) throw e;
+          console.warn('Transaction save failed for ' + key + ', merging without it:', e);
+          return null;
+        }
         if (!written) return null;
         try { localStorage.setItem(key, merged); } catch (_) {}
         metaCache.set(id, metaOf(written));
@@ -9751,7 +9759,7 @@ const pSerial = (fn) => {
 // Read-modify-write. Never overwrites a doc that exists but can't be read.
 // makeEmpty: () => fresh doc if missing, or null to refuse when missing.
 function pUpdate(key, makeEmpty, mutate) {
-  if (P_ENTRIES_KEY.test(key)) return pUpdateEntries(key, makeEmpty, mutate);
+  if (P_ENTRIES_KEY.test(key) && typeof window.storage.entryIdOf === 'function') return pUpdateEntries(key, makeEmpty, mutate);
   return pSerial(async () => {
     const cur = await pRead(key);
     if (cur.error) throw new Error(`${key} is ${cur.error}; not saving so nothing gets overwritten.`);
@@ -12421,7 +12429,7 @@ async function nwMonthAsks(now = new Date()) {
   }
   const records = [];
   let unreadable = 0;
-  rows.forEach(r => { try { const doc = JSON.parse(r.value); pLive(Array.isArray(doc?.entries) ? doc.entries : []).forEach(e => records.push(e)); } catch (_) { unreadable++; } });
+  rows.forEach(r => { try { const doc = JSON.parse(r.value); (Array.isArray(doc?.entries) ? doc.entries : []).filter(e => !(e && e.deleted === true)).forEach(e => records.push(e)); } catch (_) { unreadable++; } });
   return { records, days: rows.length, unreadable, fromDevice };
 }
 const nwUsd = (x) => `$${x < 0.01 && x > 0 ? x.toFixed(4) : x.toFixed(2)}`;

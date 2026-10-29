@@ -115,13 +115,18 @@ function pageInit({ seed, now, offline, noList, fakeFirestore }) {
           window.__fakeTx.runs++;
           const read = new Map(), pending = [];
           const tx = {
-            get: async (r) => { calls.push(['tx.get', r.id]); read.set(r.id, docs.get(r.id)); return docSnap(r.id); },
+            get: async (r) => { calls.push(['tx.get', r.id]); const g = gate('get', r.id); if (g) await g; read.set(r.id, docs.get(r.id)); return docSnap(r.id); },
             set: (r, v) => { pending.push([r.id, v]); return tx; },
           };
           await fn(tx);
           if (typeof window.__fakeBeforeCommit === 'function') await window.__fakeBeforeCommit(attempt);
           if ([...read].some(([id, v]) => docs.get(id) !== v)) continue;
-          pending.forEach(([id, v]) => { calls.push(['tx.set', id]); order.push('set ' + id); docs.set(id, v); });
+          for (const [id, v] of pending) {
+            calls.push(['tx.set', id]);
+            const apply = () => { order.push('set ' + id); docs.set(id, v); };
+            const g = gate('set', id, v, apply);   // the test's failure switch applies to a commit too
+            if (g) await g; else apply();
+          }
           window.__fakeTx.commits++;
           return;
         }
