@@ -237,7 +237,8 @@ async function part3() {
   await click(bar(page), 'Undo');
   await page.waitForTimeout(600);
   log = await cloud(page, `practice_log_${DAY}`);
-  ok(log.entries.length === 1 && log.entries[0].level === 2 && log.entries[0].myNote === 'Still under the blanket', 'Undo removes exactly that entry (Level 3); Level 2 and its note stay');
+  const live = log.entries.filter(e => !e.deleted);
+  ok(live.length === 1 && live[0].level === 2 && live[0].myNote === 'Still under the blanket' && log.entries.filter(e => e.deleted).length === 1, 'Undo removes exactly that entry (Level 3, left as a removed marker so another device cannot bring it back); Level 2 and its note stay');
   ok((await bar(page).innerText()).startsWith('Removed'), 'the bar says "Removed"');
   // Bar disappears after 30 s.
   await click(page, 'Level 1');
