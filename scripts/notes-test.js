@@ -1,7 +1,7 @@
 // Checks for drafts, notes, the shared Saved bar, log tidy, the Claude cost tracker and room on this device.
 // Runs the page's REAL window.storage against the in-memory fake Firestore from p1-check.js (the live
 // Firestore, its rules, the Cloud Functions and Google Drive are never touched; the AI proxy is a local fake).
-// Run: NODE_PATH=$(npm root -g) node scripts/notes-test.js [1-10|all]
+// Run: NODE_PATH=$(npm root -g) node scripts/notes-test.js [1-11|all]
 const { openPage } = require('./p1-check');
 const F = require('./p1-fixtures');
 
@@ -237,7 +237,8 @@ async function part3() {
   await click(bar(page), 'Undo');
   await page.waitForTimeout(600);
   log = await cloud(page, `practice_log_${DAY}`);
-  ok(log.entries.length === 1 && log.entries[0].level === 2 && log.entries[0].myNote === 'Still under the blanket', 'Undo removes exactly that entry (Level 3); Level 2 and its note stay');
+  const live = log.entries.filter(e => !e.deleted);
+  ok(live.length === 1 && live[0].level === 2 && live[0].myNote === 'Still under the blanket' && log.entries.filter(e => e.deleted).length === 1, 'Undo removes exactly that entry (Level 3, left as a removed marker so another device cannot bring it back); Level 2 and its note stay');
   ok((await bar(page).innerText()).startsWith('Removed'), 'the bar says "Removed"');
   // Bar disappears after 30 s.
   await click(page, 'Level 1');
@@ -599,9 +600,99 @@ async function part10() {
   await done(ctx, 'offline');
 }
 
+// ── 11. Practice logs and Claude answers from two devices: nothing is lost, nothing comes back ──
+// Entries are marked TEST. The "laptop" is another writer on the same fake Firestore doc.
+async function part11() {
+  console.log('\n[11. Practice logs and answers from two devices: joined by id, written in a transaction, removed entries stay removed]');
+  const ASKS = `practice_asks_${DAY}`, LOG = `practice_log_${DAY}`;
+  const laptopEntry = (o) => ({ at: '2026-10-04T08:00:00.000Z', time: '08:00', device: 'Mac Chrome lap1', ...o });
+  const seed = base();
+  seed[ASKS] = { key: `practice:asks:${DAY}`, updatedAt: new Date(1000), value: JSON.stringify({ date: '2026-10-04', entries: [
+    laptopEntry({ id: 'a_lap1', kind: 'stuck', prompt: 'TEST laptop prompt 1', text: 'TEST laptop reply 1', u: 1 }),
+    { time: '07:00', kind: 'coach-me', prompt: 'TEST old entry without an id', text: 'TEST old reply' },
+  ] }) };
+  seed[LOG] = { key: `practice:log:${DAY}`, updatedAt: new Date(1000), value: JSON.stringify({ date: '2026-10-04', entries: [
+    laptopEntry({ id: 'e_lap1', practiceId: 'pursed-lip', before: 5, after: 3, source: 'app', note: 'TEST laptop rep', u: 1 }),
+  ] }) };
+  const ctx = await open(seed);
+  const { page } = ctx;
+  const ask = (n) => page.evaluate(n => window.pSaveAsk({ kind: 'stuck', words: 'x' }, `TEST phone prompt ${n}`, { content: [{ type: 'text', text: `TEST phone reply ${n}` }], usage: {}, model: 'm' }, 'm'), n);
+  const prompts = async () => (await cloud(page, ASKS)).entries.map(e => e.prompt).sort();
+
+  // 1. The phone saves an answer; the laptop's answers are still there.
+  ok((await ask(1)) === 'cloud', 'an answer saved online returns "cloud"');
+  let doc = await cloud(page, ASKS);
+  ok(JSON.stringify(await prompts()) === JSON.stringify(['TEST laptop prompt 1', 'TEST old entry without an id', 'TEST phone prompt 1']), 'cloud holds the laptop\'s answers and the phone\'s → ' + JSON.stringify(await prompts()));
+  const mine = doc.entries.find(e => e.prompt === 'TEST phone prompt 1');
+  ok(/^a_/.test(mine.id) && typeof mine.device === 'string' && mine.device.length > 3 && mine.at && mine.u, 'the new answer has an id, a device name, a time and an update stamp → ' + JSON.stringify({ id: mine.id, device: mine.device }));
+  ok(doc.entries.every(e => e.id), 'an entry saved before ids got an id (' + doc.entries.find(e => /old entry/.test(e.prompt)).id + ')');
+  ok((await page.evaluate(() => window.__fakeTx.commits)) >= 1, 'the save went through a transaction');
+
+  // 2. The laptop writes between this device\'s read and its write: the transaction runs again and keeps both.
+  await page.evaluate(() => {
+    window.__fakeBeforeCommit = (attempt) => {
+      if (attempt !== 1) return;
+      const d = window.__fakeDocs.get('practice_asks_2026_10_04');
+      const v = JSON.parse(d.value);
+      v.entries.push({ id: 'a_lap2', at: '2026-10-04T09:00:01.000Z', time: '09:00', kind: 'stuck', prompt: 'TEST laptop prompt 2', text: 'x', device: 'Mac Chrome lap1', u: 5 });
+      window.__fakeDocs.set('practice_asks_2026_10_04', { ...d, value: JSON.stringify(v), updatedAt: new Date(Date.now() + 1000) });
+    };
+    window.__fakeTx.runs = 0;
+  });
+  await ask(2);
+  await page.evaluate(() => { window.__fakeBeforeCommit = null; });
+  const p2 = await prompts();
+  ok(p2.includes('TEST laptop prompt 2') && p2.includes('TEST phone prompt 2') && p2.length === 5, 'a write that lands while the laptop is writing keeps both → ' + JSON.stringify(p2));
+  ok((await page.evaluate(() => window.__fakeTx.runs)) === 2, 'the transaction read again after the laptop wrote (2 runs)');
+  ok(!(await cloudIds(page)).some(id => /__conflict_/.test(id)), 'no conflict copy was made');
+
+  // 3. The same save arriving twice (a retry, a queue upload) does not double an entry.
+  await page.evaluate(() => window.storage.set('practice:asks:2026_10_04', window.localStorage.getItem('practice:asks:2026_10_04')));
+  ok((await cloud(page, ASKS)).entries.length === 5, 'saving the same entries again adds nothing (still 5)');
+
+  // 4. The Practice tab reads what the laptop saved without a reload.
+  await page.evaluate(() => {
+    const d = window.__fakeDocs.get('practice_asks_2026_10_04'); const v = JSON.parse(d.value);
+    v.entries.push({ id: 'a_lap3', at: '2026-10-04T09:05:00.000Z', time: '09:05', kind: 'stuck', prompt: 'TEST laptop prompt 3', text: 'x', u: 9 });
+    window.__fakeDocs.set('practice_asks_2026_10_04', { ...d, value: JSON.stringify(v), updatedAt: new Date(Date.now() + 2000) });
+  });
+  const seen = await page.evaluate(async () => (await pRead('practice:asks:2026_10_04')).data.entries.map(e => e.prompt));
+  ok(seen.includes('TEST laptop prompt 3'), "a read shows the laptop's newest answer");
+
+  // 5. The log: a rep from the phone joins the laptop's; Undo stays undone even if the laptop saves an old copy.
+  const logged = await page.evaluate(async () => { const doc = await pAppendLog({ practiceId: 'box-breathing', before: 6, after: 4, note: 'TEST phone rep' }); return { n: doc.entries.length, notes: doc.entries.map(e => e.note), where: pWhere.get(doc) }; });
+  ok(logged.where === 'cloud' && logged.n === 2 && logged.notes.includes('TEST laptop rep') && logged.notes.includes('TEST phone rep'), 'the returned log shows the laptop\'s rep and the phone\'s → ' + JSON.stringify(logged));
+  const phoneRep = (await cloud(page, LOG)).entries.find(e => e.note === 'TEST phone rep');
+  ok(/^e_/.test(phoneRep.id) && phoneRep.device && phoneRep.u, 'the rep has an id, a device name and an update stamp');
+  await page.evaluate(id => pRemoveEntry('2026_10_04', { id }), phoneRep.id);
+  let log = await cloud(page, LOG);
+  ok(log.entries.some(e => e.id === phoneRep.id && e.deleted === true && e.u) && !log.entries.some(e => e.note === 'TEST phone rep'), 'Undo leaves { id, deleted, u } in the cloud, not the rep');
+  await page.evaluate(entry => window.storage.set('practice:log:2026_10_04', JSON.stringify({ date: '2026-10-04', entries: [entry] })), phoneRep);
+  log = await cloud(page, LOG);
+  ok(log.entries.find(e => e.id === phoneRep.id).deleted === true && log.entries.some(e => e.id === 'e_lap1' && !e.deleted), 'an older copy of the removed rep (from another device) does not bring it back, and the laptop\'s rep is kept');
+  const shown = await page.evaluate(async () => (await pRead('practice:log:2026_10_04')).data.entries.map(e => e.note));
+  ok(JSON.stringify(shown) === JSON.stringify(['TEST laptop rep']), 'the Practice tab shows only live entries → ' + JSON.stringify(shown));
+
+  // 6. Offline: the answer waits on this device; the laptop saves meanwhile; online, both are in the cloud.
+  await setOffline(page, true);
+  ok((await ask(3)) === 'device-only', 'offline an answer returns "device-only"');
+  ok(!(await prompts()).includes('TEST phone prompt 3'), 'it is not in the cloud yet');
+  await page.evaluate(() => {
+    const d = window.__fakeDocs.get('practice_asks_2026_10_04'); const v = JSON.parse(d.value);
+    v.entries.push({ id: 'a_lap4', at: '2026-10-04T09:10:00.000Z', time: '09:10', kind: 'stuck', prompt: 'TEST laptop prompt 4', text: 'x', u: 20 });
+    window.__fakeDocs.set('practice_asks_2026_10_04', { ...d, value: JSON.stringify(v), updatedAt: new Date(Date.now() + 3000) });
+  });
+  await setOffline(page, false);
+  ok(await waitFor(page, () => window.storage.status().waiting === 0), 'back online: the queue empties');
+  const p3 = await prompts();
+  ok(p3.includes('TEST phone prompt 3') && p3.includes('TEST laptop prompt 4') && p3.includes('TEST laptop prompt 1') && p3.length === 8, 'the offline answer and the laptop\'s answers are all in the cloud → ' + p3.length + ' entries');
+  ok(!(await cloudIds(page)).some(id => /__conflict_/.test(id)), 'still no conflict copy');
+  await done(ctx, 'two devices');
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
-  const parts = { 1: part1, 2: async () => { await part2(); await part2b(); }, 3: part3, 4: part4, 5: part5, 6: part6, 7: part7, 8: part8, 9: part9, 10: part10 };
+  const parts = { 1: part1, 2: async () => { await part2(); await part2b(); }, 3: part3, 4: part4, 5: part5, 6: part6, 7: part7, 8: part8, 9: part9, 10: part10, 11: part11 };
   for (const [k, fn] of Object.entries(parts)) if (which === 'all' || which === k) await fn();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);

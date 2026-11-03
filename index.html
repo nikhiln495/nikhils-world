@@ -212,7 +212,28 @@
         const notes = [...by.values()].sort((x, y) => String(x.at || '').localeCompare(String(y.at || '')));
         return JSON.stringify(Object.assign({}, parseObj(a), parseObj(b), { notes }));
       };
-      const mergerOf = (key) => (DRAFTS_KEY.test(key) ? mergeDrafts : NOTES_KEY.test(key) ? mergeNotes : null);
+      // Practice logs and Claude answers (practice:log:<day>, practice:asks:<day>): { entries: [ { id, at, u, ... } ] }.
+      // Every save is merged with the cloud copy inside one transaction (see entriesWrite), so two devices
+      // never overwrite each other. Entries are joined by id and none is dropped: the newer `u` (else `at`)
+      // wins per id. A removed entry is left as { id, deleted: true, u } so another device cannot bring it back.
+      // An entry saved before ids gets one from its own text (the same on every device).
+      const ENTRIES_KEY = /^practice:(asks|log):\d{4}_\d\d_\d\d$/;
+      const hasId = (e) => e.id !== undefined && e.id !== null && e.id !== '';
+      const entryIdOf = (e) => (hasId(e) ? String(e.id) : 'h_' + hashOf(JSON.stringify(e)));
+      const entryU = (e) => Number(e.u) || Date.parse(e.at) || 0;
+      const mergeEntries = (a, b) => {
+        const by = new Map();
+        const add = (e) => {
+          if (!e || typeof e !== 'object' || Array.isArray(e)) return;
+          const id = entryIdOf(e), item = hasId(e) ? e : Object.assign({ id }, e), cur = by.get(id);
+          if (!cur || entryU(item) >= entryU(cur)) by.set(id, item);
+        };
+        const A = parseObj(a), B = parseObj(b);
+        (Array.isArray(A.entries) ? A.entries : []).forEach(add);
+        (Array.isArray(B.entries) ? B.entries : []).forEach(add);
+        return JSON.stringify(Object.assign({}, A, B, { entries: [...by.values()] }));
+      };
+      const mergerOf = (key) => (DRAFTS_KEY.test(key) ? mergeDrafts : NOTES_KEY.test(key) ? mergeNotes : ENTRIES_KEY.test(key) ? mergeEntries : null);
 
       // ── Sizes, in UTF-8 bytes, by Firestore's own rules ──
       const enc = new TextEncoder();
@@ -270,6 +291,19 @@
       const dismissedSizes = load(DISMISSED_KEY, {});
       const seen = load(SEEN_KEY, {});
       const devMarks = load(MARKS_KEY, {});
+      // A short name for this device ("Mac Chrome k3f9"), made once and kept here. It goes on the practice
+      // entries this device saves, so the entries of two devices can be told apart.
+      const DEVICE_KEY = '__nw_device';
+      const deviceLabel = () => {
+        const d = load(DEVICE_KEY, null);
+        if (d && typeof d.label === 'string' && d.label) return d.label;
+        const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+        const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android' : /Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : /CrOS/.test(ua) ? 'Chromebook' : /Linux/.test(ua) ? 'Linux' : 'Device';
+        const br = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\/|CriOS/.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : '';
+        const label = [os, br, Math.random().toString(36).slice(2, 6)].filter(Boolean).join(' ');
+        keep(DEVICE_KEY, { label });
+        return label;
+      };
       const ROOM_AT = 60;                  // % of the device estimate at which the old Kaizen device copy is tidied
       const ROOM_KEY = '__nw_room_notes';  // conflict copies made when tidying it (one banner each)
       let roomNotes = load(ROOM_KEY, []).filter(n => n && typeof n.id === 'string');
@@ -765,11 +799,48 @@
         return Object.assign({ key, value: JSON.stringify(build(shape, units.slice(cut), order, rest)), updatedAt: new Date(at), parts, order, shape }, extra);
       };
 
+      // Practice logs and answers: read the cloud doc, merge this device's entries into it (mergeEntries) and
+      // write it back in one Firestore transaction. The write only goes through if the doc is still the version
+      // that was read (Firestore's own check, the same as an updateTime precondition); if the other device wrote
+      // in between, the SDK reads again and runs this again. Returns the doc written, or null when the doc is
+      // split, has sealed parts or is over SAFE: the read-merge-write in cloudWrite handles those.
+      const entriesWrite = async (key, id, value, at) => {
+        if (!db || typeof db.runTransaction !== 'function') return null;
+        let merged = value, written = null;
+        try {
+          await timed(db.runTransaction(async (tx) => {
+          written = null;
+          const s = await tx.get(ref(id));
+          const cur = s.exists ? (s.data() || {}) : null;
+          if (cur && (cur.split || cur.folding || (Array.isArray(cur.parts) && cur.parts.length) || typeof cur.value !== 'string')) return;
+          merged = mergeEntries(cur ? cur.value : '{}', value);
+          const next = Object.assign({}, cur || {}, { key, value: merged, updatedAt: new Date(at) });
+          if (docBytes(id, next) > SAFE) return;
+          tx.set(ref(id), next);
+          written = next;
+          }), id);
+        } catch (e) {
+          // Offline or timed out: the save waits on this device as before. Any other refusal (e.g. the database
+          // rules don't allow transactions): fall back to the read-merge-write in cloudWrite, which merges too.
+          if (e && (e.nwTimeout || e.nwReason)) throw e;
+          console.warn('Transaction save failed for ' + key + ', merging without it:', e);
+          return null;
+        }
+        if (!written) return null;
+        try { localStorage.setItem(key, merged); } catch (_) {}
+        metaCache.set(id, metaOf(written));
+        seenSet(id, at, 0);
+        measure(id, written);
+        measureKey(key, merged);
+        return written;
+      };
+
       // One save to the cloud. Keys in SEALED_LOG_KEYS: strip what is already sealed, seal if it grew past
       // SEAL_AT, keep the deleted markers. Any other key is written whole (split if over SAFE); if it still
       // has sealed parts from before, they are folded back (see foldBack). Throws if the cloud didn't take it.
       const cloudWrite = async (key, id, value, at, opts) => {
         opts = opts || {};
+        if (ENTRIES_KEY.test(key)) { const w = await entriesWrite(key, id, value, at); if (w) return w; }
         let meta = metaCache.get(id);
         const merger = mergerOf(key);
         if (merger) {
@@ -1444,6 +1515,8 @@
         makeRoom: (force) => makeRoom(!!force),
         // The merge used for drafts and notes docs (null for any other key): merge(cloudValue, deviceValue).
         mergerOf: (key) => mergerOf(key),
+        deviceLabel: () => deviceLabel(),
+        entryIdOf: (e) => entryIdOf(e),
         docBytes, kindOf, hashOf, LIMIT, SAFE, SEALED_LOG_KEYS: SEALED_LOG_KEYS.slice(), DEVICE_LIMIT,
       };
     })();
@@ -9641,12 +9714,20 @@ const pCheckKey = (key) => {
 
 // Returns { data, missing, error }. "missing" = no doc; "error" = doc exists but unreadable / read failed.
 // Reads the whole history (sealed parts included) through window.storage.getAll.
-async function pRead(key) {
+// Log and answer docs (practice:log:<day>, practice:asks:<day>) keep a removed entry as { id, deleted, u }
+// so another device cannot bring it back; pRead leaves those out unless opts.withRemoved.
+const P_ENTRIES_KEY = /^practice:(asks|log):\d{4}_\d\d_\d\d$/;
+const pLive = (list) => list.filter(e => !(e && e.deleted === true));
+async function pRead(key, opts = {}) {
   pCheckKey(key);
   try {
     const r = await (window.storage.getAll || window.storage.get)(key);
     if (!r || r.value == null || r.value === '') return { data: null, missing: true, error: null };
-    try { return { data: JSON.parse(r.value), missing: false, error: null }; }
+    try {
+      const data = JSON.parse(r.value);
+      if (!opts.withRemoved && P_ENTRIES_KEY.test(key) && data && Array.isArray(data.entries)) data.entries = pLive(data.entries);
+      return { data, missing: false, error: null };
+    }
     catch (e) { return { data: null, missing: false, error: 'unreadable (not valid JSON)' }; }
   } catch (e) {
     return { data: null, missing: false, error: e?.message || 'read failed' };
@@ -9678,6 +9759,7 @@ const pSerial = (fn) => {
 // Read-modify-write. Never overwrites a doc that exists but can't be read.
 // makeEmpty: () => fresh doc if missing, or null to refuse when missing.
 function pUpdate(key, makeEmpty, mutate) {
+  if (P_ENTRIES_KEY.test(key) && typeof window.storage.entryIdOf === 'function') return pUpdateEntries(key, makeEmpty, mutate);
   return pSerial(async () => {
     const cur = await pRead(key);
     if (cur.error) throw new Error(`${key} is ${cur.error}; not saving so nothing gets overwritten.`);
@@ -9690,6 +9772,47 @@ function pUpdate(key, makeEmpty, mutate) {
     const where = await pWrite(key, next);
     if (next && typeof next === 'object') pWhere.set(next, where);
     return next;
+  });
+}
+
+// pUpdate for practice:log:<day> and practice:asks:<day>. The storage layer merges every save of these docs
+// with the cloud copy by entry id (nothing is dropped), so this only has to say what changed:
+//  • every entry has an id (an old one gets the id the layer would give it), and a new one gets this device's name;
+//  • an entry the mutate changed or added gets `u` (when), which decides between two devices' copies of it;
+//  • an entry the mutate removed stays as { id, deleted: true, u } so the merge cannot bring it back.
+// `mutate` and the caller see only live entries. The doc returned is read back, so it shows the other
+// devices' entries too.
+function pUpdateEntries(key, makeEmpty, mutate) {
+  return pSerial(async () => {
+    const cur = await pRead(key, { withRemoved: true });
+    if (cur.error) throw new Error(`${key} is ${cur.error}; not saving so nothing gets overwritten.`);
+    let base = cur.data;
+    if (cur.missing) {
+      base = makeEmpty ? makeEmpty() : null;
+      if (!base) throw new Error(`${key} doesn't exist yet; not creating it from the app.`);
+    }
+    const all = Array.isArray(base.entries) ? base.entries : [];
+    const gone = all.filter(e => e && e.deleted === true);
+    const before = pLive(all).filter(e => e && typeof e === 'object').map(e => (e.id ? e : { ...e, id: window.storage.entryIdOf(e) }));
+    const snap = new Map(before.map(e => [e.id, JSON.stringify(e)]));
+    const doc = mutate(JSON.parse(JSON.stringify({ ...base, entries: before })));
+    const now = Date.now();
+    const after = (Array.isArray(doc.entries) ? doc.entries : []).map(e => {
+      if (!e || typeof e !== 'object') return e;
+      const out = e.id ? e : { ...e, id: window.storage.entryIdOf(e) };
+      if (!snap.has(out.id)) { if (!out.device) out.device = window.storage.deviceLabel(); out.u = now; }
+      else if (snap.get(out.id) !== JSON.stringify(out)) out.u = now;
+      return out;
+    });
+    const kept = new Set(after.map(e => e && e.id));
+    const removed = before.filter(e => !kept.has(e.id)).map(e => ({ id: e.id, deleted: true, u: now }));
+    const stones = gone.filter(g => !kept.has(g.id) && !removed.some(r => r.id === g.id));
+    const next = { ...doc, entries: after.concat(stones, removed) };
+    const where = await pWrite(key, next);
+    const back = await pRead(key);
+    const shown = back.data && !back.error ? back.data : { ...next, entries: after };
+    pWhere.set(shown, where);
+    return shown;
   });
 }
 
@@ -9728,8 +9851,10 @@ function pAppendLog(entry, when = new Date(), opts = {}) {
     }
     doc.entries.push(clean);
     return doc;
-  });
+  }).then(doc => { pAdded.set(doc, clean.id); return doc; });
 }
+// The id of the entry pAppendLog just added to a doc it returned (the doc also holds other devices' entries).
+const pAdded = new WeakMap();
 
 // Finds an entry of a day's log by id, or by its position for entries written before ids.
 const pFindEntry = (doc, ref) => {
@@ -10332,6 +10457,7 @@ async function pSaveAsk(ask, prompt, data, model) {
     });
     const now = new Date();
     const rec = {
+      id: `a_${now.getTime().toString(36)}${Math.random().toString(36).slice(2, 6)}`, at: now.toISOString(),
       time: pTimeHM(now), kind: ask?.kind || 'unknown', words: ask?.words ?? '', prompt,
       text: texts.map(b => (typeof b.text === 'string' ? b.text : '')).join(''),
       tools: content.filter(b => b && b.type === 'tool_use').map(b => ({ name: b.name, input: b.input ?? null })),
@@ -11109,7 +11235,7 @@ async function pReadAllLogs() {
     if (!m) return;
     const iso = `${m[1]}-${m[2]}-${m[3]}`;
     let entries = [], error = null;
-    try { const d = JSON.parse(r.value); entries = Array.isArray(d?.entries) ? d.entries : []; }
+    try { const d = JSON.parse(r.value); entries = Array.isArray(d?.entries) ? pLive(d.entries) : []; }
     catch (_) { error = 'unreadable (not valid JSON)'; }
     const n = Math.round((t0 - new Date(+m[1], +m[2] - 1, +m[3])) / 86400000);
     byDay[iso] = { n, iso, entries, error };
@@ -11548,7 +11674,7 @@ function PracticeApp() {
           const doc = await pAppendLog(entry, when, { force: opts.force || (o && o.force) });
           showLog(dayKey, doc);
           flash(pSavedMsg(doc, `Logged: ${what}`));
-          const saved = doc.entries[doc.entries.length - 1];
+          const saved = doc.entries.find(e => e.id === pAdded.get(doc)) || doc.entries[doc.entries.length - 1];
           return { where: pWhere.get(doc) || 'cloud', ref: { id: saved.id, time: saved.time, day: dayKey }, ...entryActions(dayKey, { id: saved.id }) };
         } catch (e) {
           if (e.repeat) { window.nwShowBar({ tab: 'practice', mode: 'repeat', what, again: () => logRep(entry, { force: true }) }); return null; }
@@ -12303,7 +12429,7 @@ async function nwMonthAsks(now = new Date()) {
   }
   const records = [];
   let unreadable = 0;
-  rows.forEach(r => { try { const doc = JSON.parse(r.value); (Array.isArray(doc?.entries) ? doc.entries : []).forEach(e => records.push(e)); } catch (_) { unreadable++; } });
+  rows.forEach(r => { try { const doc = JSON.parse(r.value); (Array.isArray(doc?.entries) ? doc.entries : []).filter(e => !(e && e.deleted === true)).forEach(e => records.push(e)); } catch (_) { unreadable++; } });
   return { records, days: rows.length, unreadable, fromDevice };
 }
 const nwUsd = (x) => `$${x < 0.01 && x > 0 ? x.toFixed(4) : x.toFixed(2)}`;
