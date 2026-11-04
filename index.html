@@ -10545,9 +10545,11 @@ const pAskError = (msg, saved) => Object.assign(new Error(msg), { saved });
 
 // Stuck layer b / Waking "Coach me": choose 1–3 practices. Filters are enforced here, not only in the prompt.
 // Returns { picks, saved }.
-async function pChoosePractices({ playbook, text, allow = () => true, ask }) {
-  const system = `${P_VOICE}\n\nCall choose_practices with 1 to 3 ids from the library, each with a one-sentence reason in literal physical terms. Library:\n${pIndex(playbook, allow)}`;
-  const { data, saved } = await pCallClaude({ system, text, tools: [P_CHOOSE_TOOL], toolChoice: { type: 'auto' }, ask });
+async function pChoosePractices({ playbook, text: text0, allow = () => true, ask, screen }) {
+  const pl = await pPredictionLine().catch(() => '');
+  const text = pl ? `${text0}\n${pl}` : text0;
+  const system = `${P_VOICE}\n\n${P_SYNTH}\n\nCall choose_practices with 1 to 3 ids from the library, each with a one-sentence reason in literal physical terms. Library:\n${pIndex(playbook, allow)}`;
+  const { data, saved } = await pCallClaude({ system, text, tools: [P_CHOOSE_TOOL], toolChoice: { type: 'auto' }, ask, screen });
   const block = (data?.content || []).find(b => b.type === 'tool_use' && b.name === 'choose_practices');
   if (!block) throw pAskError('Claude answered without choosing practices.', saved);
   const seen = new Set();
@@ -10563,8 +10565,9 @@ async function pChoosePractices({ playbook, text, allow = () => true, ask }) {
 
 // Stuck layer c: outside the playbook, with web search. Returns { text, steps, sources }.
 async function pLookOutside(words, log) {
-  const system = `${P_VOICE}\n\nSearch the web, then answer with 3 to 6 numbered literal steps (1. 2. 3.). After the steps, name the sources you used.`;
-  const { data, saved } = await pCallClaude({ system, text: `${words}\n${pContextLine(log)}`, tools: [P_WEB_TOOL], toolChoice: { type: 'auto' }, ask: { kind: 'outside', words } });
+  const pl = await pPredictionLine().catch(() => '');
+  const system = `${P_VOICE}\n\n${P_SYNTH}\n\nSearch the web, then answer with 3 to 6 numbered literal steps (1. 2. 3.). After the steps, name the sources you used.`;
+  const { data, saved } = await pCallClaude({ system, text: `${words}\n${pContextLine(log)}${pl ? `\n${pl}` : ''}`, tools: [P_WEB_TOOL], toolChoice: { type: 'auto' }, ask: { kind: 'outside', words }, screen: 'stuck' });
   const texts = (data?.content || []).filter(b => b.type === 'text');
   const text = texts.map(b => b.text).join('').trim();
   if (!text) throw pAskError('Claude sent no steps back.', saved);
@@ -10856,7 +10859,7 @@ function GuidedFlow({ practiceId, source, note, playbook, onSave, onClose }) {
               if (busy) return;
               setBusy(true);
               const stepNotes = steps.map((st, k) => ({ step: k + 1, text: pText(st), note: String(notes[k] || '').trim() })).filter(x => x.note);
-              const ok = await onSave({ practiceId: p.id, before: before ?? undefined, after: after ?? undefined, source: flow?.source || source, note: (flow?.note || note) || undefined, myNote: String(flow?.myNote || '').trim() || undefined, stepNotes, counts: flow?.counts || undefined });
+              const ok = await onSave({ practiceId: p.id, before: before ?? undefined, after: after ?? undefined, source: flow?.source || source, note: (flow?.note || note) || undefined, myNote: String(flow?.myNote || '').trim() || undefined, stepNotes, counts: flow?.counts || undefined, situation: String(flow?.situation || '').trim() || undefined, ...(pIsPrediction({ practiceId: p.id }) ? pPredFields(stepNotes) : {}) });
               setBusy(false);
               if (ok) { clearFlow(); onClose(); }
             }}>Save rep</button>
@@ -13057,6 +13060,224 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
     </div>
   );
 }
+// ─────────────────────────────────────────────────────
+// BUILD v3 · PART 4 — Prediction record: every prediction-log entry, quick add, outcome later, his own counts
+// ─────────────────────────────────────────────────────
+
+// The fields a guided prediction-log flow saves next to its step notes (1 prediction, 3 what happened, 4 result).
+const pPredFields = (sn) => { const g = (n) => (sn.find(x => x.step === n) || {}).note || ''; return { prediction: g(1) || undefined, outcome: g(3) || undefined, result: pParseResult(g(4)) || undefined }; };
+const pIsPrediction = (e) => /prediction/i.test(String(e?.practiceId || ''));
+const P_RESULTS = [{ id: 'came true', label: 'Came true' }, { id: 'partly', label: 'Partly' }, { id: "didn't", label: "Didn't" }];
+// "came true" | "partly" | "didn't" | '' from what he wrote (negatives first: "didn't come true" is not "came true").
+function pParseResult(text) {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t) return '';
+  if (P_RESULTS.some(r => r.id === t)) return t;
+  if (/part|some of|half|a bit/.test(t) && !/not part/.test(t)) return 'partly';
+  if (/didn'?t|did not|not true|never|\bno\b|\bnope\b|false|wrong|nothing happened|did not come/.test(t)) return "didn't";
+  if (/true|\byes\b|\bit did\b|happened|right|correct/.test(t)) return 'came true';
+  return '';
+}
+const pStepNote = (e, n) => ((e.stepNotes || []).find(s => Number(s.step) === n) || {}).note || '';
+// One prediction-log entry as the record shows it: fields first, else the old step notes (1 prediction, 3 outcome, 4 result).
+function pPredOf(e, iso, index) {
+  const result = e.result || pParseResult(pStepNote(e, 4));
+  return {
+    id: e.id || null, index, iso, time: pTimeOf(e), at: e.at || null,
+    prediction: e.prediction || pStepNote(e, 1) || e.note || '',
+    before: e.before != null ? e.before : null,
+    outcome: e.outcome || pStepNote(e, 3) || '',
+    after: e.after != null ? e.after : null,
+    result, resultRaw: !result ? pStepNote(e, 4) : '',
+    tags: Array.isArray(e.tags) ? e.tags : [],
+  };
+}
+// Every prediction-log entry from every day, newest first.
+async function pAllPredictions() {
+  let logs = await pReadAllLogs();
+  if (!logs) logs = await pReadLogs(P_LEARN_FALLBACK_DAYS);
+  const out = [];
+  logs.forEach(day => (day.entries || []).forEach((e, i) => { if (pIsPrediction(e)) out.push(pPredOf(e, day.iso, i)); }));
+  return out.sort((a, b) => `${b.iso} ${b.time || '00:00'}`.localeCompare(`${a.iso} ${a.time || '00:00'}`));
+}
+const pPredWaiting = (p) => !p.outcome && !p.result;
+function pPredCounts(list) {
+  const c = { came: 0, partly: 0, didnt: 0, waiting: 0, total: list.length };
+  list.forEach(p => { if (p.result === 'came true') c.came++; else if (p.result === 'partly') c.partly++; else if (p.result === "didn't") c.didnt++; if (pPredWaiting(p)) c.waiting++; });
+  return c;
+}
+// One line for the context sent to Claude: the last 30 days. '' when there are none.
+async function pPredictionLine(now = new Date()) {
+  const from = pLocalISO(pDaysAgo(29, now));
+  const list = (await pAllPredictions()).filter(p => p.iso >= from);
+  if (!list.length) return '';
+  const c = pPredCounts(list);
+  const newest = list.filter(p => p.outcome || p.result).slice(0, 3).map(p => `"${p.prediction.slice(0, 80)}" -> ${p.outcome ? p.outcome.slice(0, 80) : 'no outcome written'}${p.result ? ` (${p.result})` : ''}`);
+  return `Predictions, last 30 days: ${c.total} logged; came true ${c.came}, partly ${c.partly}, didn't ${c.didnt}.${newest.length ? ` Newest with outcomes: ${newest.join('; ')}.` : ''}`;
+}
+
+function PredRatings({ value, onChange, label }) {
+  return (
+    <div role="radiogroup" aria-label={label} style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+      {Array.from({ length: 11 }, (_, i) => <button key={i} role="radio" aria-checked={value === i} onClick={() => onChange(value === i ? null : i)} style={{ ...pBtn(value === i ? 'solid' : 'ghost'), minHeight: 36, minWidth: 34, padding: '4px 0', fontSize: 13 }}>{i}</button>)}
+    </div>
+  );
+}
+
+// Adds the outcome to an existing prediction (an edit of that entry, merged by id).
+function PredOutcome({ p, onSaved }) {
+  const [text, setText, clearText] = window.useDraft('practice', `pred-outcome:${p.iso}:${p.id || p.index}`, '');
+  const [after, setAfter] = useState(null);
+  const [result, setResult] = useState('');
+  const [busy, wrap] = window.useBusy();
+  const [err, setErr] = useState('');
+  const save = wrap(async () => {
+    setErr('');
+    const dayKey = p.iso.replace(/-/g, '_');
+    try {
+      const doc = await pUpdate(P_KEYS.log(dayKey), null, (d) => {
+        const hit = pFindEntry(d, p.id ? { id: p.id } : { index: p.index });
+        if (!hit) throw new Error('That prediction is no longer there.');
+        const at = new Date().toISOString();
+        const set = (field, to) => { if (to === '' || to == null) return; const from = hit[field] === undefined ? null : hit[field]; hit.edits = Array.isArray(hit.edits) ? hit.edits : []; hit.edits.push({ at, field, from }); hit[field] = to; };
+        set('outcome', text.trim()); set('after', after); set('result', result);
+        const sn = Array.isArray(hit.stepNotes) ? hit.stepNotes.slice() : [];
+        if (text.trim() && !sn.some(s => Number(s.step) === 3)) sn.push({ step: 3, text: 'What happened', note: text.trim() });
+        if (result && !sn.some(s => Number(s.step) === 4)) sn.push({ step: 4, text: 'Did it come true?', note: result });
+        hit.stepNotes = sn.sort((a, b) => a.step - b.step);
+        return d;
+      });
+      clearText();
+      window.nwShowBar({ tab: 'practice', mode: 'saved', what: 'Prediction outcome', where: pWhere.get(doc) || 'cloud', ref: { what: `Prediction: ${p.prediction.slice(0, 40)}` } });
+      onSaved && onSaved();
+    } catch (e) { setErr(e.message); }
+  });
+  return (
+    <div data-pr-pred-outcome style={{ marginTop: 8 }}>
+      <textarea aria-label="What happened" rows={2} value={text} onChange={e => setText(e.target.value)} placeholder="What happened" style={{ ...pInput, minHeight: 60, marginBottom: 6 }} />
+      <div style={{ fontSize: 12, color: PC.muted, marginBottom: 4 }}>After, 0 to 10 (optional)</div>
+      <PredRatings value={after} onChange={setAfter} label="After rating" />
+      <div style={{ display: 'flex', gap: 6, margin: '8px 0' }}>
+        {P_RESULTS.map(r => <button key={r.id} aria-pressed={result === r.id} style={pBtn(result === r.id ? 'solid' : 'ghost', { flex: 1, fontSize: 13 })} onClick={() => setResult(result === r.id ? '' : r.id)}>{r.label}</button>)}
+      </div>
+      <button style={pBtn('solid', { width: '100%' })} disabled={busy || (!text.trim() && !result && after == null)} onClick={save}>Save what happened</button>
+      {err && <div role="alert" style={{ fontSize: 13, color: PC.bad, marginTop: 6 }}>{err}</div>}
+    </div>
+  );
+}
+
+function PredictionsScreen({ refreshKey }) {
+  const [list, setList] = useState(null);
+  const [open, setOpen] = useState(null);
+  const [tick, setTick] = useState(0);
+  useEffect(() => { let live = true; pAllPredictions().then(l => { if (live) setList(l); }).catch(() => { if (live) setList([]); }); return () => { live = false; }; }, [refreshKey, tick]);
+  window.nwSetContext && window.nwSetContext('practice', { screen: 'Predictions' });
+  if (!list) return <div style={{ fontSize: 14, color: PC.muted }}>Reading predictions…</div>;
+  const week = pPredCounts(list.filter(p => p.iso >= pLocalISO(pDaysAgo(6))));
+  const all = pPredCounts(list);
+  const waiting = list.filter(pPredWaiting);
+  const line = (c) => `${c.came} came true · ${c.partly} partly · ${c.didnt} didn't`;
+  return (
+    <div data-pr-predictions>
+      <div data-pr-pred-record style={pCard()}>
+        <div style={pLabel}>Your record, from your own log</div>
+        <div style={{ fontSize: 15, color: PC.text, lineHeight: 1.7 }}>
+          <div>This week ({week.total} logged): {line(week)}</div>
+          <div>All time ({all.total} logged): {line(all)}</div>
+          <div>Waiting for what happened: {all.waiting}</div>
+        </div>
+      </div>
+      {waiting.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={pLabel}>Waiting for what happened ({waiting.length})</div>
+          {waiting.map((p) => {
+            const k = `${p.iso}|${p.id || p.index}`;
+            return (
+              <div key={k} data-pr-pred-waiting style={pCard({ marginBottom: 8 })}>
+                <div style={{ fontSize: 12, color: PC.muted, fontFamily: pMono }}>{p.iso}{p.time ? ` ${p.time}` : ''}{p.before != null ? ` · before ${p.before}/10` : ''}{p.tags.length ? ` · ${p.tags.join(', ')}` : ''}</div>
+                <div style={{ fontSize: 15, color: PC.text, lineHeight: 1.5, overflowWrap: 'anywhere' }}>{p.prediction || '(no prediction written)'}</div>
+                {open === k ? <PredOutcome p={p} onSaved={() => { setOpen(null); setTick(t => t + 1); }} /> : <button style={pBtn('ghost', { marginTop: 6, fontSize: 13 })} onClick={() => setOpen(k)}>Add what happened</button>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div style={pLabel}>All predictions, newest first ({list.length})</div>
+      {!list.length && <div style={{ fontSize: 14, color: PC.muted }}>No predictions yet. The Predict button is at the bottom of every tab.</div>}
+      {list.map((p, i) => (
+        <div key={i} data-pr-pred style={pCard({ marginBottom: 8 })}>
+          <div style={{ fontSize: 12, color: PC.muted, fontFamily: pMono }}>{p.iso}{p.time ? ` ${p.time}` : ''}{p.tags.length ? ` · ${p.tags.join(', ')}` : ''}</div>
+          <div style={{ fontSize: 15, color: PC.text, lineHeight: 1.5, overflowWrap: 'anywhere' }}><strong>Predicted:</strong> {p.prediction || '–'} <span style={{ color: PC.muted }}>(before {p.before ?? '–'}/10)</span></div>
+          <div style={{ fontSize: 15, color: PC.text, lineHeight: 1.5, overflowWrap: 'anywhere' }}><strong>What happened:</strong> {p.outcome || '–'} <span style={{ color: PC.muted }}>(after {p.after ?? '–'}/10)</span></div>
+          <div style={{ fontSize: 15, color: PC.text }}><strong>Result:</strong> {p.result || p.resultRaw || '–'}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Quick add from any tab: the prediction and 0-10 now; what happened later. Date and time can be changed for past ones.
+function PredictPanel({ tab, onDone }) {
+  const [text, setText, clearText] = window.useDraft(tab, 'predict-text', '');
+  const [tags, setTags, clearTags] = window.useDraft(tab, 'predict-tags', []);
+  const [typed, setTyped, clearTyped] = window.useDraft(tab, 'predict-newtag', '');
+  const [before, setBefore] = useState(null);
+  const [date, setDate] = useState(pLocalISO());
+  const [time, setTime] = useState(pTimeHM());
+  const [known, setKnown] = useState([]);
+  const [busy, wrap] = window.useBusy();
+  const [msg, setMsg] = useState('');
+  useEffect(() => { let live = true; pAllPredictions().then(l => { const t = []; l.forEach(p => p.tags.forEach(x => { if (!t.includes(x)) t.push(x); })); if (live) setKnown(t); }).catch(() => {}); return () => { live = false; }; }, []);
+  const chips = [...known, ...tags.filter(t => !known.includes(t))];
+  const addTag = () => { const t = typed.trim(); if (t && !tags.includes(t)) setTags([...tags, t]); clearTyped(); };
+  const save = wrap(async () => {
+    if (!text.trim() || before == null) return;
+    const when = new Date(`${date}T${time}:00`);
+    const tg = typed.trim() && !tags.includes(typed.trim()) ? [...tags, typed.trim()] : tags;
+    const entry = { practiceId: 'prediction-log', before, prediction: text.trim(), tags: tg, source: 'app-predict', stepNotes: [{ step: 1, text: 'Prediction', note: text.trim() }] };
+    const what = `Prediction: ${text.trim().slice(0, 40)}${text.trim().length > 40 ? '…' : ''}`;
+    const dayKey = pDayKey(when);
+    const r = await window.nwLog({
+      tab, what, scope: 'prediction', sig: pEntrySig({ ...entry, note: text.trim() }),
+      run: async () => {
+        try {
+          const doc = await pAppendLog(entry, when, { force: true });
+          const id = pAdded.get(doc);
+          return { where: pWhere.get(doc) || 'cloud', ref: { id, what, day: dayKey },
+            undo: async () => { const d = await pRemoveEntry(dayKey, { id }); return pWhere.get(d) || 'cloud'; },
+            addNote: async (note) => { const d = await pUpdate(P_KEYS.log(dayKey), null, (x) => { const hit = pFindEntry(x, { id }); if (!hit) throw new Error('That entry is no longer there.'); hit.myNote = hit.myNote ? `${hit.myNote}\n${note}` : note; return x; }); return pWhere.get(d) || 'cloud'; } };
+        } catch (e) { setMsg(`Not saved: ${e.message}`); return null; }
+      },
+    });
+    if (r && r.where) { clearText(); clearTags(); clearTyped(); setBefore(null); setMsg(''); onDone && onDone(); }
+  });
+  return (
+    <div data-nw-predict>
+      <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>Predict</div>
+      <textarea aria-label="Prediction" rows={2} value={text} onChange={e => setText(e.target.value)} placeholder="What do you expect will happen" style={nwQuickInput} />
+      <div style={{ ...nwQuickLabel, margin: '8px 0 4px' }}>HOW SURE OR HOW BAD, 0 TO 10, NOW</div>
+      <div role="radiogroup" aria-label="Before, 0 to 10" style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {Array.from({ length: 11 }, (_, i) => <button key={i} role="radio" aria-checked={before === i} onClick={() => setBefore(before === i ? null : i)} style={{ ...nwQuickBtn, minHeight: 34, minWidth: 32, padding: '2px 0', ...(before === i ? nwQuickBtnOn : {}) }}>{i}</button>)}
+      </div>
+      <div style={{ ...nwQuickLabel, margin: '8px 0 4px' }}>TAGS (OPTIONAL)</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {chips.map(t => <button key={t} aria-pressed={tags.includes(t)} onClick={() => setTags(tags.includes(t) ? tags.filter(x => x !== t) : [...tags, t])} style={{ ...nwQuickBtn, minHeight: 32, padding: '4px 8px', ...(tags.includes(t) ? nwQuickBtnOn : {}) }}>{t}</button>)}
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+        <input aria-label="New tag" value={typed} onChange={e => setTyped(e.target.value)} placeholder="New tag" style={{ ...nwQuickInput, minHeight: 34, flex: 1 }} />
+        <button style={nwQuickBtn} onClick={addTag}>Add tag</button>
+      </div>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
+        <input aria-label="Date" type="date" value={date} max={pLocalISO()} onChange={e => e.target.value && setDate(e.target.value)} style={{ ...nwQuickInput, minHeight: 34, width: 150 }} />
+        <input aria-label="Time" type="time" value={time} onChange={e => setTime(e.target.value)} style={{ ...nwQuickInput, minHeight: 34, width: 110 }} />
+        <button style={{ ...nwQuickBtn, ...nwQuickBtnOn, marginLeft: 'auto' }} disabled={busy || !text.trim() || before == null} onClick={save}>Save prediction</button>
+      </div>
+      <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 6 }}>Add what happened later: Practice, Predictions.</div>
+      {msg && <div role="alert" style={{ fontSize: 13, color: '#fca5a5', marginTop: 6 }}>{msg}</div>}
+    </div>
+  );
+}
+NW_QUICK.push({ id: 'predict', label: 'Predict', Panel: PredictPanel });
 const P_SCREENS = [
   { id: 'today',    label: 'Today' },
   { id: 'library',  label: 'Library' },
@@ -13065,6 +13286,7 @@ const P_SCREENS = [
   { id: 'gaps',     label: 'Gaps' },
   { id: 'progress', label: 'Progress' },
   { id: 'joys',     label: 'Joys' },
+  { id: 'predictions', label: 'Predictions' },
   { id: 'history',  label: 'History' },
 ];
 
@@ -13337,6 +13559,7 @@ function PracticeApp() {
   else if (screen === 'gaps') base = <GapsScreen data={data} onAddGap={addGap} />;
   else if (screen === 'progress') base = <ProgressScreen data={data} refreshKey={refreshKey} />;
   else if (screen === 'joys') base = <JoysScreen refreshKey={refreshKey} />;
+  else if (screen === 'predictions') base = <PredictionsScreen refreshKey={refreshKey} />;
   else if (screen === 'history') base = <HistoryScreen data={data} />;
 
   const body = (

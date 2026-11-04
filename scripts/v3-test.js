@@ -805,11 +805,176 @@ async function part3() {
   }
 }
 
+// ───────────────────────── Part 4 ─────────────────────────
+const predSeed = () => baseSeed({
+  'practice:log:2026_11_03': JSON.stringify({ date: '2026-11-03', entries: [
+    { id: 'p1', time: '10:00', practiceId: 'prediction-log', before: 7, after: 3, source: 'app', stepNotes: [{ step: 1, text: 'Write your prediction.', note: 'They will ignore my email' }, { step: 3, text: 'Do the thing.', note: 'They replied in an hour' }, { step: 4, text: 'Result', note: "Didn't come true" }] },
+    { id: 'x1', time: '09:00', practiceId: 'sc-break', before: 5, after: 4, source: 'app' },
+  ] }),
+  'practice:log:2026_11_01': JSON.stringify({ date: '2026-11-01', entries: [
+    { id: 'p2', time: '15:00', practiceId: 'prediction-log', before: 8, source: 'app', stepNotes: [{ step: 1, text: 'p', note: 'I will freeze in class' }, { step: 3, text: 'o', note: 'I spoke once' }, { step: 4, text: 'r', note: 'Partly true' }] },
+  ] }),
+  'practice:log:2026_10_20': JSON.stringify({ date: '2026-10-20', entries: [
+    { id: 'p3', time: '12:00', practiceId: 'prediction-log', before: 6, after: 2, prediction: 'Dinner will go badly', outcome: 'It was fine', result: "didn't", tags: ['dinner'], source: 'app-predict' },
+  ] }),
+  'practice:log:2026_11_04': JSON.stringify({ date: '2026-11-04', entries: [
+    { id: 'p4', time: '08:00', practiceId: 'prediction-log', before: 9, prediction: 'The call will be awful', tags: ['call'], source: 'app-predict' },
+  ] }),
+});
+const choosePicks = (picks = [{ id: 'countdown', why: 'Count and move.' }]) => async () => ({ status: 200, json: { model: 'm', usage: {}, content: [{ type: 'tool_use', id: 't', name: 'choose_practices', input: { picks } }] } });
+
+async function part4() {
+  console.log('\n[4.1/4.4 Predictions view: every entry, newest first, his own record]');
+  {
+    const ctx = await openPractice({ seed: predSeed(), now: '2026-11-04T09:00:00' });
+    const { page } = ctx;
+    await page.getByRole('tab', { name: 'Predictions', exact: true }).click();
+    await wait(page, 1000);
+    const items = await page.$$eval('[data-pr-pred]', els => els.map(e => e.innerText));
+    ok(items.length === 4, 'four prediction entries from four days (the other practice is left out) → ' + items.length);
+    ok(items[0].includes('2026-11-04') && items[1].includes('2026-11-03') && items[2].includes('2026-11-01') && items[3].includes('2026-10-20'), 'newest first');
+    ok(items[1].includes('Predicted: They will ignore my email (before 7/10)') && items[1].includes('What happened: They replied in an hour (after 3/10)') && items[1].includes("Result: didn't"), 'old entries parsed from step notes (1 prediction, 3 outcome, 4 result)');
+    ok(items[2].includes('Result: partly') && items[3].includes('Dinner will go badly') && items[3].includes('dinner'), 'result words parsed; new-format fields and tags shown');
+    const rec = await page.locator('[data-pr-pred-record]').innerText();
+    ok(rec.includes('This week (3 logged): 0 came true · 1 partly · 1 didn\'t') && rec.includes('All time (4 logged): 0 came true · 1 partly · 2 didn\'t') && rec.includes('Waiting for what happened: 1'), 'this week and all time: counts only → ' + rec.replace(/\n/g, ' | '));
+    ok(!/%|score|grade|accuracy|good|bad/i.test(rec.replace('Your record, from your own log', '')), 'no scores, grades or verdicts');
+    ok(await page.locator('[data-pr-pred-waiting]').count() === 1 && (await page.locator('[data-pr-pred-waiting]').innerText()).includes('The call will be awful'), 'no outcome yet → under "Waiting for what happened"');
+    await finish(ctx, 'predictions view');
+  }
+
+  console.log('\n[4.2/4.3 Quick add from any tab; outcome later; tags; past dates]');
+  {
+    const ctx = await openPractice({ seed: predSeed(), now: '2026-11-04T09:00:00' });
+    const { page } = ctx;
+    await page.getByRole('button', { name: 'Kaizen', exact: true }).click();
+    await page.locator('[data-nw-quick="predict"]').click();
+    await page.locator('textarea[aria-label="Prediction"]').fill('Class will be too loud');
+    await page.locator('[data-nw-predict]').getByRole('radio', { name: '7', exact: true }).click();
+    ok(await page.locator('[data-nw-predict]').getByRole('button', { name: 'dinner', exact: true }).count() === 1 && await page.locator('[data-nw-predict]').getByRole('button', { name: 'call', exact: true }).count() === 1, 'past tags are offered');
+    await page.locator('input[aria-label="New tag"]').fill('class');
+    await page.locator('[data-nw-predict]').getByRole('button', { name: 'Add tag' }).click();
+    await page.locator('input[aria-label="Date"]').fill('2026-10-30');
+    await page.locator('input[aria-label="Time"]').fill('14:05');
+    await page.locator('[data-nw-predict]').getByRole('button', { name: 'Save prediction' }).click();
+    await wait(page, 600);
+    const lg = await memJSON(page, 'practice:log:2026_10_30');
+    const e = lg && lg.entries[0];
+    ok(e && e.practiceId === 'prediction-log' && e.before === 7 && e.prediction === 'Class will be too loud' && JSON.stringify(e.tags) === '["class"]' && e.time === '14:05' && /^2026-10-30T/.test(e.at) && e.stepNotes[0].step === 1 && e.stepNotes[0].note === 'Class will be too loud', 'saved on the past date with fields, tags and the step note (stepNotes kept)');
+    ok(/Saved/.test(await page.locator('[data-nw-savedbar]').first().innerText()), 'the Saved bar');
+    await page.getByRole('button', { name: 'Practice', exact: true }).click();
+    await page.getByRole('tab', { name: 'Predictions', exact: true }).click();
+    await wait(page, 800);
+    ok(await page.locator('[data-pr-pred-waiting]').count() === 2, 'it waits for what happened');
+    await page.locator('[data-pr-pred-waiting]').filter({ hasText: 'Class will be too loud' }).getByRole('button', { name: 'Add what happened' }).click();
+    await page.locator('textarea[aria-label="What happened"]').fill('It was loud but I stayed');
+    await page.locator('[data-pr-pred-outcome]').getByRole('radio', { name: '4', exact: true }).click();
+    await page.locator('[data-pr-pred-outcome]').getByRole('button', { name: 'Partly', exact: true }).click();
+    await clickName(page, 'Save what happened');
+    await wait(page, 800);
+    const lg2 = await memJSON(page, 'practice:log:2026_10_30');
+    const e2 = lg2.entries[0];
+    ok(e2.id === e.id && e2.outcome === 'It was loud but I stayed' && e2.after === 4 && e2.result === 'partly' && e2.prediction === 'Class will be too loud' && e2.edits.some(x => x.field === 'outcome') && e2.stepNotes.some(s => s.step === 3) && e2.stepNotes.some(s => s.step === 4), 'the outcome is an edit of the same entry (same id, edits list, step notes kept)');
+    ok(await page.locator('[data-pr-pred-waiting]').count() === 1, 'it leaves the waiting list');
+    ok((await page.locator('[data-pr-pred-record]').innerText()).includes('Waiting for what happened: 1'), 'the record updates');
+    await finish(ctx, 'predictions quick add');
+  }
+
+  console.log('\n[4.1 A guided prediction-log flow stores the fields too]');
+  {
+    const ctx = await openPractice({ seed: baseSeed(), now: '2026-11-04T09:00:00' });
+    const { page } = ctx;
+    await page.getByRole('tab', { name: 'Library', exact: true }).click();
+    await page.locator('input[aria-label="Search practices"]').fill('Prediction log');
+    await page.getByText('Prediction log', { exact: true }).first().click();
+    await clickName(page, 'Start');
+    await clickName(page, 'Begin');
+    const note = async (txt) => { await page.getByRole('button', { name: '+ Note' }).click(); await page.locator('textarea[aria-label="Note for this step"]').fill(txt); };
+    await note('The meeting will go badly'); await clickName(page, 'Next');
+    await clickName(page, 'Next');
+    await note('It went fine'); await clickName(page, 'Next');
+    await note('It did not come true'); await clickName(page, 'Next');
+    await clickName(page, 'Next');
+    await clickName(page, 'Save rep');
+    await wait(page, 600);
+    const e = (await todayLog(page, 'practice:log:2026_11_04')).entries.find(x => x.practiceId === 'prediction-log');
+    ok(e && e.prediction === 'The meeting will go badly' && e.outcome === 'It went fine' && e.result === "didn't" && e.stepNotes.length === 3, 'prediction, outcome and result saved as fields; stepNotes kept → ' + JSON.stringify({ p: e && e.prediction, o: e && e.outcome, r: e && e.result }));
+    await finish(ctx, 'prediction flow');
+  }
+
+  console.log('\n[4.5 One line about predictions goes to Ask Claude, Something else, Coach me, What now]');
+  {
+    const ctx = await openLedger(newFake(), { proxy: async (body) => (body.tools && body.tools[0].name === 'plan_next' ? nowProxy()() : choosePicks()()) });
+    // seed predictions through a second page state: reopen with the seeded logs
+    await ctx.browser.close();
+    const c2 = await openPage({ seed: { ...predSeed(), }, now: '2026-11-04T09:00:00', token: true, google: newFake().handler, device: dev(), proxy: async (body) => (body.tools && body.tools[0].name === 'plan_next' ? nowProxy()() : choosePicks()()) });
+    await c2.page.waitForTimeout(3500);
+    const { page } = c2;
+    await page.getByRole('button', { name: 'Practice', exact: true }).click();
+    await page.waitForSelector('.pr-root h1'); await wait(page, 800);
+    const LINE = /Predictions, last 30 days: 4 logged; came true 0, partly 1, didn't 2\. Newest with outcomes: "They will ignore my email" -> They replied in an hour \(didn't\); "I will freeze in class" -> I spoke once \(partly\); "Dinner will go badly" -> It was fine \(didn't\)\./;
+    // Ask Claude
+    await clickName(page, 'Stuck');
+    await page.getByLabel('Ask Claude', { exact: true }).fill('I keep rereading the chat');
+    await clickName(page, 'Pick practices for me'); await wait(page, 600);
+    let call = c2.proxyCalls[c2.proxyCalls.length - 1];
+    ok(LINE.test(call.messages[0].content), 'Ask Claude: the line, last 30 days, 3 newest with outcomes → ' + call.messages[0].content.split('\n').slice(-2).join(' | '));
+    // Something else
+    await clickName(page, 'Something else');
+    await page.getByLabel('Something else, in your words').fill('Dread about tomorrow');
+    await page.locator('button', { hasText: /^Ask Claude$/ }).first().click(); await wait(page, 600);
+    call = c2.proxyCalls[c2.proxyCalls.length - 1];
+    ok(LINE.test(call.messages[0].content), 'Something else: the line');
+    // Coach me
+    await clickName(page, '✕ Close');
+    await clickName(page, 'Waking up'); await clickName(page, 'Eyes closed'); await clickName(page, 'Next');
+    await clickName(page, 'Coach me'); await wait(page, 700);
+    call = c2.proxyCalls[c2.proxyCalls.length - 1];
+    ok(LINE.test(call.messages[0].content), 'Coach me: the line');
+    await clickName(page, '✕ Close');
+    // What now
+    await page.locator('textarea[aria-label="What is in your head"]').fill('lots');
+    await clickName(page, 'What now?'); await wait(page, 900);
+    call = c2.proxyCalls[c2.proxyCalls.length - 1];
+    ok(call.tools[0].name === 'plan_next' && LINE.test(call.messages[0].content), 'What now: the line');
+    // no predictions -> no line
+    await c2.browser.close();
+    const c3 = await openPractice({ seed: baseSeed(), now: '2026-11-04T09:00:00', proxy: choosePicks() });
+    await clickName(c3.page, 'Stuck');
+    await c3.page.getByLabel('Ask Claude', { exact: true }).fill('x');
+    await clickName(c3.page, 'Pick practices for me'); await wait(c3.page, 600);
+    ok(!/Predictions, last 30 days/.test(c3.proxyCalls[c3.proxyCalls.length - 1].messages[0].content), 'no predictions in 30 days → no line');
+    await c3.browser.close();
+  }
+
+  console.log('\n[4.2 Prediction edits from two devices are both kept]');
+  {
+    const seed = { practice_log_2026_11_03: { key: 'practice:log:2026_11_03', updatedAt: new Date(1000), value: JSON.stringify({ date: '2026-11-03', entries: [{ id: 'pe1', time: '10:00', at: '2026-11-03T19:00:00.000Z', practiceId: 'prediction-log', before: 7, prediction: 'It will rain', u: 1 }] }) } };
+    const ctx = await openPage({ fakeFirestore: seed, now: '2026-11-03T12:00:00' });
+    const { page } = ctx;
+    await page.waitForTimeout(3000);
+    await page.evaluate(() => {
+      window.__fakeBeforeCommit = (attempt) => {
+        if (attempt !== 1) return;
+        const d = window.__fakeDocs.get('practice_log_2026_11_03'); const v = JSON.parse(d.value);
+        v.entries.push({ id: 'pe2', time: '11:00', at: '2026-11-03T20:00:00.000Z', practiceId: 'prediction-log', before: 5, prediction: 'From the laptop', u: 9, device: 'laptop' });
+        window.__fakeDocs.set('practice_log_2026_11_03', { ...d, value: JSON.stringify(v), updatedAt: new Date(Date.now() + 1000) });
+      };
+    });
+    await page.evaluate(() => pEditEntry('2026_11_03', { id: 'pe1' }, { outcome: 'It did not', result: "didn't", after: 2 }));
+    const doc = await page.evaluate(() => JSON.parse(window.__fakeDocs.get('practice_log_2026_11_03').value));
+    const a = doc.entries.find(x => x.id === 'pe1'), b = doc.entries.find(x => x.id === 'pe2');
+    ok(doc.entries.length === 2 && a.outcome === 'It did not' && a.after === 2 && b.prediction === 'From the laptop', "the phone's edit and the laptop's new prediction are both in the cloud doc");
+    ok(!(await page.evaluate(() => [...window.__fakeDocs.keys()].some(k => /__conflict_/.test(k)))), 'no conflict copy');
+    await ctx.browser.close();
+  }
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
   if (which === 'all' || which === '1') await part1();
   if (which === 'all' || which === '2') await part2();
   if (which === 'all' || which === '3') await part3();
+  if (which === 'all' || which === '4') await part4();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

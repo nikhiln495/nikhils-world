@@ -58,6 +58,17 @@ Source / History / Last reps, and a "Reps, all time" block (total, first and lat
 | 5 Tomorrow | "Save as tomorrow's first step" → `practice:today:<tomorrow>`, never over an existing plan | saved; second tap refused |
 | 6 Saved results | `practice:ramp:<day>` append-only, merged by id; the ask record keeps kind and usage only | two-device merge; no Ledger text in asks; offline: box kept, says it needs internet |
 
+### Part 4 · Prediction record
+
+| Item | What changed | How checked (`v3-test.js 4`) |
+|------|--------------|------------------|
+| 1 View | Practice > Predictions: every `prediction-log` entry from all days, newest first (prediction, before, what happened, after, result); old entries read from step notes (1 prediction, 3 outcome, 4 result); a guided flow now also saves `prediction`, `outcome`, `result` fields and keeps `stepNotes` | four days, both formats, order, parsing |
+| 2 Quick add | Predict button on every tab: prediction + 0-10 now, date and time editable (past ones go to their own day's log); outcome later is an edit of the same entry (merged by id), with `after` and a result | past date entry; outcome edit keeps id, adds `edits` and step notes 3 and 4 |
+| 3 Tags | free-text chips; tags from earlier predictions are offered | offered, saved |
+| 4 Record | this week and all time: came true / partly / didn't, and how many wait; counts only | exact counts; no scores or grades |
+| 5 Context line | "Predictions, last 30 days: N logged; came true X, partly Y, didn't Z. Newest with outcomes: …" added for Ask Claude, Something else, Coach me, Look outside and What now? (nothing added when there are none) | the line in four requests; absent with none |
+| two devices | prediction edits and new entries from the laptop are joined by id, no conflict copy | fake Firestore with a write between read and commit |
+
 ## Drafts, notes everywhere, log tidy, cost tracker, room on this device (Oct 5)
 
 Branch: `claude/gallant-lamport-dgg90d`, draft PR. Precondition: main contains the storage and Drive session (`grep -c "SEALED_LOG_KEYS" index.html` → 17; `sw.js` and `tools/drive-backup.gs` exist). ✅
