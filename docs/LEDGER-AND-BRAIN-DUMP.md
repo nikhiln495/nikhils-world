@@ -76,3 +76,15 @@ first heading, otherwise a new H1 heading for today is inserted first. Each para
 (if the revision is stale it reads again and retries, up to 3 times). It only inserts text; it never edits or deletes.
 The first send of a session shows a preview. Offline captures stay on the device and go out, oldest first, when back
 online (if signed in).
+
+## Past Brain Dumps for What now? (Nov 4)
+
+The phone does the finding; Claude only thinks. When he taps What now?, the app:
+
+1. lists every Google Doc whose name starts with "Brain Dump" (Drive API), newest first, up to 100;
+2. reads each one through the Docs API, only when Drive says it changed since the copy kept on this device (`__nw_dump_hist`, in `NW-DEVICE-CACHE`);
+3. leaves out work lines: a paragraph that starts with `work:` or names VINE, ASMP, STARR or RTI (the plain word "work" is not enough);
+4. scores every remaining paragraph by how many of his words (4+ letters, stop words dropped, first 5 letters compared) it shares, best first;
+5. sends Claude the best matches, up to 80 lines and about 14,000 characters, as "Older Brain Dump lines that match (context only)".
+
+All matching, in any month, happens on the phone with no Claude tokens. Nothing from the old docs is saved to the database. If Google isn't signed in, the Docs API is off, or the phone is offline, What now? still answers and says "Past Brain Dumps not used: …".

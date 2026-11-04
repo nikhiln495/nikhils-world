@@ -1300,6 +1300,74 @@ async function part6() {
   }
 }
 
+// ───────────────────────── Past Brain Dumps (Nov 4) ─────────────────────────
+async function part7() {
+  console.log('\n[7. What now? searches every Brain Dump through Google; Claude gets only the matching lines]');
+  const H = (t) => ({ text: t, style: 'HEADING_1' }), N = (t) => ({ text: t, style: 'NORMAL_TEXT' });
+  const extra = [
+    { id: 'DOC_OCT', title: 'Brain Dump Oct 2026', modifiedTime: '2026-10-31T10:00:00Z', paras: [H('Friday, Oct 30, 2026'), N("task: call the dentist about the crown before the cleaning (from Nikhil's World, 9:00 AM)"), N('work: phone Maria Lopez about the consent form'), N('note: ASMP report is late again'), N('life: buy a new bike light')] },
+    { id: 'DOC_SEP', title: 'Brain Dump Sep 2026', modifiedTime: '2026-09-30T10:00:00Z', paras: [H('Monday, Sep 14, 2026'), N('note: the dentist moved my appointment twice'), N('life: nothing about teeth here but the lease is confusing')] },
+  ];
+  const fake = newFake({ extraDocs: extra });
+  const ctx = await openLedger(fake, { proxy: nowProxy() });
+  const { page } = ctx;
+  await page.waitForSelector('[data-pr-ledger-open]');
+  await page.locator('textarea[aria-label="What is in your head"]').fill('I keep putting off the dentist and the lease.');
+  await clickName(page, 'What now?');
+  await page.waitForSelector('[data-pr-now-patterns]');
+  const text = ctx.proxyCalls[ctx.proxyCalls.length - 1].messages[0].content;
+  ok(/Older Brain Dump lines that match/.test(text) && text.includes('Friday, Oct 30, 2026: task: call the dentist about the crown before the cleaning') && text.includes('Monday, Sep 14, 2026: note: the dentist moved my appointment twice'), 'lines from earlier months (Oct and Sep) that match what he wrote are sent');
+  ok(text.includes('the lease is confusing'), 'a match in any month, not only the last 30 days');
+  ok(!/Maria|ASMP|work:/.test(text.split('Older Brain Dump lines')[1].split('Context:')[0]), 'work lines (work: tag, ASMP) never go to Claude');
+  ok(!text.includes('buy a new bike light') && !text.includes("from Nikhil's World, 9:00 AM"), 'unrelated lines are not sent; the app\'s own suffix is trimmed');
+  ok(/Past Brain Dumps: 3 matching lines sent/.test(await page.locator('[data-pr-now-past]').innerText()), 'the screen says how many lines were sent → ' + await page.locator('[data-pr-now-past]').innerText());
+  const driveCalls = fake.calls.filter(c => /drive\/v3\/files/.test(c.url));
+  ok(driveCalls.some(c => decodeURIComponent(c.url).includes("name contains 'Brain Dump'")), 'the doc list comes from the Drive API');
+  ok(fake.reads.extra === 2, 'each past doc was read once through the Docs API (' + fake.reads.extra + ')');
+  const mem0 = await page.evaluate(() => JSON.stringify([...window.__mem.entries()]));
+  ok(!/crown|lease is confusing/.test(mem0.replace(/I keep putting off the dentist and the lease\./g, '')), 'the older lines are not saved to the database');
+  // second ask: docs unchanged → read from this device
+  await page.locator('textarea[aria-label="What is in your head"]').fill('The dentist again.');
+  await clickName(page, 'What now?');
+  await wait(page, 1200);
+  ok(fake.reads.extra === 2, 'a second ask re-reads nothing (kept on this device; Drive says no doc changed)');
+  // a doc changes → only that one is read again
+  fake.driveFiles.find(f => f.id === 'DOC_OCT').modifiedTime = '2026-11-02T10:00:00Z';
+  await page.locator('textarea[aria-label="What is in your head"]').fill('The dentist, once more.');
+  await clickName(page, 'What now?');
+  await wait(page, 1200);
+  ok(fake.reads.extra === 3, 'a changed doc is read again, the other is not (' + fake.reads.extra + ')');
+  const cache = await page.evaluate(() => localStorage.getItem('__nw_dump_hist'));
+  ok(cache && !/Maria|ASMP/.test(cache), 'the device copy has no work lines');
+  await finish(ctx, 'past dumps');
+
+  // no token / API off / offline: What now still works and says why
+  const c2 = await openPractice({ seed: baseSeed(), now: '2026-11-03T08:10:00', device: dev(), google: newFake({ extraDocs: extra }).handler, proxy: nowProxy() });
+  await wait(c2.page, 600);
+  await c2.page.locator('textarea[aria-label="What is in your head"]').fill('the dentist');
+  await clickName(c2.page, 'What now?');
+  await c2.page.waitForSelector('[data-pr-now-patterns]');
+  ok(/not signed in to Google/.test(await c2.page.locator('[data-pr-now-past]').innerText()) && !/Older Brain Dump/.test(c2.proxyCalls[c2.proxyCalls.length - 1].messages[0].content), 'not signed in: What now still works, says Past Brain Dumps were not used');
+  await c2.browser.close();
+  const off = newFake({ extraDocs: extra }); off.apiDisabled = 'docs';
+  const c3 = await openLedger(off, { proxy: nowProxy() });
+  await wait(c3.page, 600);
+  await c3.page.locator('textarea[aria-label="What is in your head"]').fill('the dentist');
+  await clickName(c3.page, 'What now?');
+  await c3.page.waitForSelector('[data-pr-now-patterns]');
+  ok(/Docs API is not turned on/.test(await c3.page.locator('[data-pr-now-past]').innerText()), 'Docs API off: one line, What now still answers');
+  await c3.browser.close();
+
+  // a lot of matches: best first, capped by lines and characters
+  const many = [{ id: 'DOC_BIG', title: 'Brain Dump Aug 2026', modifiedTime: '2026-08-31T10:00:00Z', paras: [H('Monday, Aug 3, 2026'), ...Array.from({ length: 300 }, (_, i) => N(`note: dentist thought number ${i} ${'x'.repeat(40)}${i === 299 ? ' lease lease' : ''}`)), N('note: the dentist and the lease together')] }];
+  const c4 = await openLedger(newFake({ extraDocs: many }), { proxy: nowProxy() });
+  await wait(c4.page, 600);
+  const r = await c4.page.evaluate(() => pPastDumps('the dentist and the lease'));
+  ok(r.matched === 301 && r.lines.length === 80 && r.lines.join('').length <= 14000, 'many matches: all 301 found on the phone, 80 best sent (' + r.lines.length + ' lines, ' + r.lines.join('').length + ' chars)');
+  ok(/dentist/.test(r.lines[0]) && /lease/.test(r.lines[0]) && r.lines.slice(0, 5).every(l => /lease/.test(l)), 'lines matching both words come first');
+  await c4.browser.close();
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
   if (which === 'all' || which === '1') await part1();
@@ -1308,6 +1376,7 @@ async function part6() {
   if (which === 'all' || which === '4') await part4();
   if (which === 'all' || which === '5') await part5();
   if (which === 'all' || which === '6') await part6();
+  if (which === 'all' || which === '7') await part7();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

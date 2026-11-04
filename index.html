@@ -12211,7 +12211,7 @@ function NwQuickActions({ tab }) {
 // ─────────────────────────────────────────────────────
 
 // ══ NW-DEVICE-CACHE START ══ (device only: the Ledger link, its last read, pending sends, Brain Dump captures)
-const NW_DEV = { link: '__nw_ledger_link', cache: '__nw_ledger_cache', pending: '__nw_ledger_pending', dump: '__nw_dump_queue', draft: '__nw_dev_draft:' };
+const NW_DEV = { hist: '__nw_dump_hist', link: '__nw_ledger_link', cache: '__nw_ledger_cache', pending: '__nw_ledger_pending', dump: '__nw_dump_queue', draft: '__nw_dev_draft:' };
 const nwDev = {
   get(k, fallback = null) { try { const r = localStorage.getItem(k); return r == null ? fallback : JSON.parse(r); } catch (_) { return fallback; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (_) { return false; } },
@@ -12912,13 +12912,14 @@ function pNowRowLines(rows) {
     return bits.join(' | ');
   });
 }
-async function pNowText({ words, rows, rules, log, now = new Date() }) {
+async function pNowText({ words, rows, rules, log, past, now = new Date() }) {
   const lines = pNowRowLines(rows);
   const pl = typeof pPredictionLine === 'function' ? await pPredictionLine().catch(() => '') : '';
   return [
     `What he wrote:\n${words.trim()}`,
     `Open Ledger rows (row | task | step | action | ...):\n${lines.length ? lines.join('\n') : '(none read)'}`,
     `Ledger rules:\n${rules.length ? rules.map(r => `- ${r}`).join('\n') : '(none read)'}`,
+    past && past.lines && past.lines.length ? `Older Brain Dump lines that match (his own earlier notes, found by the app; context only. Do not turn them into tasks or options unless what he wrote now says the same):\n${past.lines.map(l => `- ${l}`).join('\n')}` : '',
     pContextLine(log),
     pl,
     `Local time now: ${pTimeHM(now)}.`,
@@ -12940,8 +12941,8 @@ function pNowClean(input, rows) {
   return { patterns: strs(input?.patterns).slice(0, 3), options, parked: strs(input?.parked), newTasks: strs(input?.new_tasks), question: typeof input?.question === 'string' && input.question.trim() ? input.question.trim() : null };
 }
 // Calls Claude with the forced tool. Returns { result, saved }. Needs internet.
-async function pWhatNow({ words, rows, rules, log, feedback }) {
-  const text0 = await pNowText({ words, rows, rules, log });
+async function pWhatNow({ words, rows, rules, log, feedback, past }) {
+  const text0 = await pNowText({ words, rows, rules, log, past });
   const text = feedback ? `${text0}\n\nThe last options did not fit. Why, in his words: ${feedback}` : text0;
   const { data, saved } = await pCallClaude({ system: `${P_VOICE}\n\n${P_SYNTH}\n\n${P_NOW_RULES}`, text, tools: [P_NOW_TOOL], toolChoice: { type: 'tool', name: 'plan_next' }, ask: { kind: feedback ? 'what-now-again' : 'what-now', words: '', feedback: feedback ? '(in the ramp entry)' : undefined, redact: true }, screen: 'what-now' });
   const block = (data?.content || []).find(b => b.type === 'tool_use' && b.name === 'plan_next');
@@ -12977,6 +12978,58 @@ async function pDumpQuick(text, tag) {
 }
 const pAddMin = (hm, min) => { const m = /^(\d\d?):(\d\d)$/.exec(hm || ''); if (!m) return ''; const t = (+m[1] * 60 + +m[2] + min) % 1440; return `${pTwo(Math.floor(t / 60))}:${pTwo(t % 60)}`; };
 
+// ── Past Brain Dumps: the phone fetches them through the Google APIs and picks the matching lines itself; Claude only
+// gets those few lines and does the thinking. Work lines (tagged "work:" or naming VINE, ASMP, STARR, RTI) are left out.
+// The docs are kept on this device (NW-DEVICE-CACHE) and read again only when Drive says a doc changed.
+const P_STOP = new Set('that this with have from what about there their would could should then them they just like really because still again when where which while been being into over some more much very also only even than your mine dont cant wont didnt isnt need want going know think feel make made'.split(' '));
+const pWordList = (t) => [...new Set((String(t || '').toLowerCase().match(/[a-z0-9']{4,}/g) || []).map(w => w.replace(/'/g, '')).filter(w => w.length >= 4 && !P_STOP.has(w)))];
+const pStem5 = (w) => w.slice(0, 5);
+const P_DUMP_WORK = /\b(vine|asmp|starr|rti)\b/i;
+function pDocParas(doc) {
+  const out = []; let head = '';
+  const walk = (content) => (content || []).forEach(el => {
+    if (el.paragraph) {
+      const txt = (el.paragraph.elements || []).map(e => (e.textRun && e.textRun.content) || '').join('').replace(/\n$/, '').trim();
+      if (!txt) return;
+      if (/^HEADING_/.test((el.paragraph.paragraphStyle || {}).namedStyleType || '')) { head = txt; return; }
+      if (/^\s*work:/i.test(txt) || P_DUMP_WORK.test(txt)) return;
+      out.push({ h: head, t: txt });
+    } else if (el.table) (el.table.tableRows || []).forEach(r => (r.tableCells || []).forEach(c => walk(c.content)));
+  });
+  walk(doc.body && doc.body.content);
+  return out;
+}
+// Returns { lines: ["Monday, Nov 2, 2026: …"], docs, matched, note }. Never throws.
+async function pPastDumps(words, max = 80, budget = 14000) {
+  try {
+    if (!nwGoogleOnline()) return { lines: [], docs: 0, matched: 0, note: 'Past Brain Dumps not used: no internet.' };
+    if (!(window.nwGoogle && window.nwGoogle.token())) return { lines: [], docs: 0, matched: 0, note: 'Past Brain Dumps not used: not signed in to Google.' };
+    const q = "mimeType='application/vnd.google-apps.document' and name contains 'Brain Dump' and trashed=false";
+    const res = await nwGFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&orderBy=modifiedTime%20desc&pageSize=100&fields=files(id,name,modifiedTime)`);
+    const files = (res.files || []).filter(f => /^Brain Dump/i.test(f.name || ''));
+    const cache = nwDev.get(NW_DEV.hist, { docs: {} });
+    const keep = {};
+    for (const f of files) {
+      const c = cache.docs && cache.docs[f.id];
+      if (c && c.m === f.modifiedTime) { keep[f.id] = c; continue; }
+      keep[f.id] = { n: f.name, m: f.modifiedTime, p: pDocParas(await nwDumpRead(f.id)) };
+    }
+    nwDev.set(NW_DEV.hist, { docs: keep });
+    const stems = pWordList(words).map(pStem5);
+    const scored = [];
+    Object.values(keep).forEach(d => d.p.forEach(x => {
+      const have = new Set(pWordList(x.t).map(pStem5));
+      const score = stems.reduce((n, st) => n + (have.has(st) ? 1 : 0), 0);
+      if (score > 0) scored.push({ score, when: Date.parse(x.h) || 0, line: `${x.h || d.n}: ${x.t.replace(/\s*\(from Nikhil's World[^)]*\)\s*$/, '').slice(0, 250)}` });
+    }));
+    scored.sort((a, b) => b.score - a.score || b.when - a.when);
+    // Best matches first, up to `max` lines and about `budget` characters (roughly 3,500 tokens) so a big match stays cheap.
+    const lines = []; let used = 0;
+    for (const x of scored) { if (lines.length >= max || used + x.line.length > budget) break; lines.push(x.line); used += x.line.length; }
+    return { lines, docs: files.length, matched: scored.length, note: '' };
+  } catch (e) { return { lines: [], docs: 0, matched: 0, note: `Past Brain Dumps not used: ${nwGErr(e, 'Docs')}` }; }
+}
+
 function StepClock({ planned, startedAt }) {
   const [, tick] = useState(0);
   useEffect(() => { const iv = setInterval(() => tick(x => x + 1), 1000); return () => clearInterval(iv); }, []);
@@ -13004,11 +13057,12 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
   const ask = async (feedback) => {
     setSt(s => ({ ...s, busy: true, err: '' }));
     try {
-      const { result, saved, usage } = await pWhatNow({ words, rows: sentRows, rules: L.rules, log: todayLog, feedback });
+      const past = feedback && st.past ? st.past : await pPastDumps(words);
+      const { result, saved, usage } = await pWhatNow({ words, rows: sentRows, rules: L.rules, log: todayLog, feedback, past });
       let where = null, rampId = null;
       try { const { doc, entry } = await pAddRamp({ words, result, usage, kind: feedback ? 'what-now-again' : 'what-now', feedback, of: st.rampId || undefined }); where = pWhere.get(doc) || 'cloud'; rampId = entry.id; window.nwShowBar({ tab: 'practice', mode: 'saved', what: 'What now? result', where, ref: { what: 'What now? result' } }); }
       catch (e) { setMsg(`❌ The result was not saved: ${e.message}`); }
-      setSt({ busy: false, err: '', res: result, rampId, saved, whereSaved: where });
+      setSt({ busy: false, err: '', res: result, rampId, saved, whereSaved: where, past });
       setChosen(null); setPlan([]); setRun(null); setDoneOp(null);
       if (!feedback) clearWords(); else clearMisfit();
     } catch (e) { setSt(s => ({ ...s, busy: false, err: e.message, saved: e.saved })); }
@@ -13054,6 +13108,7 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
       {msg && <div role="status" style={{ fontSize: 13, color: PC.text, marginTop: 8 }}>{msg}</div>}
       {res && (
         <div style={{ marginTop: 12 }}>
+          {st.past && <div data-pr-now-past style={{ fontSize: 12, color: PC.muted, marginBottom: 8 }}>{st.past.note || `Past Brain Dumps: ${st.past.lines.length} matching line${st.past.lines.length === 1 ? '' : 's'} sent (${st.past.matched} matched in ${st.past.docs} doc${st.past.docs === 1 ? '' : 's'}; work lines left out).`}</div>}
           {res.patterns.length > 0 && (
             <div data-pr-now-patterns style={{ marginBottom: 12 }}>
               <div style={pLabel}>Patterns</div>

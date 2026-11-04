@@ -12,7 +12,7 @@ const DOC_ID = 'FAKE_DOC_ID_0123456789';
 const colIndex = (letters) => letters.split('').reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0) - 1;
 const asText = (v) => (v === true ? 'TRUE' : v === false ? 'FALSE' : v == null ? '' : String(v));
 
-function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null, sheetId = SHEET_ID, docId = DOC_ID } = {}) {
+function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null, extraDocs = [], sheetId = SHEET_ID, docId = DOC_ID } = {}) {
   const calls = [];
   const F = {
     calls, SHEET_ID: sheetId, DOC_ID: docId,
@@ -20,7 +20,8 @@ function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null
     formulas,                      // optional { Ledger: [[...]] } served for valueRenderOption=FORMULA
     apiDisabled: null,
     doc: doc ? { id: docId, title: doc.title, revision: 1, paras: JSON.parse(JSON.stringify(doc.paras || [])) } : null,
-    driveFiles: driveFiles || (doc ? [{ id: docId, name: doc.title, modifiedTime: '2026-11-02T10:00:00Z' }] : []),
+    extra: new Map(extraDocs.map(e => [e.id, { id: e.id, title: e.title, revision: 1, paras: JSON.parse(JSON.stringify(e.paras)) }])),
+    driveFiles: (driveFiles || (doc ? [{ id: docId, name: doc.title, modifiedTime: '2026-11-02T10:00:00Z' }] : [])).concat(extraDocs.map(e => ({ id: e.id, name: e.title, modifiedTime: e.modifiedTime || '2026-10-31T10:00:00Z' }))),
     staleOnce: 0,                  // the next N Docs reads are followed by another writer's change (revision moves)
     reads: { docs: 0 },
     writes: [],                    // { api, ... } every accepted write
@@ -94,10 +95,10 @@ function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null
 
   // ── Docs ──
   const full = () => F.doc.paras.map(p => p.text + '\n').join('');
-  const content = () => {
+  const content = (d = F.doc) => {
     let at = 1;
     const out = [{ startIndex: 0, endIndex: 1, sectionBreak: {} }];
-    F.doc.paras.forEach(p => {
+    d.paras.forEach(p => {
       const end = at + p.text.length + 1;
       out.push({ startIndex: at, endIndex: end, paragraph: { elements: [{ startIndex: at, endIndex: end, textRun: { content: p.text + '\n' } }], paragraphStyle: { namedStyleType: p.style || 'NORMAL_TEXT' } } });
       at = end;
@@ -128,6 +129,8 @@ function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null
     if (F.apiDisabled === 'docs') return err(route, 403, 'Google Docs API has not been used in project 55888993304 before or it is disabled.', { status: 'PERMISSION_DENIED' });
     const u = new URL(url);
     const m = u.pathname.match(/^\/v1\/documents\/([^/:]+)(:batchUpdate)?$/);
+    const xd = m && F.extra.get(m[1]);
+    if (xd && req.method() === 'GET') { F.reads.docs++; F.reads.extra = (F.reads.extra || 0) + 1; return json(route, 200, { documentId: xd.id, title: xd.title, revisionId: 'rev1', body: { content: content(xd) } }); }
     if (!m || !F.doc || m[1] !== F.DOC_ID) return err(route, 404, 'Requested entity was not found.');
     if (req.method() === 'GET') {
       F.reads.docs++;
