@@ -217,7 +217,7 @@
       // never overwrite each other. Entries are joined by id and none is dropped: the newer `u` (else `at`)
       // wins per id. A removed entry is left as { id, deleted: true, u } so another device cannot bring it back.
       // An entry saved before ids gets one from its own text (the same on every device).
-      const ENTRIES_KEY = /^practice:(asks|log):\d{4}_\d\d_\d\d$/;
+      const ENTRIES_KEY = /^(practice:(asks|log|ramp):\d{4}_\d\d_\d\d|practice:joy:\d{4}_\d\d|feedback:app)$/;
       const hasId = (e) => e.id !== undefined && e.id !== null && e.id !== '';
       const entryIdOf = (e) => (hasId(e) ? String(e.id) : 'h_' + hashOf(JSON.stringify(e)));
       const entryU = (e) => Number(e.u) || Date.parse(e.at) || 0;
@@ -409,6 +409,10 @@
         [/^device-timezone$/, "This device's time zone"],
         [/^practice:log:(\d{4})_(\d\d)_(\d\d)$/, m => `Practice log for ${m[1]}-${m[2]}-${m[3]}`],
         [/^practice:asks:(\d{4})_(\d\d)_(\d\d)$/, m => `Claude answers for ${m[1]}-${m[2]}-${m[3]}`],
+        [/^practice:ramp:(\d{4})_(\d\d)_(\d\d)$/, m => `What now results for ${m[1]}-${m[2]}-${m[3]}`],
+        [/^practice:joy:(\d{4})_(\d\d)$/, m => `Joys for ${m[1]}-${m[2]}`],
+        [/^feedback:app$/, 'Feedback for the app'],
+        [/^practice:seeds$/, 'Practice seeds (done markers)'],
         [/^practice:playbook$/, 'Practice playbook'], [/^practice:homework$/, 'Practice homework'],
         [/^practice:shobha-queue$/, 'Dr. Shobha queue'], [/^practice:outside-map$/, 'Gaps list'],
         [/^practice:drafts$/, 'Practice drafts'], [/^drafts:(.+)$/, m => `Drafts (${m[1]})`],
@@ -9696,6 +9700,9 @@ const P_KEYS = {
   today: (dayKey) => `practice:today:${dayKey}`,
   log:   (dayKey) => `practice:log:${dayKey}`,
   asks:  (dayKey) => `practice:asks:${dayKey}`,
+  ramp:  (dayKey) => `practice:ramp:${dayKey}`,   // What now? dumps and results (append-only, merged by id)
+  joy:   (monthKey) => `practice:joy:${monthKey}`, // Joys, one doc per month (append-only, merged by id)
+  seeds: 'practice:seeds',                          // which one-time seeds are done
 };
 const P_STATUSES = ['homework','active','learning','reference','in-session','pending','open','setup','restart','new','not-working','paused'];
 const P_BY = 'Nikhil (app)';
@@ -9716,7 +9723,7 @@ const pCheckKey = (key) => {
 // Reads the whole history (sealed parts included) through window.storage.getAll.
 // Log and answer docs (practice:log:<day>, practice:asks:<day>) keep a removed entry as { id, deleted, u }
 // so another device cannot bring it back; pRead leaves those out unless opts.withRemoved.
-const P_ENTRIES_KEY = /^practice:(asks|log):\d{4}_\d\d_\d\d$/;
+const P_ENTRIES_KEY = /^(practice:(asks|log|ramp):\d{4}_\d\d_\d\d|practice:joy:\d{4}_\d\d)$/;
 const pLive = (list) => list.filter(e => !(e && e.deleted === true));
 async function pRead(key, opts = {}) {
   pCheckKey(key);
@@ -9817,7 +9824,7 @@ function pUpdateEntries(key, makeEmpty, mutate) {
 }
 
 // What an entry says, without when it was logged (for "Already logged").
-const pEntrySig = (e) => JSON.stringify(['practiceId', 'level', 'before', 'after', 'note', 'myNote', 'stepNotes', 'source']
+const pEntrySig = (e) => JSON.stringify(['practiceId', 'level', 'before', 'after', 'note', 'myNote', 'stepNotes', 'source', 'place', 'sleepAt']
   .map(k => (e && e[k] !== undefined && e[k] !== null && e[k] !== '' ? e[k] : null)));
 const P_REPEAT_MS = 60000;
 // The time an entry was logged, in ms: its `at`, else its HH:MM on that day's date.
@@ -9828,6 +9835,10 @@ const pEntryMs = (e, dateISO) => {
   return hm && dateISO ? new Date(`${dateISO}T${hm}:00`).getTime() : null;
 };
 
+// Structured fields an entry may carry beyond the basics (copied as given): the waking step record, count-to-60
+// attempts, when his eyes opened, the going-back-to-sleep time, place for lights out, and the flow's opening line.
+const P_EXTRA_FIELDS = ['wake', 'counts', 'eyesOpen', 'minutesEyesToUp', 'sleepAt', 'place', 'situation', 'seeded', 'dateUnknown'];
+
 // Append one rep to today's per-day log (created on first rep). Each new entry gets an id (for Undo and
 // edits) and `at` (when it was logged). An entry identical to the previous one within 60 seconds is not
 // added (an Error with .repeat = true), unless opts.force.
@@ -9836,6 +9847,7 @@ function pAppendLog(entry, when = new Date(), opts = {}) {
   ['before', 'after', 'level', 'note', 'myNote'].forEach(k => {
     if (entry[k] !== undefined && entry[k] !== null && entry[k] !== '') clean[k] = entry[k];
   });
+  P_EXTRA_FIELDS.forEach(k => { if (entry[k] !== undefined && entry[k] !== null && entry[k] !== '' && !(Array.isArray(entry[k]) && !entry[k].length)) clean[k] = JSON.parse(JSON.stringify(entry[k])); });
   const steps = Array.isArray(entry.stepNotes) ? entry.stepNotes.filter(s => s && String(s.note || '').trim())
     .map(s => ({ step: Number(s.step), text: String(s.text || ''), note: String(s.note).trim() })) : [];
   if (steps.length) clean.stepNotes = steps;
@@ -10158,7 +10170,7 @@ function TodayScreen({ data, onLog, onStart, onWaking, onAddUpdate, onEditEntry,
   const defaultIds = ['ten-percent-intercept', 'sc-break'].concat(now.getHours() >= 18 ? ['bedtime-plan'] : []);
   const defaultCards = defaultIds.map(id => pFindPractice(playbook, id)).filter(pUsable);
   const entries = todayLog?.entries || [];
-  const nameOf = (id) => pFindPractice(playbook, id)?.name || id;
+  const nameOf = (id) => pPracticeName(playbook, id);
 
   return (
     <div>
@@ -10213,6 +10225,7 @@ function TodayScreen({ data, onLog, onStart, onWaking, onAddUpdate, onEditEntry,
         </>
       )}
 
+      <LightsOutCard onLog={onLog} />
       <ForgotBox onLog={onLog} />
 
       {today && <HomeworkStrip homework={homework} missing={homeworkMissing} onAddUpdate={onAddUpdate} />}
@@ -10282,14 +10295,42 @@ function PRecentReps({ practiceId, refreshKey }) {
       <div style={pLabel}>Last reps (30 days)</div>
       {loading ? <div style={{ fontSize: 13, color: PC.muted }}>Reading the logs…</div>
         : !last.length ? <div style={{ fontSize: 13, color: PC.muted }}>No reps in the last 30 days.</div>
-        : last.map(({ iso, e }, k) => (
-          <div key={k} data-pr-rep style={{ fontSize: 13, color: PC.text, lineHeight: 1.6, borderBottom: `1px solid ${PC.border}`, padding: '6px 0' }}>
-            <div><span style={{ fontFamily: pMono, color: PC.muted }}>{iso}{pTimeOf(e) ? ` ${pTimeOf(e)}` : ''}</span>
-              {e.before != null || e.after != null ? ` · before ${e.before ?? '–'}, after ${e.after ?? '–'}` : ''}</div>
-            {e.myNote && <div>Note: {e.myNote}</div>}
-            {(e.stepNotes || []).map((sn, j) => <div key={j} style={{ color: PC.muted }}>Step {sn.step}{sn.text ? ` (${sn.text})` : ''}: <span style={{ color: PC.text }}>{sn.note}</span></div>)}
-          </div>
-        ))}
+        : last.map(({ iso, e }, k) => <PRepRow key={k} iso={iso} e={e} />)}
+      <PAllTimeReps practiceId={practiceId} refreshKey={refreshKey} />
+    </div>
+  );
+}
+
+function PRepRow({ iso, e }) {
+  return (
+    <div data-pr-rep style={{ fontSize: 13, color: PC.text, lineHeight: 1.6, borderBottom: `1px solid ${PC.border}`, padding: '6px 0' }}>
+      <div><span style={{ fontFamily: pMono, color: PC.muted }}>{iso}{pTimeOf(e) ? ` ${pTimeOf(e)}` : ''}</span>
+        {e.before != null || e.after != null ? ` · before ${e.before ?? '–'}, after ${e.after ?? '–'}` : ''}</div>
+      {e.myNote && <div>Note: {e.myNote}</div>}
+      {(e.stepNotes || []).map((sn, j) => <div key={j} style={{ color: PC.muted }}>Step {sn.step}{sn.text ? ` (${sn.text})` : ''}: <span style={{ color: PC.text }}>{sn.note}</span></div>)}
+    </div>
+  );
+}
+
+// Every rep of one practice, all time (every log day there is), collapsed until asked for.
+function PAllTimeReps({ practiceId, refreshKey }) {
+  const [open, setOpen] = useState(false);
+  const { loading, logs, allTime, days } = useLogs('all', refreshKey, P_LEARN_FALLBACK_DAYS);
+  const reps = [];
+  logs.slice().sort((a, b) => a.n - b.n).forEach(day => {
+    pSortByTime(day.entries).filter(e => e && e.practiceId === practiceId).reverse().forEach(e => reps.push({ iso: day.iso, e }));
+  });
+  return (
+    <div data-pr-alltime style={{ marginTop: 10 }}>
+      <div style={pLabel}>Reps, all time</div>
+      {loading ? <div style={{ fontSize: 13, color: PC.muted }}>Reading the logs…</div> : (
+        <div style={{ fontSize: 13, color: PC.text }}>
+          {reps.length} {reps.length === 1 ? 'rep' : 'reps'}{reps.length ? ` · first ${reps[reps.length - 1].iso} · latest ${reps[0].iso}` : ''}
+          {!allTime && days ? <span style={{ color: PC.muted }}> (last {days} days only)</span> : null}
+        </div>
+      )}
+      {!loading && reps.length > 0 && <button style={pBtn('ghost', { marginTop: 6, fontSize: 13 })} onClick={() => setOpen(o => !o)}>{open ? 'Hide all reps' : `Show all ${reps.length} reps`}</button>}
+      {open && reps.map(({ iso, e }, k) => <PRepRow key={k} iso={iso} e={e} />)}
     </div>
   );
 }
@@ -10311,6 +10352,11 @@ function PracticeDetail({ p, onBack, onStart, onLog, onStatus, refreshKey }) {
           <PTag color={p.status === 'not-working' ? PC.bad : PC.accent}>{p.status}</PTag>
           <PStageTag p={p} />
         </div>
+        <div data-pr-detail-buttons style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+          <button style={pBtn('solid', { flex: 1 })} onClick={() => onStart(p.id)}>Start</button>
+          <button style={pBtn('ghost', { flex: 1 })} disabled={busy} onClick={wrap(() => onLog({ practiceId: p.id }))}>Log rep</button>
+          <StatusChanger p={p} onChange={onStatus} />
+        </div>
         <Row label="When">{p.when ? pText(p.when) : null}</Row>
         <Row label="Now">{p.now ? pText(p.now) : null}</Row>
         {(p.steps || []).length > 0 && (
@@ -10325,11 +10371,6 @@ function PracticeDetail({ p, onBack, onStart, onLog, onStatus, refreshKey }) {
           <div key={i} style={{ fontSize: 13, color: PC.muted }}>{h.date} — {pText(h.change)}{h.reason ? ` (${h.reason})` : ''}{h.by ? ` · ${h.by}` : ''}</div>
         )) : null}</Row>
         <PRecentReps practiceId={p.id} refreshKey={refreshKey} />
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button style={pBtn('solid', { flex: 1 })} onClick={() => onStart(p.id)}>Start</button>
-          <button style={pBtn('ghost', { flex: 1 })} disabled={busy} onClick={wrap(() => onLog({ practiceId: p.id }))}>Log rep</button>
-          <StatusChanger p={p} onChange={onStatus} />
-        </div>
       </div>
     </div>
   );
@@ -10588,23 +10629,112 @@ function PTimer({ seconds }) {
 }
 
 // passage-of-time: count to 60 with the clock hidden; on Done show the real elapsed seconds.
-function PHiddenCount({ target = 60 }) {
+// Every attempt is saved on the entry being logged (the flow's or the waking screen's draft hands them in):
+// { n, seconds (one decimal), position?: lying|sitting|standing, at }. Shows this morning's attempts and a 14-day chart.
+const P_POSITIONS = [{ id: 'lying', label: 'Lying' }, { id: 'sitting', label: 'Sitting' }, { id: 'standing', label: 'Standing' }];
+const pSecs = (ms) => Math.round(ms / 100) / 10;
+const pOff = (secs, target = 60) => Math.round((secs - target) * 10) / 10;
+const pSigned = (d) => (d > 0 ? `+${d}` : d < 0 ? `−${Math.abs(d)}` : '0');
+// Attempts typed or counted on one entry (an older entry has none).
+const pCountsOf = (e) => (Array.isArray(e?.counts) ? e.counts.filter(c => c && typeof c.seconds === 'number') : []);
+
+function PHiddenCount({ target = 60, attempts = [], onAttempt, onPosition, refreshKey = 0 }) {
   const [start, setStart] = useState(null);
-  const [elapsed, setElapsed] = useState(null);
+  const [last, setLast] = useState(null);
+  const lastPos = attempts.length ? attempts[attempts.length - 1].position : null;
+  const [pos, setPos] = useState(lastPos || null);
+  const [saved, setSaved] = useState([]);
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const r = await pRead(P_KEYS.log(pDayKey()));
+      const list = [];
+      (Array.isArray(r.data?.entries) ? r.data.entries : []).forEach(e => pCountsOf(e).forEach(c => list.push({ ...c, time: pTimeOf(e) })));
+      if (live) setSaved(list);
+    })();
+    return () => { live = false; };
+  }, [refreshKey]);
+  const choose = (id) => {
+    const next = pos === id ? null : id;
+    setPos(next);
+    if (last != null && onPosition) onPosition(next);
+  };
+  const done = () => {
+    const seconds = pSecs(Date.now() - start);
+    setStart(null);
+    setLast(seconds);
+    if (onAttempt) onAttempt({ seconds, ...(pos ? { position: pos } : {}), at: new Date().toISOString() });
+  };
+  const shown = [...saved.map(c => ({ ...c, label: `${c.time || ''}${c.seeded ? ' · seeded, typed by Nikhil' : ''}`.trim() })), ...attempts.map(c => ({ ...c, label: 'not saved yet' }))];
   return (
-    <div style={{ ...pCard({ background: '#0b0d12', textAlign: 'center' }) }}>
-      {start == null && elapsed == null && <button style={pBtn('solid', { width: '100%', minHeight: 56, fontSize: 17 })} onClick={() => setStart(Date.now())}>Start counting to {target}</button>}
+    <div data-pr-count style={{ ...pCard({ background: '#0b0d12', textAlign: 'center' }) }}>
+      <div role="group" aria-label="Position (optional)" style={{ display: 'flex', gap: 6, justifyContent: 'center', marginBottom: 10 }}>
+        {P_POSITIONS.map(o => <button key={o.id} aria-pressed={pos === o.id} style={pBtn(pos === o.id ? 'solid' : 'ghost', { padding: '6px 10px', fontSize: 13, minHeight: 36 })} onClick={() => choose(o.id)}>{o.label}</button>)}
+      </div>
+      {start == null && last == null && <button style={pBtn('solid', { width: '100%', minHeight: 56, fontSize: 17 })} onClick={() => setStart(Date.now())}>Start counting to {target}</button>}
       {start != null && (
         <>
           <div style={{ fontSize: 16, color: PC.muted, marginBottom: 12 }}>Count to {target} in your head. The clock is hidden.</div>
-          <button style={pBtn('solid', { width: '100%', minHeight: 56, fontSize: 17 })} onClick={() => { setElapsed(Math.round((Date.now() - start) / 1000)); setStart(null); }}>Done</button>
+          <button style={pBtn('solid', { width: '100%', minHeight: 56, fontSize: 17 })} onClick={done}>Done</button>
         </>
       )}
-      {elapsed != null && (
+      {start == null && last != null && (
         <>
-          <div aria-live="polite" style={{ fontSize: 22, color: PC.text, marginBottom: 10 }}>You counted {target}. Real time: <strong>{elapsed} seconds</strong>.</div>
-          <button style={pBtn('ghost')} onClick={() => { setElapsed(null); }}>Count again</button>
+          <div aria-live="polite" style={{ fontSize: 22, color: PC.text, marginBottom: 10 }}>You counted {target}. Real time: <strong>{last.toFixed(1)} seconds</strong>.</div>
+          <button style={pBtn('ghost')} onClick={() => { setLast(null); }}>Count again</button>
         </>
+      )}
+      <div data-pr-count-list style={{ textAlign: 'left', marginTop: 12 }}>
+        <div style={pLabel}>This morning's attempts</div>
+        {!shown.length ? <div style={{ fontSize: 13, color: PC.muted }}>None yet today.</div>
+          : shown.map((c, i) => (
+            <div key={i} data-pr-attempt style={{ fontSize: 14, color: PC.text, lineHeight: 1.6 }}>
+              Attempt {c.n || i + 1}: <strong>{Number(c.seconds).toFixed(1)} s</strong> ({pSigned(pOff(c.seconds, target))} from {target}){c.position ? ` · ${c.position}` : ''}{c.label ? <span style={{ color: PC.muted }}> · {c.label}</span> : null}
+            </div>
+          ))}
+      </div>
+      <PCountChart target={target} extra={attempts} refreshKey={refreshKey} />
+    </div>
+  );
+}
+
+// Best attempt per day over the last 14 days and how far it was from 60 (above the line = over 60).
+function pCountDays(logs, extra, target = 60) {
+  const out = {};
+  const add = (iso, c) => {
+    const d = Math.abs(c.seconds - target), cur = out[iso];
+    if (!cur || d < Math.abs(cur.seconds - target)) out[iso] = { iso, seconds: c.seconds };
+  };
+  logs.forEach(day => day.entries.forEach(e => pCountsOf(e).forEach(c => { if (!e.dateUnknown) add(day.iso, c); })));
+  (extra || []).forEach(c => add(pLocalISO(), c));
+  return out;
+}
+function PCountChart({ target = 60, extra = [], refreshKey = 0 }) {
+  const { loading, logs } = useLogs(14, refreshKey);
+  const best = pCountDays(logs, extra, target);
+  const days = Array.from({ length: 14 }, (_, k) => pLocalISO(pDaysAgo(13 - k)));
+  const W = 336, H = 150, mid = 72, scale = 1.4, colW = W / 14;
+  const label = days.map(iso => best[iso] ? `${iso}: best ${best[iso].seconds} s, ${pSigned(pOff(best[iso].seconds, target))} from ${target}` : null).filter(Boolean).join('; ') || 'no attempts';
+  return (
+    <div data-pr-count-chart style={{ textAlign: 'left', marginTop: 12 }}>
+      <div style={pLabel}>Best attempt each day, last 14 days (line = {target} s)</div>
+      {loading ? <div style={{ fontSize: 13, color: PC.muted }}>Reading the logs…</div> : (
+        <svg role="img" aria-label={label} viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
+          <line x1="0" x2={W} y1={mid} y2={mid} stroke={PC.border} strokeWidth="1" />
+          {days.map((iso, k) => {
+            const b = best[iso];
+            const x = k * colW + colW / 2;
+            const dist = b ? pOff(b.seconds, target) : 0;
+            const h = Math.min(Math.abs(dist) * scale, 62);
+            return (
+              <g key={iso} data-day={iso} data-best={b ? b.seconds : ''} data-dist={b ? dist : ''}>
+                {b && <rect x={x - 8} y={dist >= 0 ? mid - h : mid} width="16" height={Math.max(h, 2)} fill={dist >= 0 ? PC.accent : PC.warn} rx="2" />}
+                {b && <text x={x} y={dist >= 0 ? mid - h - 3 : mid + h + 11} textAnchor="middle" fontSize="9" fill={PC.text}>{b.seconds}</text>}
+                <text x={x} y={H - 4} textAnchor="middle" fontSize="8" fill={PC.muted}>{iso.slice(8)}</text>
+              </g>
+            );
+          })}
+        </svg>
       )}
     </div>
   );
@@ -10651,17 +10781,17 @@ const pStepWidget = (p, steps, i) => {
   return null;
 };
 
-function PStepWidget({ w }) {
+function PStepWidget({ w, counts }) {
   if (!w) return null;
   if (w.kind === 'timer') return <PTimer seconds={w.seconds} />;
-  if (w.kind === 'count') return <PHiddenCount target={60} />;
+  if (w.kind === 'count') return <PHiddenCount target={60} attempts={counts?.list || []} onAttempt={counts?.add} onPosition={counts?.setPos} />;
   if (w.kind === 'tap') return <PTapCounter target={w.target} />;
   return null;
 }
 
 // One step per screen. The flow in progress (step, ratings, step notes, "Anything else?") is a draft in
 // practice:drafts (flow:<practice id>), so closing or reloading the app keeps it; saving the rep clears it.
-const P_FLOW_START = { i: -1, before: null, after: null, notes: {}, myNote: '' };
+const P_FLOW_START = { i: -1, before: null, after: null, notes: {}, myNote: '', counts: [] };
 function GuidedFlow({ practiceId, source, note, playbook, onSave, onClose }) {
   const p = pFindPractice(playbook, practiceId);
   const [flow, setFlow, clearFlow] = window.useDraft('practice', `flow:${practiceId}`, { ...P_FLOW_START, practiceId, source: source || 'app', note: note || null });
@@ -10702,7 +10832,7 @@ function GuidedFlow({ practiceId, source, note, playbook, onSave, onClose }) {
         {i >= 0 && i < n && (
           <>
             <div style={{ fontSize: 24, color: PC.text, lineHeight: 1.4, fontWeight: 600, marginBottom: 14 }}>{pText(steps[i])}</div>
-            <PStepWidget key={i} w={w} />
+            <PStepWidget key={i} w={w} counts={{ list: flow?.counts || [], add: (a) => upd({ counts: [...(flow?.counts || []), { n: (flow?.counts || []).length + 1, ...a }] }), setPos: (pos) => upd({ counts: (flow?.counts || []).map((c, k, arr) => (k === arr.length - 1 ? (pos ? { ...c, position: pos } : (({ position, ...r }) => r)(c)) : c)) }) }} />
             <window.NwStepNote key={`n${i}`} value={notes[i] || ''} onChange={v => upd({ notes: { ...notes, [i]: v } })} />
           </>
         )}
@@ -10721,7 +10851,7 @@ function GuidedFlow({ practiceId, source, note, playbook, onSave, onClose }) {
               if (busy) return;
               setBusy(true);
               const stepNotes = steps.map((st, k) => ({ step: k + 1, text: pText(st), note: String(notes[k] || '').trim() })).filter(x => x.note);
-              const ok = await onSave({ practiceId: p.id, before: before ?? undefined, after: after ?? undefined, source: flow?.source || source, note: (flow?.note || note) || undefined, myNote: String(flow?.myNote || '').trim() || undefined, stepNotes });
+              const ok = await onSave({ practiceId: p.id, before: before ?? undefined, after: after ?? undefined, source: flow?.source || source, note: (flow?.note || note) || undefined, myNote: String(flow?.myNote || '').trim() || undefined, stepNotes, counts: flow?.counts || undefined });
               setBusy(false);
               if (ok) { clearFlow(); onClose(); }
             }}>Save rep</button>
@@ -10803,7 +10933,7 @@ function pWakingSteps(where, blocks, playbook, today, homework) {
   // the fixed in-bed steps, so the sequence can change by editing the playbook, without a code change.
   const seq = has('wake-sequence');
   if (seq && Array.isArray(seq.flow) && seq.flow.length && where !== 'standing') {
-    const flow = seq.flow.filter(s => s && s.text).map(s => ({ text: pText(s.text), kind: s.kind, from: seq.id }));
+    const flow = seq.flow.filter(s => s && s.text).map(s => ({ text: pText(s.text), kind: s.kind, required: s.required === true, from: seq.id }));
     const pre = out.filter(s => !/^Name only the first step/.test(s.text) && !/face down out of reach/.test(s.text));
     if (blocks.includes('dizzy')) flow.splice(Math.max(flow.length - 1, 0), 0, dizzy);
     return [...pre, ...flow];
@@ -10841,15 +10971,66 @@ function pWakingAlternates(playbook) {
   return P_WAKING_ALTERNATES.filter(a => pFindPractice(playbook, a.from));
 }
 
+// What the waking screens keep while he is working through them (part of the "waking" draft): when the flow
+// started, about when his eyes opened, every step event (shown, done, skipped, back, tried another), count
+// attempts and the times he went back to sleep. imUp turns it into the `wake` record saved on the entry.
+const P_REC_EMPTY = { startedAt: null, eyes: null, ev: [], counts: [], sleeps: [] };
+const P_EYES_CHOICES = [
+  { id: 'now', label: 'Just now', min: 0 }, { id: '15', label: '15 min ago', min: 15 }, { id: '30', label: '30 min ago', min: 30 },
+  { id: '45', label: '45 min ago', min: 45 }, { id: '60', label: '60+ min ago', min: 60, plus: true },
+];
+// One record per step shown: number in the queue (as "Step N of M" says), exact text, source practice, first
+// time shown, last outcome (done | skipped | back | tried-another) with its time, and every event with its time.
+function pWakeRecord(rec, upAt) {
+  const by = new Map();
+  (rec.ev || []).forEach(e => {
+    if (e.n == null) return;
+    const key = `${e.n}|${e.text}`;
+    let s = by.get(key);
+    if (!s) { s = { n: e.n, text: e.text, source: e.from || 'app', shownAt: null, outcome: null, at: null, trail: [] }; by.set(key, s); }
+    s.trail.push({ k: e.k, t: e.t });
+    if (e.k === 'shown') { if (!s.shownAt) s.shownAt = e.t; }
+    else { s.outcome = e.k; s.at = e.t; }
+  });
+  const steps = [...by.values()];
+  const startedAt = rec.startedAt || null;
+  return {
+    startedAt, upAt: upAt.toISOString(),
+    minutesBetween: startedAt ? Math.round((upAt.getTime() - Date.parse(startedAt)) / 6000) / 10 : null,
+    backs: (rec.ev || []).filter(e => e.k === 'back').length,
+    steps,
+    ...((rec.sleeps || []).length ? { sleeps: rec.sleeps } : {}),
+  };
+}
+
 // Waking up in progress (answers, step, notes) is a draft in practice:drafts ("waking"): closing or
-// reloading keeps it; "I'm up and moving" clears it.
-const P_WAKING_START = { where: null, blocks: [], other: '', stage: 'q1', queue: [], idx: 0, tried: [], noMore: false, notes: {} };
+// reloading keeps it; "I'm up and moving" clears it (after the entry with its full record is saved).
+const P_WAKING_START = { where: null, blocks: [], other: '', stage: 'q1', queue: [], idx: 0, tried: [], noMore: false, notes: {}, rec: null, prevStage: null };
 const P_WAKING_Q = { q1: 'Where are you?', q2: "What's in the way?" };
 function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, onStart, onClose }) {
   const [wk, setWk, clearWk] = window.useDraft('practice', 'waking', P_WAKING_START);
   const st = { ...P_WAKING_START, ...(wk || {}) };
   const { where, blocks, other, stage, queue, idx, tried, noMore, notes } = st;
-  const upd = (patch) => setWk(cur => ({ ...P_WAKING_START, ...(cur || {}), ...(typeof patch === 'function' ? patch({ ...P_WAKING_START, ...(cur || {}) }) : patch) }));
+  const rec = { ...P_REC_EMPTY, ...(st.rec || {}) };
+  const openedAt = useRef(new Date().toISOString());
+  // Every change also makes sure the record has its start time (the moment the screen opened).
+  const upd = (patch) => setWk(cur => {
+    const c = { ...P_WAKING_START, ...(cur || {}) };
+    const p = typeof patch === 'function' ? patch(c) : patch;
+    const r = { ...P_REC_EMPTY, ...(p.rec || c.rec || {}) };
+    if (!r.startedAt) r.startedAt = openedAt.current;
+    return { ...c, ...p, rec: r };
+  });
+  // Adds one event to the record: { k, n, text, from, t }.
+  const recEv = (k, i, extra = {}) => ({ k, n: i + 1, text: queue[i]?.text, from: queue[i]?.from || null, t: new Date().toISOString(), ...extra });
+  const withEv = (c, ev) => ({ ...P_REC_EMPTY, ...(c.rec || {}), ev: [...((c.rec || {}).ev || []), ev] });
+  const setEyes = (kind, minutes, plus) => upd(c => ({ rec: { ...P_REC_EMPTY, ...(c.rec || {}), eyes: { kind, at: new Date(Date.now() - minutes * 60000).toISOString(), minutesAgo: minutes, ...(plus ? { plus: true } : {}) } } }));
+  const pickEyesTime = (hm) => {
+    if (!/^\d\d:\d\d$/.test(hm)) return;
+    const d = new Date(); d.setHours(+hm.slice(0, 2), +hm.slice(3), 0, 0);
+    if (d.getTime() > Date.now()) d.setDate(d.getDate() - 1);
+    upd(c => ({ rec: { ...P_REC_EMPTY, ...(c.rec || {}), eyes: { kind: 'time', at: d.toISOString(), minutesAgo: Math.round((Date.now() - d.getTime()) / 60000) } } }));
+  };
   const setWhere = (v) => upd({ where: v });
   const setBlocks = (fn) => upd(c => ({ blocks: typeof fn === 'function' ? fn(c.blocks) : fn }));
   const setOther = (v) => upd({ other: v });
@@ -10866,6 +11047,13 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
   useEffect(() => {
     window.nwSetContext('practice', { screen: 'Waking up', practice: 'waking-ladder', step: stage === 'q1' ? 1 : stage === 'q2' ? 2 : stage === 'steps' ? idx + 3 : null });
   }, [stage, idx]);
+  // A step on screen is recorded once (again after a Back or a skip moves away and returns).
+  useEffect(() => {
+    if (stage !== 'steps' || noMore || !queue[idx]) return;
+    const last = rec.ev[rec.ev.length - 1];
+    if (last && last.k === 'shown' && last.n === idx + 1 && last.text === queue[idx].text) return;
+    upd(c => ({ rec: withEv(c, recEv('shown', idx)) }));
+  }, [stage, idx, noMore, queue[idx]?.text]);
 
   const answers = () => {
     const w = P_WHERE_Q.find(x => x.id === where)?.label || '-';
@@ -10879,9 +11067,38 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
     upd({ queue: q.length ? q : [{ text: P_FEET }], idx: 0, tried: [], noMore: false, stage: 'steps' });
   };
 
+  // The full record goes on the entry; the draft is cleared only after that save went through.
   const imUp = wrap(async () => {
-    const ok = await onLog({ practiceId: 'waking-ladder', level: 4, note: answers(), source: 'app-waking', stepNotes: stepNotes() });
+    const upAt = new Date();
+    const onStep = stage === 'steps' && !noMore && queue[idx];
+    const r = onStep ? { ...rec, ev: [...rec.ev, recEv('done', idx, { via: 'up', t: upAt.toISOString() })] } : rec;
+    const eyes = rec.eyes || null;
+    const ok = await onLog({
+      practiceId: 'waking-ladder', level: 4, note: answers(), source: 'app-waking', stepNotes: stepNotes(),
+      wake: pWakeRecord(r, upAt), counts: rec.counts, eyesOpen: eyes || undefined,
+      minutesEyesToUp: eyes ? Math.round((upAt.getTime() - Date.parse(eyes.at)) / 60000) : undefined,
+    });
     if (ok) { clearWk({ ...P_WAKING_START, stage: 'up' }); }
+  });
+
+  // Done / Not today / Back on a step: each is recorded with its time, then the screen moves.
+  const stepDone = () => upd(c => ({ idx: c.idx + 1, rec: withEv(c, recEv('done', c.idx)) }));
+  const stepSkip = () => upd(c => ({ idx: c.idx + 1, rec: withEv(c, recEv('skipped', c.idx)) }));
+  const stepBack = () => upd(c => (c.idx > 0
+    ? { idx: c.idx - 1, rec: withEv(c, recEv('back', c.idx)) }
+    : { stage: 'q2', rec: withEv(c, recEv('back', c.idx)) }));
+  const addCount = (a) => upd(c => ({ rec: { ...P_REC_EMPTY, ...(c.rec || {}), counts: [...((c.rec || {}).counts || []), { n: (((c.rec || {}).counts) || []).length + 1, ...a }] } }));
+  const setCountPos = (pos) => upd(c => ({ rec: { ...P_REC_EMPTY, ...(c.rec || {}), counts: ((c.rec || {}).counts || []).map((x, k, arr) => (k === arr.length - 1 ? (pos ? { ...x, position: pos } : (({ position, ...r2 }) => r2)(x)) : x)) } }));
+  // Going back to sleep: logs the time and keeps the flow where it is; "I'm awake again" picks it up.
+  const goSleep = wrap(async () => {
+    const t = new Date().toISOString();
+    upd(c => ({ prevStage: c.stage, stage: 'asleep', rec: { ...P_REC_EMPTY, ...(c.rec || {}), sleeps: [...((c.rec || {}).sleeps || []), { at: t }] } }));
+    await onLog({ practiceId: 'waking-ladder', source: 'app-waking-sleep', note: 'Going back to sleep', sleepAt: t });
+  });
+  const awakeAgain = () => upd(c => {
+    const sl = [...((c.rec || {}).sleeps || [])];
+    if (sl.length) sl[sl.length - 1] = { ...sl[sl.length - 1], backAt: new Date().toISOString() };
+    return { stage: c.prevStage || 'q1', prevStage: null, rec: { ...P_REC_EMPTY, ...(c.rec || {}), sleeps: sl } };
   });
 
   const startOver = () => { clearWk(); setCoach({ busy: false, err: '', picks: null }); };
@@ -10891,8 +11108,8 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
     const cur = queue[idx];
     const used = new Set([...tried, ...queue.map(s => s.text)]);
     const alt = pWakingAlternates(playbook).find(a => !used.has(a.text));
-    if (alt) upd({ tried: [...tried, cur.text], queue: queue.map((s, k) => (k === idx ? alt : s)) });
-    else upd({ tried: [...tried, cur.text], noMore: true });
+    if (alt) upd(c => ({ tried: [...tried, cur.text], queue: queue.map((s, k) => (k === idx ? alt : s)), rec: withEv(c, recEv('tried-another', idx)) }));
+    else upd(c => ({ tried: [...tried, cur.text], noMore: true, rec: withEv(c, recEv('tried-another', idx)) }));
   };
 
   const coachMe = async () => {
@@ -10923,6 +11140,15 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
 
       {stage === 'q1' && (
         <div>
+          <div data-pr-eyes style={pCard()}>
+            <div style={{ fontSize: 16, color: PC.text, fontWeight: 600, marginBottom: 8 }}>About when did your eyes first open?</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {P_EYES_CHOICES.map(o => <button key={o.id} aria-pressed={rec.eyes?.kind === o.id} style={pBtn(rec.eyes?.kind === o.id ? 'solid' : 'ghost', { fontSize: 13, padding: '8px 10px', minHeight: 40 })} onClick={() => setEyes(o.id, o.min, o.plus)}>{o.label}</button>)}
+              <button aria-pressed={rec.eyes?.kind === 'time'} style={pBtn(rec.eyes?.kind === 'time' ? 'solid' : 'ghost', { fontSize: 13, padding: '8px 10px', minHeight: 40 })} onClick={() => pickEyesTime(pTimeHM())}>Pick a time</button>
+            </div>
+            {rec.eyes?.kind === 'time' && <input type="time" aria-label="Time your eyes first opened" value={pTimeHM(new Date(rec.eyes.at))} onChange={e => pickEyesTime(e.target.value)} style={{ ...pInput, marginTop: 8 }} />}
+            {rec.eyes && <div style={{ fontSize: 13, color: PC.muted, marginTop: 6 }}>Eyes open about {pTimeHM(new Date(rec.eyes.at))}{rec.eyes.plus ? ' or earlier' : ''}.</div>}
+          </div>
           <div style={{ fontSize: 26, fontWeight: 700, color: PC.text, marginBottom: 14 }}>Where are you?</div>
           {P_WHERE_Q.map(o => <button key={o.id} style={big()} onClick={() => upd({ where: o.id, stage: 'q2' })}>{o.label}</button>)}
           <window.NwStepNote key="q1" value={noteOf('q1')} onChange={v => setNote('q1', P_WAKING_Q.q1, v)} />
@@ -10955,17 +11181,38 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
         </div>
       )}
 
+      {stage === 'steps' && !noMore && !queue[idx] && (
+        <div>
+          <div style={{ fontSize: 26, fontWeight: 700, color: PC.text, marginBottom: 16 }}>That was the last step.</div>
+          <button style={pBtn('warn', { width: '100%', minHeight: 64, fontSize: 20, marginBottom: 10 })} disabled={busy} onClick={imUp}>I'm up and moving</button>
+          <button style={pBtn('ghost', { width: '100%', marginBottom: 10 })} onClick={() => upd({ idx: queue.length - 1 })}>Back</button>
+          <button style={pBtn('ghost', { width: '100%' })} onClick={startOver}>Not yet, start over</button>
+        </div>
+      )}
+
+      {stage === 'asleep' && (
+        <div data-pr-asleep>
+          <div style={{ fontSize: 26, fontWeight: 700, color: PC.text, marginBottom: 8 }}>Back to sleep at {rec.sleeps.length ? pTimeHM(new Date(rec.sleeps[rec.sleeps.length - 1].at)) : pTimeHM()}.</div>
+          <div style={{ fontSize: 15, color: PC.muted, marginBottom: 16 }}>Your place is kept. When you wake again, tap the button.</div>
+          <button style={pBtn('warn', { width: '100%', minHeight: 64, fontSize: 20 })} onClick={awakeAgain}>I'm awake again</button>
+        </div>
+      )}
+
       {stage === 'steps' && !noMore && queue[idx] && (
         <div>
           <div style={{ fontSize: 13, color: PC.muted, marginBottom: 8, fontFamily: pMono }}>Step {idx + 1} of {queue.length}</div>
           <div style={{ fontSize: 28, fontWeight: 700, color: PC.text, lineHeight: 1.35, marginBottom: 16 }}>{queue[idx].text}</div>
-          {queue[idx].kind === 'count' ? <PHiddenCount key={`c${idx}`} target={60} /> : (pDuration(queue[idx].text) ? <PTimer key={`t${idx}-${queue[idx].text}`} seconds={pDuration(queue[idx].text)} /> : null)}
+          {queue[idx].kind === 'count' ? <PHiddenCount key={`c${idx}`} target={60} attempts={rec.counts} onAttempt={addCount} onPosition={setCountPos} /> : (pDuration(queue[idx].text) ? <PTimer key={`t${idx}-${queue[idx].text}`} seconds={pDuration(queue[idx].text)} /> : null)}
           <div style={{ marginBottom: 10 }}><window.NwStepNote key={`s${idx}`} value={noteOf(idx)} onChange={v => setNote(idx, queue[idx].text, v)} /></div>
           {idx < queue.length - 1 ? (
             <>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
-                <button style={pBtn('solid', { minHeight: 60, fontSize: 16 })} onClick={() => setIdx(idx + 1)}>Done, next</button>
-                <button style={pBtn('ghost', { minHeight: 60, fontSize: 16 })} onClick={tryAnother}>Didn't work, try another</button>
+              <div style={{ display: 'grid', gridTemplateColumns: queue[idx].required ? '1fr' : '1fr 1fr', gap: 8, marginBottom: 10 }}>
+                <button style={pBtn('solid', { minHeight: 60, fontSize: 16 })} onClick={stepDone}>Done, next</button>
+                {!queue[idx].required && <button style={pBtn('ghost', { minHeight: 60, fontSize: 16 })} onClick={stepSkip}>Not today</button>}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 8, marginBottom: 10 }}>
+                <button style={pBtn('ghost', { minHeight: 48 })} onClick={stepBack}>Back</button>
+                <button style={pBtn('ghost', { minHeight: 48, fontSize: 14 })} onClick={tryAnother}>Didn't work, try another</button>
               </div>
               <button style={pBtn('warn', { width: '100%', minHeight: 64, fontSize: 20, marginBottom: 14 })} disabled={busy} onClick={imUp}>I'm up and moving</button>
             </>
@@ -10976,6 +11223,10 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
                 <button style={pBtn('warn', { minHeight: 60, fontSize: 16 })} disabled={busy} onClick={imUp}>I'm up and moving</button>
                 <button style={pBtn('ghost', { minHeight: 60, fontSize: 16 })} onClick={tryAnother}>Didn't work, try another</button>
               </div>
+              <div style={{ display: 'grid', gridTemplateColumns: queue[idx].required ? '1fr' : '1fr 1fr', gap: 8, marginBottom: 10 }}>
+                <button style={pBtn('ghost', { minHeight: 48 })} onClick={stepBack}>Back</button>
+                {!queue[idx].required && <button style={pBtn('ghost', { minHeight: 48 })} onClick={stepSkip}>Not today</button>}
+              </div>
               <button style={pBtn('ghost', { width: '100%', marginBottom: 14 })} onClick={startOver}>Not yet, start over</button>
             </>
           )}
@@ -10984,6 +11235,10 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
           {coach.err && <><PNote msg={`❌ ${coach.err} The steps above still work.`} /><PSaved saved={coach.saved} /></>}
           {coach.picks && <div style={{ marginTop: 12 }}><PPicks picks={coach.picks} onStart={(id, pick) => onStart(id, 'app-waking', pPickNote(coach.words, pick))} /><PSaved saved={coach.saved} /></div>}
         </div>
+      )}
+
+      {(stage === 'q1' || stage === 'q2' || stage === 'steps') && (
+        <button data-pr-sleep style={pBtn('ghost', { width: '100%', marginTop: 14, fontSize: 14 })} disabled={busy} onClick={goSleep}>Going back to sleep</button>
       )}
 
       {stage === 'up' && (
@@ -11584,6 +11839,305 @@ function ProgressScreen({ data, refreshKey }) {
 // PRACTICE APP — sub-screens + shared data
 // ─────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────
+// BUILD v3 · PART 1 — Joy, Lights out, Day history, one-time seeds
+// ─────────────────────────────────────────────────────
+
+const P_FALLBACK_NAMES = { 'lights-out': 'Lights out', 'waking-ladder': 'Waking ladder' };
+const pPracticeName = (pb, id) => pFindPractice(pb, id)?.name || P_FALLBACK_NAMES[id] || id;
+const pMonthKey = (d = new Date()) => `${d.getFullYear()}_${pTwo(d.getMonth() + 1)}`;
+const P_JOY_WHO = ['Corky', 'Bubbess', 'Flora', 'Dolly', 'Diah', 'Rob', 'Kristy'];
+
+// Joys: practice:joy:<YYYY_MM>, { month, entries: [{ id, at, time, what, who[] }] }. Append-only (merged by id).
+function pAddJoy({ what, who, time, date = new Date() }) {
+  const d = new Date(date);
+  if (/^\d\d:\d\d$/.test(time || '')) d.setHours(+time.slice(0, 2), +time.slice(3), 0, 0);
+  const id = `joy_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const entry = { id, at: d.toISOString(), time: pTimeHM(d), what: String(what).trim(), who: (who || []).filter(Boolean) };
+  return pUpdate(P_KEYS.joy(pMonthKey(d)), () => ({ month: pMonthKey(d), entries: [] }), (doc) => {
+    doc.entries = Array.isArray(doc.entries) ? doc.entries : [];
+    doc.entries.push(entry);
+    return doc;
+  }).then(doc => ({ doc, entry }));
+}
+// Every joy there is, newest first. [{ id, at, time, what, who, iso }]
+async function pReadJoys() {
+  const out = [];
+  let rows = null;
+  try { if (typeof window.storage?.listPrefix === 'function') rows = await window.storage.listPrefix('practice:joy:'); } catch (_) { rows = null; }
+  const docs = [];
+  if (Array.isArray(rows)) rows.forEach(r => { try { docs.push(JSON.parse(r.value)); } catch (_) {} });
+  else {
+    for (let k = 0; k < 3; k++) { const d = pDaysAgo(0); d.setMonth(d.getMonth() - k); const r = await pRead(P_KEYS.joy(pMonthKey(d))); if (r.data) docs.push(r.data); }
+  }
+  docs.forEach(doc => pLive(Array.isArray(doc?.entries) ? doc.entries : []).forEach(e => {
+    if (!e || !e.what) return;
+    const d = e.at ? new Date(e.at) : null;
+    out.push({ ...e, iso: d && !isNaN(d) ? pLocalISO(d) : '', time: e.time || (d && !isNaN(d) ? pTimeHM(d) : '') });
+  }));
+  return out.sort((a, b) => `${b.iso} ${b.time}`.localeCompare(`${a.iso} ${a.time}`));
+}
+
+function JoyPanel({ tab, onDone }) {
+  const [what, setWhat, clearWhat] = window.useDraft(tab, 'joy-what', '');
+  const [who, setWho, clearWho] = window.useDraft(tab, 'joy-who', []);
+  const [typed, setTyped, clearTyped] = window.useDraft(tab, 'joy-newname', '');
+  const [time, setTime] = useState(pTimeHM());
+  const [names, setNames] = useState(P_JOY_WHO);
+  const [busy, wrap] = window.useBusy();
+  const [msg, setMsg] = useState('');
+  useEffect(() => {
+    let live = true;
+    pReadJoys().then(js => {
+      const seen = [];
+      js.forEach(j => (j.who || []).forEach(n => { if (!P_JOY_WHO.includes(n) && !seen.includes(n)) seen.push(n); }));
+      if (live) setNames([...P_JOY_WHO, ...seen]);
+    }).catch(() => {});
+    return () => { live = false; };
+  }, []);
+  const chips = [...names, ...who.filter(n => !names.includes(n))];
+  const toggle = (n) => setWho(who.includes(n) ? who.filter(x => x !== n) : [...who, n]);
+  const addTyped = () => { const n = typed.trim(); if (!n) return; if (!who.includes(n)) setWho([...who, n]); clearTyped(); };
+  const save = wrap(async () => {
+    if (!what.trim()) return;
+    const names2 = typed.trim() && !who.includes(typed.trim()) ? [...who, typed.trim()] : who;
+    const summary = `Joy: ${what.trim().slice(0, 40)}${what.trim().length > 40 ? '…' : ''}`;
+    const r = await window.nwLog({
+      tab, what: summary, scope: 'joy', sig: JSON.stringify([what.trim(), names2]),
+      run: async () => {
+        try {
+          const { doc, entry } = await pAddJoy({ what, who: names2, time });
+          const mk = pMonthKey(new Date(entry.at));
+          return {
+            where: pWhere.get(doc) || 'cloud', ref: { id: entry.id, what: summary },
+            undo: async () => { const d = await pUpdate(P_KEYS.joy(mk), null, (x) => { x.entries = (x.entries || []).filter(e => e.id !== entry.id); return x; }); return pWhere.get(d) || 'cloud'; },
+          };
+        } catch (e) { setMsg(`Not saved: ${e.message}`); return null; }
+      },
+    });
+    if (r && r.where) { clearWhat(); clearWho(); clearTyped(); setMsg(''); onDone && onDone(); }
+  });
+  return (
+    <div data-nw-joy>
+      <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>Joy</div>
+      <textarea aria-label="What happened" rows={3} value={what} onChange={e => setWhat(e.target.value)} placeholder="What happened" style={nwQuickInput} />
+      <div style={{ ...nwQuickLabel, marginTop: 8 }}>Who</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {chips.map(n => <button key={n} aria-pressed={who.includes(n)} onClick={() => toggle(n)} style={{ ...nwQuickBtn, ...(who.includes(n) ? nwQuickBtnOn : {}) }}>{n}</button>)}
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+        <input aria-label="Someone else" value={typed} onChange={e => setTyped(e.target.value)} placeholder="Someone else" style={{ ...nwQuickInput, minHeight: 36, flex: 1 }} />
+        <button style={nwQuickBtn} onClick={addTyped}>Add name</button>
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
+        <label htmlFor="nw-joy-time" style={{ fontSize: 13, color: '#9ca3af' }}>Time</label>
+        <input id="nw-joy-time" type="time" value={time} onChange={e => setTime(e.target.value)} style={{ ...nwQuickInput, minHeight: 36, width: 120 }} />
+        <button style={{ ...nwQuickBtn, ...nwQuickBtnOn, marginLeft: 'auto' }} disabled={busy || !what.trim()} onClick={save}>Save joy</button>
+      </div>
+      {msg && <div role="alert" style={{ fontSize: 13, color: '#fca5a5', marginTop: 6 }}>{msg}</div>}
+    </div>
+  );
+}
+
+function JoysScreen({ refreshKey }) {
+  const [joys, setJoys] = useState(null);
+  const [shown, setShown] = useState(30);
+  useEffect(() => { let live = true; pReadJoys().then(j => { if (live) setJoys(j); }).catch(() => { if (live) setJoys([]); }); return () => { live = false; }; }, [refreshKey]);
+  window.nwSetContext && window.nwSetContext('practice', { screen: 'Joys' });
+  if (!joys) return <div style={{ fontSize: 14, color: PC.muted }}>Reading joys…</div>;
+  const today = pLocalISO(), weekStart = pLocalISO(pDaysAgo(6));
+  const group = (j) => (j.iso === today ? 'Today' : j.iso >= weekStart ? 'This week' : 'Earlier');
+  const list = joys.slice(0, shown);
+  const heads = ['Today', 'This week', 'Earlier'];
+  return (
+    <div data-pr-joys>
+      {!joys.length && <div style={pCard()}><div style={{ fontSize: 14, color: PC.muted }}>No joys yet. The Joy button is at the bottom of every tab.</div></div>}
+      {heads.map(h => {
+        const items = list.filter(j => group(j) === h);
+        if (!items.length) return null;
+        return (
+          <div key={h} style={{ marginBottom: 14 }}>
+            <div style={pLabel}>{h} ({joys.filter(j => group(j) === h).length})</div>
+            {items.map(j => (
+              <div key={j.id} data-pr-joy style={pCard({ marginBottom: 8 })}>
+                <div style={{ fontSize: 12, color: PC.muted, fontFamily: pMono }}>{j.iso}{j.time ? ` ${j.time}` : ''}{j.approx ? ' (about)' : ''}{(j.who || []).length ? ` · ${j.who.join(', ')}` : ''}{j.seeded ? ' · seeded, typed by Nikhil' : ''}</div>
+                <div style={{ fontSize: 15, color: PC.text, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{j.what}</div>
+              </div>
+            ))}
+          </div>
+        );
+      })}
+      {joys.length > shown && <button style={pBtn('ghost', { width: '100%' })} onClick={() => setShown(n => n + 30)}>Show 30 more</button>}
+    </div>
+  );
+}
+
+// Lights out: one tap saves the time and where (bed, couch, other), with an optional line.
+function LightsOutCard({ onLog }) {
+  const [line, setLine, clearLine] = window.useDraft('practice', 'lights-out-line', '');
+  const [busy, wrap] = window.useBusy();
+  const go = wrap(async (place) => {
+    const ok = await onLog({ practiceId: 'lights-out', place, myNote: line.trim() || undefined, source: 'app' });
+    if (ok) clearLine();
+  });
+  return (
+    <div data-pr-lightsout style={pCard()}>
+      <div style={pLabel}>Lights out</div>
+      <input aria-label="Lights out line (optional)" value={line} onChange={e => setLine(e.target.value)} placeholder="One line (optional)" style={{ ...pInput, marginBottom: 8 }} />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+        {['bed', 'couch', 'other'].map(pl => <button key={pl} style={pBtn('ghost', { minHeight: 48 })} disabled={busy} onClick={() => go(pl)}>{pl[0].toUpperCase() + pl.slice(1)}</button>)}
+      </div>
+    </div>
+  );
+}
+
+// ── Day history: one day, read only, in time order, from what is already saved ──
+const pHM = (iso) => { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? pTimeHM(d) : ''; };
+function pRepLines(e) {
+  const lines = [];
+  if (e.place) lines.push(`Place: ${e.place}`);
+  if (e.sleepAt) lines.push(`Went back to sleep at ${pHM(e.sleepAt)}`);
+  if (e.note) lines.push(String(e.note));
+  if (e.myNote) lines.push(`My note: ${e.myNote}`);
+  if (e.eyesOpen) lines.push(`Eyes first opened about ${pHM(e.eyesOpen.at)}${e.minutesEyesToUp != null ? ` · ${e.minutesEyesToUp} min from eyes open to up` : ''}`);
+  if (e.wake) {
+    lines.push(`Waking flow ${pHM(e.wake.startedAt)} to ${pHM(e.wake.upAt)}${e.wake.minutesBetween != null ? ` · ${e.wake.minutesBetween} min` : ''}`);
+    (e.wake.steps || []).forEach(s => lines.push(`  Step ${s.n}: ${s.text} — ${s.outcome || 'shown'}${s.at ? ` ${pHM(s.at)}` : ''}${s.shownAt ? ` (shown ${pHM(s.shownAt)})` : ''}`));
+    (e.wake.sleeps || []).forEach(x => lines.push(`  Back to sleep ${pHM(x.at)}${x.backAt ? `, awake again ${pHM(x.backAt)}` : ''}`));
+  }
+  pCountsOf(e).forEach(c => lines.push(`Count attempt ${c.n}: ${Number(c.seconds).toFixed(1)} s (${pSigned(pOff(c.seconds))} from 60)${c.position ? ` · ${c.position}` : ''}${c.seeded ? ' · seeded, typed by Nikhil' : ''}`));
+  (e.stepNotes || []).forEach(sn => lines.push(`Step ${sn.step}${sn.text ? ` (${sn.text})` : ''}: ${sn.note}`));
+  return lines;
+}
+async function pDayItems(iso, playbook) {
+  const dk = iso.replace(/-/g, '_');
+  const items = [];
+  const [lg, ak, nt, rp] = await Promise.all([pRead(P_KEYS.log(dk)), pRead(P_KEYS.asks(dk)), pRead(`notes:${dk}`), pRead(P_KEYS.ramp(dk))]);
+  (lg.data?.entries || []).forEach(e => {
+    if (!e) return;
+    const lv = pLevel(e.level);
+    items.push({ t: pTimeOf(e) || null, kind: e.practiceId === 'lights-out' ? 'Lights out' : 'Practice',
+      title: `${pPracticeName(playbook, e.practiceId)}${lv != null ? ` · level ${lv}` : ''}${e.before != null || e.after != null ? ` · before ${e.before ?? '–'}, after ${e.after ?? '–'}` : ''}`, lines: pRepLines(e) });
+  });
+  (ak.data?.entries || []).forEach(a => {
+    if (!a) return;
+    items.push({ t: pTimeOf(a) || null, kind: 'Asked Claude', title: `${a.kind || 'ask'}: ${String(a.words || '').slice(0, 200)}`, lines: a.text ? [String(a.text).slice(0, 400)] : [] });
+  });
+  (nt.data?.notes || []).forEach(n => {
+    if (!n || n.deleted || !n.text) return;
+    items.push({ t: pHM(n.at) || null, kind: 'Note', title: `${n.tab || ''}${n.screen ? ` · ${n.screen}` : ''}${n.practice ? ` · ${n.practice}` : ''}`.replace(/^ · /, ''), lines: [n.text] });
+  });
+  (await pReadJoys().catch(() => [])).filter(j => j.iso === iso).forEach(j => items.push({ t: j.time || null, kind: 'Joy', title: `${(j.who || []).join(', ') || 'Joy'}`, lines: [j.what] }));
+  (rp.data?.entries || []).forEach(r => {
+    if (!r) return;
+    items.push({ t: pHM(r.at) || null, kind: 'What now?', title: String(r.words || '').slice(0, 200), lines: pRampLines ? pRampLines(r) : [] });
+  });
+  const caps = window.nwBrainDump && window.nwBrainDump.capturesFor ? await window.nwBrainDump.capturesFor(iso) : [];
+  caps.forEach(c => items.push({ t: c.time || null, kind: 'Brain Dump', title: `${c.status === 'sent' ? 'sent' : 'on this device'}`, lines: [c.text] }));
+  const byTime = window.nwByTime(items, (x) => x.t);
+  return { items: byTime, errors: [lg, ak, nt].filter(r => r.error).length };
+}
+const pRampLines = (r) => {
+  const lines = [];
+  (r.result?.patterns || []).forEach(x => lines.push(`Pattern: ${x}`));
+  (r.result?.options || []).forEach((o, i) => lines.push(`Option ${i + 1}: ${(o.steps || []).map(s => s.step || s.action || '').join(' → ')}`));
+  return lines;
+};
+
+function HistoryScreen({ data }) {
+  const [iso, setIso] = useState(pLocalISO());
+  const [st, setSt] = useState({ loading: true, items: [], errors: 0 });
+  useEffect(() => {
+    let live = true;
+    setSt(s => ({ ...s, loading: true }));
+    pDayItems(iso, data.playbook).then(r => { if (live) setSt({ loading: false, ...r }); }).catch(() => { if (live) setSt({ loading: false, items: [], errors: 1 }); });
+    return () => { live = false; };
+  }, [iso, data.playbook]);
+  window.nwSetContext && window.nwSetContext('practice', { screen: 'Day history' });
+  return (
+    <div data-pr-history>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
+        <label htmlFor="pr-hist-date" style={{ fontSize: 14, color: PC.muted }}>Day</label>
+        <input id="pr-hist-date" type="date" value={iso} max={pLocalISO()} onChange={e => e.target.value && setIso(e.target.value)} style={{ ...pInput, flex: 1 }} />
+        <button style={pBtn('ghost')} onClick={() => setIso(pLocalISO())}>Today</button>
+      </div>
+      {st.loading && <div style={{ fontSize: 14, color: PC.muted }}>Reading the day…</div>}
+      {!st.loading && st.errors > 0 && <PNote msg="❌ Part of this day couldn't be read." />}
+      {!st.loading && !st.items.length && <div style={{ fontSize: 14, color: PC.muted }}>Nothing saved for this day.</div>}
+      {st.items.map((it, k) => (
+        <div key={k} data-pr-hist-item style={pCard({ marginBottom: 8, padding: 12 })}>
+          <div style={{ fontSize: 12, color: PC.muted, fontFamily: pMono }}>{it.t || 'no time'} · {it.kind}</div>
+          <div style={{ fontSize: 15, color: PC.text, fontWeight: 600, lineHeight: 1.4, overflowWrap: 'anywhere' }}>{it.title}</div>
+          {it.lines.map((l, j) => <div key={j} style={{ fontSize: 13, color: PC.text, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{l}</div>)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── One-time seeds, typed by Nikhil (dates from his own notes). Written once; marked in practice:seeds. ──
+const P_SEED_NOTE = 'seeded, typed by Nikhil';
+const P_SEED_COUNTS = [
+  { id: 'seed_counts_2026_10_10_a', day: '2026-10-10', seconds: [59] },
+  { id: 'seed_counts_earlier', day: '2026-10-10', seconds: [47, 50, 54], dateUnknown: true },
+  { id: 'seed_counts_2026_10_22', day: '2026-10-22', seconds: [84, 54] },
+  { id: 'seed_counts_2026_10_25', day: '2026-10-25', seconds: [70, 43, 62] },
+  { id: 'seed_counts_2026_10_28', day: '2026-10-28', seconds: [93, 68], late: [1] },
+];
+const P_SEED_JOYS = [{ id: 'seed_joy_2026_10_10', day: '2026-10-10', time: '12:00', what: 'Corky and I mock dog ears and head cocking through the window, made me laugh and honestly felt nice.', who: ['Corky'] }];
+async function pSeedOnce() {
+  const today = pLocalISO();
+  const marks = (await pRead(P_KEYS.seeds)).data || {};
+  const done = { ...marks };
+  let wrote = false;
+  const groups = [['counts_v1', P_SEED_COUNTS], ['joys_v1', P_SEED_JOYS]];
+  for (const [name, list] of groups) {
+    if (done[name]) continue;
+    if (list.some(x => x.day > today)) continue; // a day that hasn't happened on this device's clock yet: try again later
+    for (const x of list) {
+      const dk = x.day.replace(/-/g, '_');
+      if (name === 'counts_v1') {
+        const entry = { id: x.id, practiceId: 'passage-of-time', source: P_SEED_NOTE, seeded: P_SEED_NOTE, ...(x.dateUnknown ? { dateUnknown: true, note: 'Three earlier mornings, dates unknown' } : {}),
+          counts: x.seconds.map((s, k) => ({ n: k + 1, seconds: s, seeded: true, ...((x.late || []).includes(k) ? { startedLate: true } : {}) })) };
+        await pUpdate(P_KEYS.log(dk), () => ({ date: x.day, entries: [] }), (doc) => { doc.entries = doc.entries || []; if (!doc.entries.some(e => e.id === x.id)) doc.entries.push(entry); return doc; });
+      } else {
+        const d = new Date(`${x.day}T${x.time}:00`);
+        const entry = { id: x.id, at: d.toISOString(), time: x.time, approx: true, what: x.what, who: x.who, seeded: P_SEED_NOTE };
+        await pUpdate(P_KEYS.joy(dk.slice(0, 7)), () => ({ month: dk.slice(0, 7), entries: [] }), (doc) => { doc.entries = doc.entries || []; if (!doc.entries.some(e => e.id === x.id)) doc.entries.push(entry); return doc; });
+      }
+      wrote = true;
+    }
+    done[name] = new Date().toISOString();
+  }
+  if (JSON.stringify(done) !== JSON.stringify(marks)) await pWrite(P_KEYS.seeds, done);
+  return wrote;
+}
+
+// ── The row of quick buttons at the bottom of every tab (Joy, and later Brain Dump, Predict) ──
+const nwQuickBtn = { minHeight: 36, padding: '6px 12px', background: 'transparent', color: '#4ECDC4', border: '1px solid #4ECDC4', borderRadius: 8, fontSize: 13, fontWeight: 600, fontFamily: "'DM Sans', system-ui, sans-serif", cursor: 'pointer' };
+const nwQuickBtnOn = { background: '#4ECDC4', color: '#0f1117' };
+const nwQuickInput = { width: '100%', minHeight: 60, padding: '8px 10px', fontSize: 15, background: '#0b0d12', color: '#e4e4e7', border: '1px solid #333', borderRadius: 8, boxSizing: 'border-box', fontFamily: "'DM Sans', system-ui, sans-serif", resize: 'vertical' };
+const nwQuickLabel = { fontSize: 11, color: '#9ca3af', letterSpacing: 1, fontFamily: "'Space Mono', monospace" };
+const NW_QUICK = [{ id: 'joy', label: 'Joy', Panel: JoyPanel }];
+function NwQuickActions({ tab }) {
+  const [open, setOpen] = useState(null);
+  useEffect(() => { setOpen(null); }, [tab]);
+  const cur = NW_QUICK.find(q => q.id === open);
+  return (
+    <>
+      {cur && (
+        <div data-nw-quickpanel style={{ flexShrink: 0, maxHeight: '60vh', overflowY: 'auto', padding: '10px 16px', background: '#141414', borderTop: '1px solid #333', color: '#e4e4e7', fontFamily: "'DM Sans', system-ui, sans-serif", position: 'relative', zIndex: 9997 }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4 }}><button style={nwQuickBtn} onClick={() => setOpen(null)}>Close</button></div>
+          <cur.Panel tab={tab} onDone={() => setOpen(null)} />
+        </div>
+      )}
+      <div data-nw-quickbar style={{ flexShrink: 0, display: 'flex', gap: 6, padding: '4px 10px', background: '#141414', borderTop: '1px solid #262626' }}>
+        {NW_QUICK.map(q => <button key={q.id} data-nw-quick={q.id} aria-expanded={open === q.id} onClick={() => setOpen(o => (o === q.id ? null : q.id))} style={{ ...nwQuickBtn, minHeight: 32, padding: '2px 12px', ...(open === q.id ? { background: '#1f3f3c' } : {}) }}>{q.label}</button>)}
+      </div>
+    </>
+  );
+}
+
 const P_SCREENS = [
   { id: 'today',    label: 'Today' },
   { id: 'library',  label: 'Library' },
@@ -11591,6 +12145,8 @@ const P_SCREENS = [
   { id: 'shobha',   label: 'Dr. Shobha' },
   { id: 'gaps',     label: 'Gaps' },
   { id: 'progress', label: 'Progress' },
+  { id: 'joys',     label: 'Joys' },
+  { id: 'history',  label: 'History' },
 ];
 
 function PracticeApp() {
@@ -11631,6 +12187,8 @@ function PracticeApp() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+  // One-time seeds from Nikhil's own notes (counts, a joy); written once, marked in practice:seeds.
+  useEffect(() => { pSeedOnce().then(w => { if (w) load(); }).catch(() => {}); }, []);
   // Routines write the same docs; re-read when the app comes back into view.
   useEffect(() => {
     const onVis = () => { if (document.visibilityState === 'visible') load(); };
@@ -11663,8 +12221,8 @@ function PracticeApp() {
 
   // Logs one rep once: a double tap or a repeat within 60 seconds shows "Already logged · Log again".
   const logRep = async (entry, opts = {}) => {
-    const name = pFindPractice(data.playbook, entry.practiceId)?.name || entry.practiceId;
-    const what = `${name}${pLevel(entry.level) != null ? ` · level ${pLevel(entry.level)}` : ''}`;
+    const name = pPracticeName(data.playbook, entry.practiceId);
+    const what = `${name}${pLevel(entry.level) != null ? ` · level ${pLevel(entry.level)}` : ''}${entry.place ? ` · ${entry.place}` : ''}`;
     const r = await window.nwLog({
       tab: 'practice', what, scope: 'practice-log', sig: pEntrySig({ ...entry, source: entry.source || 'app' }), force: opts.force,
       run: async (o) => {
@@ -11859,6 +12417,8 @@ function PracticeApp() {
   else if (screen === 'shobha') base = <ShobhaScreen data={data} onAddQueue={addQueueItem} onCover={markCovered} onAddUpdate={addHomeworkUpdate} flash={flash} />;
   else if (screen === 'gaps') base = <GapsScreen data={data} onAddGap={addGap} />;
   else if (screen === 'progress') base = <ProgressScreen data={data} refreshKey={refreshKey} />;
+  else if (screen === 'joys') base = <JoysScreen refreshKey={refreshKey} />;
+  else if (screen === 'history') base = <HistoryScreen data={data} />;
 
   const body = (
     <>
@@ -11897,6 +12457,7 @@ function PracticeApp() {
 }
 
 window.PracticeApp = PracticeApp;
+window.NwQuickActions = NwQuickActions;
 window.pSaveAsk = pSaveAsk; // Kaizen's session-pattern analysis saves its answer the same way
   </script>
 
@@ -12843,6 +13404,7 @@ function App() {
       </div>
 
       {window.NwSavedBar && <window.NwSavedBar />}
+      {window.NwQuickActions && <window.NwQuickActions tab={activeTab} />}
       {window.NwQuickNote
         ? <window.NwQuickNote tab={activeTab}>{window.NwSaveStatusLine && <window.NwSaveStatusLine />}</window.NwQuickNote>
         : window.NwSaveStatusLine && <window.NwSaveStatusLine />}

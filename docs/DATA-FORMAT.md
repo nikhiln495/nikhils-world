@@ -254,6 +254,48 @@ steps from 3). `note` keeps its old meaning (e.g. the "Asked Claude" context). A
 keeps the old value in `edits: [{ at, field, from }]`. Entries are stored in the order logged; screens show
 them in time order (no time last).
 
+### Fields added in build v3 (Nov 2026)
+
+Practice log entries may also carry (all optional, copied as given):
+
+- `wake` — the waking-flow record on the `waking-ladder` level-4 entry: `{ startedAt, upAt, minutesBetween,
+  backs, steps: [{ n, text, source, shownAt, outcome, at, trail: [{ k, t }] }], sleeps?: [{ at, backAt? }] }`.
+  `n` is the step's place in the queue ("Step n of m" on screen); `source` is the practice the step came from
+  (`wake-sequence` for flow items); `outcome` is the last of `done | skipped | back | tried-another`; `trail` is
+  every event on that step with its time (`shown`, `done`, `skipped`, `back`, `tried-another`). A Back is
+  recorded on the step it was pressed on.
+- `eyesOpen` — `{ kind: now|15|30|45|60|time, at (ISO), minutesAgo, plus? }` and `minutesEyesToUp`.
+- `sleepAt` — on a `waking-ladder` entry with no `level` and `source: "app-waking-sleep"`: the time he went back to sleep.
+- `counts` — count-to-60 attempts: `[{ n, seconds (one decimal), position?: lying|sitting|standing, at, seeded?,
+  startedLate? }]`. Used by `passage-of-time` entries and by the waking-ladder entry.
+- `place` — on `lights-out` entries: `bed | couch | other` (the line he adds is `myNote`).
+- `seeded` / `dateUnknown` — an entry typed by Nikhil from his own notes (`"seeded, typed by Nikhil"`);
+  `dateUnknown` marks attempts whose morning is not known (kept on Oct 10, left out of the 14-day chart).
+- `situation` — the optional "What's going on right now?" line a flow starts with.
+
+## Joys (practice:joy:<YYYY_MM>)
+
+`{ "month", "entries": [{ id, at (ISO), time (HH:MM), what, who: [names], approx?, seeded? }] }`. One doc per
+month, append-only, merged by `id` exactly like the practice log (same transaction, same `u` rule). Undo
+leaves `{ id, deleted: true, u }`. No ratings.
+
+## What now? (practice:ramp:<YYYY_MM_DD>)
+
+`{ "entries": [{ id, at, time, words, result, ... }] }`. Append-only, merged by `id` like the practice log.
+Holds what he typed and Claude's answer (patterns, options, parked worries, new tasks). Only rows the work
+filter allows are ever in it (see Ledger below).
+
+## Feedback for the app (feedback:app)
+
+`{ "entries": [{ id, at, date, screen, text, status: new|planned|done }] }`, append-only, merged by `id`.
+Build sessions read this first.
+
+## One-time seeds (practice:seeds)
+
+`{ counts_v1: <ISO>, joys_v1: <ISO> }`: which one-time seeds from Nikhil's notes are already written. A seed
+is written once, by fixed entry ids (`seed_counts_*`, `seed_joy_*`), and only after its dates have happened
+on the device's clock.
+
 ## Kaizen tasks
 
 A task or subtask marked done in the app gets `doneAt` (ISO time); reopening it (or Undo) removes it. Tasks

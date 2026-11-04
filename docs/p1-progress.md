@@ -14,6 +14,28 @@ All 4 steps are committed, plus one follow-up Nikhil asked for after reviewing: 
 
 **Drafts, notes everywhere, log tidy, cost tracker, room on this device** is on `claude/gallant-lamport-dgg90d` as a draft PR (see the section below).
 
+## Build v3 (Nov 3-4, 2026)
+
+Branch: `claude/compassionate-cannon-gdqecq`, draft PR. Starts from main after PR #18. Tests: `scripts/v3-test.js`.
+
+Also done first: in the Library detail the buttons (Start, Log rep, Change status) are now above When / Steps / Note /
+Source / History / Last reps, and a "Reps, all time" block (total, first and latest day, "Show all N reps") sits under
+"Last reps (30 days)".
+
+### Part 1 · Stop the remaining losses
+
+| Item | What changed | How checked |
+|------|--------------|-------------|
+| 1 Waking record | The waking-ladder level-4 entry carries `wake` (start, up tap, minutes between, every step: number, text, source, shown time, outcome with time, trail), written before the waking draft is cleared | `v3-test.js 1`: all fields; log write comes before the draft clear |
+| 2 Back | Every waking step has Back (to the previous step; from step 1 to the question screen); typed notes stay; the Back is recorded | note survives Back; `wake.backs` |
+| 3 Not today | Next to Done, next; recorded as `skipped`; flow items with `required: true` get none | required step has no button; step 3 `skipped` |
+| 4 Eyes open | First screen: just now / 15 / 30 / 45 / 60+ min ago / pick a time → `eyesOpen`, `minutesEyesToUp` | 30 min ago → 06:10, 30 min |
+| 5 Going back to sleep | Button on the waking screens: logs `sleepAt`, keeps the flow; Today shows Continue; "I'm awake again" resumes the step | resume at step 2 |
+| 6 Count to 60 | `PHiddenCount` (guided flow, waking, `kind: count`): attempts `{ n, seconds (0.1), position?, at }` saved on the entry; this morning's list; 14-day best-per-day chart (distance from 60); seeds written once | attempts on the entry; chart values from the seeds; seed twice writes nothing; seeds wait for their dates |
+| 7 Joy | Button at the bottom of every tab; `practice:joy:YYYY_MM`; chips (+ typed names offered next time), editable time; Joys view; the Oct 10 joy seeded | all tabs, Undo, names, Joys order |
+| 8 Lights out | Today: Bed / Couch / Other with an optional line → `lights-out` entry with `place` | places, time, offline wording |
+| 9 Day history | Practice > History: one day, read only, time order, date picker; log entries with step records and counts, asks, notes, joys, What now results and Brain Dump captures when they exist | seven item kinds in time order, past day |
+
 ## Drafts, notes everywhere, log tidy, cost tracker, room on this device (Oct 5)
 
 Branch: `claude/gallant-lamport-dgg90d`, draft PR. Precondition: main contains the storage and Drive session (`grep -c "SEALED_LOG_KEYS" index.html` → 17; `sw.js` and `tools/drive-backup.gs` exist). ✅

@@ -255,7 +255,7 @@ async function step3() {
     await page.waitForTimeout(2200);
     await clickName(page, 'Done');
     t = await visibleText(page);
-    ok(/Real time: 2 seconds/.test(t), 'Done shows the real elapsed seconds');
+    ok(/Real time: 2\.\d seconds/.test(t), 'Done shows the real elapsed seconds (to one decimal)');
     await clickName(page, '✕ Close');
 
     await openFlow('Grief release'); await clickName(page, 'Begin');

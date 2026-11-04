@@ -8,6 +8,8 @@
 // 6. sw-test.js             — opens offline at / and /nikhils-world/ (service worker, manifest, new deploys)
 // 7. notes-test.js all      — drafts in every tab, notes, the Saved / Add note / Undo bar, log tidy, Kaizen
 //                             doneAt, two-device merges, the Claude cost tracker, room on this device, offline
+// 8. v3-test.js all          — build v3 (Nov 2026): waking step record, count attempts, Joy, Lights out, Day history,
+//                             the Ledger and Brain Dump (Google requests faked), What now?, predictions, small fixes
 // Plus: index.html must not call api.anthropic.com directly (everything goes through the AI proxy).
 // The live Firestore is never touched: every run uses an in-memory mock or fake Firestore.
 const { spawnSync } = require('child_process');
@@ -23,6 +25,7 @@ const steps = [
   ['backups and Drive', ['backup-test.js', 'all']],
   ['offline (service worker)', ['sw-test.js']],
   ['drafts, notes, saved bar, cost, device room', ['notes-test.js', 'all']],
+  ['build v3: waking record, counts, joy, Ledger, Brain Dump, What now, predictions', ['v3-test.js', 'all']],
 ];
 const results = [];
 const html = fs.readFileSync(path.join(dir, '..', 'index.html'), 'utf8');
