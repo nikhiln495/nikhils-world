@@ -750,7 +750,7 @@ async function step5() {
     await page.getByLabel('Ask Claude', { exact: true }).fill(words);
     await clickName(page, 'Pick practices for me'); await page.waitForTimeout(500);
     const call = ctx.proxyCalls[ctx.proxyCalls.length - 1];
-    ok(Array.isArray(call.system) && call.system.length === 1 && call.system[0].type === 'text' && JSON.stringify(call.system[0].cache_control) === '{"type":"ephemeral"}' && Object.keys(call.system[0]).sort().join(',') === 'cache_control,text,type' && call.system[0].text.startsWith('Voice rules:'), 'B: system = [{type:"text", text, cache_control:{type:"ephemeral"}}]');
+    ok(Array.isArray(call.system) && call.system.length === 1 && call.system[0].type === 'text' && Object.keys(call.system[0]).sort().join(',') === 'text,type' && call.system[0].text.startsWith('Voice rules:'), 'B: a one-off ask has no cache breakpoint: system = [{type:"text", text}] (build v3: caching only on a follow-up within 5 minutes; see v3-test.js 5)');
     ok(!('cache_control' in call) && call.messages.every(m => typeof m.content === 'string') && Object.keys(call).sort().join(',') === 'max_tokens,messages,model,output_config,system,tool_choice,tools', 'B: no top-level automatic caching; the user message carries no breakpoint');
     let asks = await memJSON(page, asksKey('2026-10-04'));
     let r = asks?.entries?.[0];

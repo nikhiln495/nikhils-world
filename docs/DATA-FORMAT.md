@@ -296,6 +296,19 @@ Build sessions read this first.
 is written once, by fixed entry ids (`seed_counts_*`, `seed_joy_*`), and only after its dates have happened
 on the device's clock.
 
+## Playbook resources (practice:playbook)
+
+A practice may have `resources: [{ title, url, kind }]` (`kind` is free text such as `video`, `article`, `audio`).
+The Library detail lists them under the steps as links that open in a new tab (`target="_blank"`,
+`rel="noopener noreferrer"`); only `http(s)` URLs are shown. Nothing is fetched or embedded.
+
+## Play: reps (creative-reps)
+
+A plain integer string: the number of reps in Play, never lowered (the app uses the larger of this and the number of
+entries in the log; clearing the log leaves it alone). It replaces `creative-streak`, which the app no longer writes
+(an old doc may still exist). Idea-dump lines are `creative-catch` entries with `kind: "dump"`; one session is one
+`creative-log-v2` entry with `type: "dump"` (from Play) or one `idea-dump` practice rep (from the waking screen).
+
 ## Kaizen tasks
 
 A task or subtask marked done in the app gets `doneAt` (ISO time); reopening it (or Undo) removes it. Tasks

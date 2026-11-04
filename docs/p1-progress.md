@@ -69,6 +69,20 @@ Source / History / Last reps, and a "Reps, all time" block (total, first and lat
 | 5 Context line | "Predictions, last 30 days: N logged; came true X, partly Y, didn't Z. Newest with outcomes: …" added for Ask Claude, Something else, Coach me, Look outside and What now? (nothing added when there are none) | the line in four requests; absent with none |
 | two devices | prediction edits and new entries from the laptop are joined by id, no conflict copy | fake Firestore with a write between read and commit |
 
+### Part 5 · Small fixes
+
+| Item | What changed | How checked (`v3-test.js 5`) |
+|------|--------------|------------------|
+| 1 Opening line | Every guided flow and Waking up start with an optional "What's going on right now?" (saved as `situation`); every step screen has "Ask about this step" (practice name, step text, that line) | the request text; entry field; skipping leaves no field |
+| 2 These don't fit | Under Ask Claude / Something else and Coach me picks: optional reason, asks again with it, the new record has `feedback`; What now? has the same | request text; record |
+| 3 Voice | `P_SYNTH` (synthesize, name patterns, few highest-leverage options) added for Ask Claude / Something else / Coach me / Look outside / What now? | system text; old rules remain |
+| 4 Feedback | `feedback:app` (append-only); System tab box and list; Feedback button on every tab and in the Note panel; CLAUDE.md says build sessions read it first | saved with date, screen, text, status; listed |
+| 5 Resources | `resources: [{ title, url, kind }]` shown as new-tab links; documented in DATA-FORMAT.md | link attributes; bad URL hidden; no request |
+| 6 Caching | `cache_control` only on a follow-up within 5 minutes on the same screen (`screen` argument) | first ask none; second set; 6 minutes later none; another screen none |
+| 7 Idea dump | Waking up's last screen and Play's "10-min dump" tab: 10:00 countdown, Enter keeps a line as a `creative-catch` entry (kind `dump`) and clears; end shows only the count; one rep | separate entries; count only; rep logged |
+| 8 Reps | Play shows "N reps" (never lowered) instead of the streak; `creative-streak` is no longer written | stored 40 → 41; Reset Log leaves it |
+| 9 Play edits | An edit in progress is the draft `entry-edit` in `drafts:roulette` | draft saved after the pause |
+
 ## Drafts, notes everywhere, log tidy, cost tracker, room on this device (Oct 5)
 
 Branch: `claude/gallant-lamport-dgg90d`, draft PR. Precondition: main contains the storage and Drive session (`grep -c "SEALED_LOG_KEYS" index.html` → 17; `sw.js` and `tools/drive-backup.gs` exist). ✅

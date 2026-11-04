@@ -969,12 +969,239 @@ async function part4() {
   }
 }
 
+// ───────────────────────── Part 5 ─────────────────────────
+const stepHelpProxy = (extra = {}) => async (body) => {
+  if (body.tools && body.tools[0].name === 'choose_practices') return choosePicks()();
+  return { status: 200, json: { model: 'm', usage: { input_tokens: 10, output_tokens: 5 }, content: [{ type: 'text', text: 'Rest your hand on the floor first.' }], ...extra } };
+};
+async function part5() {
+  console.log('\n[5.1 Opening line, Ask about this step]');
+  {
+    const ctx = await openPractice({ seed: baseSeed(), now: '2026-11-04T09:00:00', proxy: stepHelpProxy() });
+    const { page } = ctx;
+    await page.getByRole('tab', { name: 'Library', exact: true }).click();
+    await page.locator('input[aria-label="Search practices"]').fill('Self-compassion break');
+    await page.getByText('Self-compassion break', { exact: true }).first().click();
+    await clickName(page, 'Start');
+    ok(await page.locator('textarea[aria-label="What\'s going on right now?"]').count() === 1 && /what's going on right now\? \(optional\)/i.test(await visibleText(page)), 'every flow starts with an optional "What\'s going on right now?"');
+    await page.locator('textarea[aria-label="What\'s going on right now?"]').fill('Sitting on the couch after a call');
+    await clickName(page, 'Begin');
+    await clickName(page, 'Ask about this step');
+    await page.waitForSelector('[data-pr-askstep] >> text=Rest your hand');
+    const call = ctx.proxyCalls[ctx.proxyCalls.length - 1];
+    ok(call.messages[0].content === "Practice: Self-compassion break\nStep: This is a moment of suffering\nWhat's going on right now: Sitting on the couch after a call" && !call.tools, 'sends the practice name, the step text and that line');
+    const asks = await memJSON(page, 'practice:asks:2026_11_04');
+    ok(asks.entries.some(e => e.kind === 'ask-step' && e.text === 'Rest your hand on the floor first.'), 'the answer is saved (kind ask-step)');
+    await clickName(page, 'Next'); await clickName(page, 'Next'); await clickName(page, 'Next');
+    await clickName(page, 'Save rep');
+    await wait(page, 500);
+    const e = (await todayLog(page, 'practice:log:2026_11_04')).entries.find(x => x.practiceId === 'sc-break');
+    ok(e && e.situation === 'Sitting on the couch after a call', 'the line is saved on the entry');
+    // skip it: no field
+    await page.getByRole('tab', { name: 'Library', exact: true }).click();
+    await page.locator('input[aria-label="Search practices"]').fill('Countdown');
+    await page.getByText('Countdown 5-4-3-2-1', { exact: true }).first().click();
+    await clickName(page, 'Start'); await clickName(page, 'Begin'); await clickName(page, 'Next'); await clickName(page, 'Next'); await clickName(page, 'Save rep');
+    await wait(page, 500);
+    const es = (await todayLog(page, 'practice:log:2026_11_04')).entries.filter(x => x.practiceId === 'countdown');
+    ok(es.length === 1 && es[0].situation === undefined, 'skippable: no line, no field');
+    // waking up
+    await page.getByRole('tab', { name: 'Today', exact: true }).click();
+    await clickName(page, 'Waking up');
+    await page.locator('textarea[aria-label="What\'s going on right now?"]').fill('Cold and heavy');
+    await clickName(page, 'Eyes closed'); await clickName(page, 'Next');
+    await clickName(page, 'Ask about this step');
+    await page.waitForSelector('[data-pr-askstep] >> text=Rest your hand');
+    const c2 = ctx.proxyCalls[ctx.proxyCalls.length - 1].messages[0].content;
+    ok(c2.startsWith('Practice: Waking up\nStep: Sit up.') && c2.endsWith("What's going on right now: Cold and heavy"), 'Waking up steps ask the same way');
+    await finish(ctx, 'situation + ask step');
+  }
+
+  console.log("\n[5.2/5.3 These don't fit; synthesize first]");
+  {
+    const ctx = await openPractice({ seed: baseSeed(), now: '2026-11-04T09:00:00', proxy: stepHelpProxy() });
+    const { page } = ctx;
+    await clickName(page, 'Stuck');
+    await page.getByLabel('Ask Claude', { exact: true }).fill('I keep rereading the chat');
+    await clickName(page, 'Pick practices for me'); await wait(page, 600);
+    const first = ctx.proxyCalls[ctx.proxyCalls.length - 1];
+    ok(/synthesize/i.test(first.system[0].text) && /highest-leverage/.test(first.system[0].text) && first.system[0].text.startsWith('Voice rules:'), 'voice rule: synthesize across what he wrote and his record, name patterns, few highest-leverage options; the old rules stay');
+    await page.locator('[data-pr-misfit] input').first().fill('too slow');
+    await clickName(page, "These don't fit");
+    await wait(page, 700);
+    const again = ctx.proxyCalls[ctx.proxyCalls.length - 1];
+    ok(again.messages[0].content.includes('did not fit. Why: too slow'), "These don't fit asks again with the reason");
+    const asks = await memJSON(page, 'practice:asks:2026_11_04');
+    ok(asks.entries.length === 2 && asks.entries[1].feedback === 'too slow' && asks.entries[0].feedback === undefined, 'and logs it (the feedback is on the new record)');
+    // look outside voice
+    await clickName(page, 'Look outside the playbook'); await wait(page, 600);
+    ok(/synthesize/i.test(ctx.proxyCalls[ctx.proxyCalls.length - 1].system[0].text), 'Look outside has the same voice rule');
+    await clickName(page, '✕ Close');
+    // coach me misfit
+    await clickName(page, 'Waking up'); await clickName(page, 'Eyes closed'); await clickName(page, 'Next');
+    await clickName(page, 'Coach me'); await wait(page, 600);
+    await page.locator('[data-pr-misfit] input').last().fill('no stairs');
+    await page.locator('[data-pr-misfit]').last().getByRole('button', { name: "These don't fit" }).click(); await wait(page, 700);
+    ok(ctx.proxyCalls[ctx.proxyCalls.length - 1].messages[0].content.includes('did not fit. Why: no stairs') && /synthesize/i.test(ctx.proxyCalls[ctx.proxyCalls.length - 1].system[0].text), 'Coach me: the same, with the voice rule');
+    await finish(ctx, 'misfit');
+  }
+
+  console.log('\n[5.6 Caching only on a follow-up within 5 minutes on the same screen]');
+  {
+    const ctx = await openPractice({ seed: baseSeed(), now: '2026-11-04T09:00:00', proxy: stepHelpProxy() });
+    const { page } = ctx;
+    await clickName(page, 'Stuck');
+    await page.getByLabel('Ask Claude', { exact: true }).fill('one');
+    await clickName(page, 'Pick practices for me'); await wait(page, 600);
+    const sysOf = () => ctx.proxyCalls[ctx.proxyCalls.length - 1].system[0];
+    ok(!('cache_control' in sysOf()), 'a one-off ask: no cache_control');
+    await page.getByLabel('Ask Claude', { exact: true }).fill('two');
+    await clickName(page, 'Pick practices for me'); await wait(page, 600);
+    ok(JSON.stringify(sysOf().cache_control) === '{"type":"ephemeral"}', 'a follow-up within 5 minutes on the same screen: cache_control set');
+    await page.evaluate(() => { const real = Date.now.bind(Date); Date.now = () => real() + 6 * 60000; });
+    await page.getByLabel('Ask Claude', { exact: true }).fill('three');
+    await clickName(page, 'Pick practices for me'); await wait(page, 600);
+    ok(!('cache_control' in sysOf()), 'more than 5 minutes later: no cache_control');
+    await clickName(page, '✕ Close');
+    await clickName(page, 'Waking up'); await clickName(page, 'Eyes closed'); await clickName(page, 'Next');
+    await clickName(page, 'Coach me'); await wait(page, 600);
+    ok(!('cache_control' in sysOf()), 'another screen: its first ask has none');
+    await finish(ctx, 'caching');
+  }
+
+  console.log('\n[5.4 Feedback for the app]');
+  {
+    const fakeDocs = {};
+    const ctx = await openPage({ fakeFirestore: fakeDocs, now: '2026-11-04T09:00:00' });
+    const { page } = ctx;
+    await page.waitForTimeout(3000);
+    await page.getByRole('button', { name: 'Practice', exact: true }).click();
+    await page.waitForSelector('.pr-root h1'); await wait(page, 500);
+    await page.getByRole('button', { name: 'Note', exact: true }).click();
+    await page.locator('[data-nw-note-feedback]').click();
+    ok(await page.locator('[data-nw-feedback] textarea').count() === 1, 'one tap from the Note button opens the feedback box');
+    await page.locator('textarea[aria-label="Feedback for the app"]').fill('Make the Start button bigger');
+    await page.locator('[data-nw-feedback]').getByRole('button', { name: 'Save feedback' }).click();
+    await wait(page, 700);
+    const fb = await page.evaluate(() => { const d = window.__fakeDocs.get('feedback_app'); return d ? JSON.parse(d.value) : null; });
+    const f = fb && fb.entries[0];
+    ok(f && f.text === 'Make the Start button bigger' && f.status === 'new' && f.date === '2026-11-04' && /practice/.test(f.screen) && f.id, 'saved append-only to feedback:app (date, screen, his words, status new)');
+    ok(/Saved/.test(await page.locator('[data-nw-savedbar]').first().innerText()), 'the Saved bar');
+    await page.getByRole('button', { name: 'System', exact: true }).click();
+    await page.locator('textarea[aria-label="Feedback for the app (System tab)"]').fill('Second one from System');
+    await page.locator('[data-nw-feedback-list]').getByRole('button', { name: 'Save feedback' }).click();
+    await wait(page, 700);
+    const items = await page.$$eval('[data-nw-feedback-item]', els => els.map(e => e.innerText));
+    ok(items.length === 2 && items[0].includes('Second one from System') && items[1].includes('Make the Start button bigger') && items[1].includes('new'), 'listed on the System tab, newest first, with status');
+    const fb2 = await page.evaluate(() => JSON.parse(window.__fakeDocs.get('feedback_app').value));
+    ok(fb2.entries.length === 2 && fb2.entries.some(e => e.text === 'Make the Start button bigger'), 'the first entry is kept (append-only)');
+    await finish(ctx, 'feedback');
+  }
+
+  console.log('\n[5.5 Playbook resources]');
+  {
+    const pb = JSON.parse(baseSeed()['practice:playbook']);
+    pb.practices.find(x => x.id === 'sc-break').resources = [{ title: 'Self-compassion break (video)', url: 'https://example.org/break', kind: 'video' }, { title: 'Bad', url: 'javascript:alert(1)', kind: 'x' }];
+    const ctx = await openPractice({ seed: baseSeed({ 'practice:playbook': JSON.stringify(pb) }), now: '2026-11-04T09:00:00' });
+    const { page } = ctx;
+    await page.getByRole('tab', { name: 'Library', exact: true }).click();
+    await page.getByText('Self-compassion break', { exact: true }).first().click();
+    const a = page.locator('a', { hasText: 'Self-compassion break (video)' });
+    ok(await a.count() === 1 && await a.getAttribute('target') === '_blank' && /noopener/.test(await a.getAttribute('rel')) && await a.getAttribute('href') === 'https://example.org/break', 'a resource shows as a link that opens in a new tab');
+    ok(await page.locator('a', { hasText: 'Bad' }).count() === 0, 'a non-web link is not shown');
+    ok((await visibleText(page)).includes('video'), 'its kind is shown');
+    ok(!ctx.proxyCalls.length, 'nothing fetched or embedded');
+    await finish(ctx, 'resources');
+  }
+
+  console.log('\n[5.7 10-minute idea dump]');
+  {
+    const ctx = await openPractice({ seed: baseSeed(), now: '2026-11-04T06:40:00' });
+    const { page } = ctx;
+    await page.evaluate(() => { window.__NW_DUMP_SECONDS = 4; });
+    await clickName(page, 'Waking up'); await clickName(page, 'Eyes closed'); await clickName(page, 'Next');
+    for (let i = 0; i < 7; i++) await clickName(page, 'Done, next');
+    await clickName(page, '10-minute idea dump');
+    await clickName(page, 'Start the 10 minutes');
+    ok(/0:0\d|0:04/.test(await page.locator('[data-pr-dump-clock]').innerText()), 'a visible countdown');
+    await page.locator('textarea[aria-label="Idea line"]').fill('A song about the stairs');
+    await page.locator('textarea[aria-label="Idea line"]').press('Enter');
+    ok(await page.locator('textarea[aria-label="Idea line"]').inputValue() === '', 'Enter keeps the line and clears the box (nothing to reread)');
+    await page.locator('textarea[aria-label="Idea line"]').fill('A map of every kitchen');
+    await page.locator('textarea[aria-label="Idea line"]').press('Enter');
+    await wait(page, 300);
+    const body = await page.locator('[data-pr-ideadump]').innerText();
+    ok(!body.includes('A song about the stairs'), 'no earlier line is shown mid-dump');
+    await page.waitForSelector('[data-pr-dump-done]', { timeout: 10000 });
+    ok((await page.locator('[data-pr-dump-done]').innerText()).startsWith('2 lines caught.') && !(await page.locator('[data-pr-ideadump]').innerText()).includes('stairs'), 'at the end only how many lines were caught');
+    await wait(page, 600);
+    const catches = JSON.parse(await mem(page, 'creative-catch'));
+    ok(catches.length === 2 && catches.every(c => c.kind === 'dump') && catches.some(c => c.text === 'A song about the stairs') && catches.some(c => c.text === 'A map of every kitchen'), 'each line is its own creative-catch entry, kind "dump"');
+    const lg = await todayLog(page, 'practice:log:2026_11_04');
+    ok(lg.entries.filter(x => x.practiceId === 'idea-dump').length === 1 && lg.entries.find(x => x.practiceId === 'idea-dump').note === '2 lines', 'one rep logged for the session');
+    await clickName(page, 'Close');
+    // Play tab
+    await page.getByRole('button', { name: 'Play', exact: true }).click();
+    await page.getByRole('button', { name: '10-min dump', exact: true }).click();
+    await clickName(page, 'Start the 10 minutes');
+    await page.locator('textarea[aria-label="Idea line"]').fill('Third idea');
+    await page.locator('textarea[aria-label="Idea line"]').press('Enter');
+    await clickName(page, 'Stop now');
+    ok((await page.locator('[data-pr-dump-done]').innerText()).startsWith('1 line caught.'), 'also in the Play tab');
+    await wait(page, 700);
+    const all = JSON.parse(await mem(page, 'creative-catch'));
+    ok(all.length === 3 && all.filter(c => c.kind === 'dump').length === 3, 'Play: the earlier lines are still there (one list)');
+    const clog = JSON.parse(await mem(page, 'creative-log-v2'));
+    ok(clog.some(e => e.type === 'dump' && e.notes === '1 line'), 'Play: one rep logged for the session');
+    await finish(ctx, 'idea dump');
+  }
+
+  console.log('\n[5.8/5.9 Play: reps only go up; an edit in progress is a draft]');
+  {
+    const log = [0, 1, 2].map(i => ({ date: `2026-11-0${i + 1}T10:00:00.000Z`, type: 'sense', prompt: 'Touch', category: 'sense', notes: i === 2 ? 'Cold stone' : '', fileLink: '' }));
+    const ctx = await openPage({ seed: { 'creative-log-v2': JSON.stringify(log), 'creative-reps': '40', 'creative-streak': '3' }, now: '2026-11-04T09:00:00' });
+    const { page } = ctx;
+    await page.waitForTimeout(3500);
+    await page.getByRole('button', { name: 'Play', exact: true }).click();
+    await wait(page, 800);
+    ok((await page.locator('[data-play-reps]').innerText()) === '40 reps', 'Play shows a count of reps (the stored 40 is more than the log) → ' + await page.locator('[data-play-reps]').innerText());
+    ok(!/streak/i.test(await page.locator('body').innerText()), 'no streak anywhere on the page');
+    const sets = await page.evaluate(() => window.__storageLog.filter(x => x[0] === 'set').map(x => x[1]));
+    ok(!sets.includes('creative-streak'), 'creative-streak (floored at 11) is no longer written');
+    await page.getByRole('button', { name: /^Sense/ }).click();
+    await page.getByRole('button', { name: /log|done|save/i }).filter({ hasText: /./ }).last().click();
+    await wait(page, 700);
+    ok((await page.locator('[data-play-reps]').innerText()) === '41 reps', 'logging adds a rep → ' + await page.locator('[data-play-reps]').innerText());
+    await page.getByRole('button', { name: /^Log \(/ }).click();
+    page.once('dialog', d => d.accept());
+    await page.getByRole('button', { name: 'Reset Log' }).click();
+    await wait(page, 500);
+    ok((await page.locator('[data-play-reps]').innerText()) === '41 reps' && (await mem(page, 'creative-reps')) === '41', 'clearing the log does not lower the count');
+    await ctx.browser.close();
+
+    // edit in progress is a draft
+    const ctx2 = await openPage({ seed: { 'creative-log-v2': JSON.stringify(log) }, now: '2026-11-04T09:00:00' });
+    const p2 = ctx2.page;
+    await p2.waitForTimeout(3500);
+    await p2.getByRole('button', { name: 'Play', exact: true }).click();
+    await p2.getByRole('button', { name: /^Log \(/ }).click();
+    await p2.getByText('Touch').first().click();
+    await p2.getByRole('button', { name: /EDIT/ }).first().click();
+    await p2.locator('textarea:visible').last().fill('Cold stone, then warm');
+    await wait(p2, 1500);
+    const drafts = JSON.parse(await mem(p2, 'drafts:roulette'));
+    ok(drafts.drafts['entry-edit'] && drafts.drafts['entry-edit'].v && drafts.drafts['entry-edit'].v.text === 'Cold stone, then warm', 'the edit in progress is saved as a draft (drafts:roulette)');
+    await ctx2.browser.close();
+  }
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
   if (which === 'all' || which === '1') await part1();
   if (which === 'all' || which === '2') await part2();
   if (which === 'all' || which === '3') await part3();
   if (which === 'all' || which === '4') await part4();
+  if (which === 'all' || which === '5') await part5();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

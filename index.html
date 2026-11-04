@@ -2456,6 +2456,7 @@ function NwQuickNote({ tab, children }) {
         <div data-nw-quicknote style={{ flexShrink: 0, maxHeight: '50vh', overflowY: 'auto', padding: '10px 16px', background: '#141414', borderTop: '1px solid #333', color: '#e4e4e7', fontFamily: "'DM Sans', system-ui, sans-serif", position: 'relative', zIndex: 9997 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
             <span style={{ flex: 1, fontSize: 13, color: '#9ca3af' }}>Note · {NW_TAB_NAMES[tab] || tab}{nwContext[tab]?.screen ? ` · ${nwContext[tab].screen}` : ''}</span>
+            <button data-nw-note-feedback style={nwBarBtn} onClick={() => { setOpen(false); window.dispatchEvent(new CustomEvent('nw-open-quick', { detail: 'feedback' })); }}>Feedback for the app</button>
             <button style={nwBarBtn} onClick={() => setOpen(false)}>Close</button>
           </div>
           <textarea aria-label="Quick note" rows={3} value={text} onChange={e => { setText(e.target.value); setMsg(''); }} placeholder="Write a note" style={nwBarInput} />
@@ -8566,15 +8567,18 @@ function CreativeRoulette() {
   const [filter, setFilter] = useState("all");
   const [buildItem, setBuildItem] = window.useDraft('roulette', 'build-item', "");
   const [buildNotes, setBuildNotes] = window.useDraft('roulette', 'build-notes', "");
-  const [streak, setStreak] = useState(0);
+  const [reps, setReps] = useState(0); // reps only go up: no streak, nothing that can break
   const [senseNotes, setSenseNotes] = window.useDraft('roulette', 'sense-notes', "");
   const [rouletteNotes, setRouletteNotes] = window.useDraft('roulette', 'roulette-notes', "");
   const [currentNudge, setCurrentNudge] = useState("");
   const [expandedLog, setExpandedLog] = useState(null);
   const [logFilter, setLogFilter] = useState("all");
-  const [editingIdx, setEditingIdx] = useState(null);
-  const [editText, setEditText] = useState("");
-  const [editFileLink, setEditFileLink] = useState("");
+  // An edit in progress is a draft (drafts:roulette "entry-edit"), so closing the app keeps it.
+  const [editDraft, setEditDraft, clearEditDraft] = window.useDraft('roulette', 'entry-edit', null);
+  const editText = editDraft ? editDraft.text || "" : "";
+  const editFileLink = editDraft ? editDraft.link || "" : "";
+  const setEditText = (v) => setEditDraft(d => ({ ...(d || {}), text: v }));
+  const setEditFileLink = (v) => setEditDraft(d => ({ ...(d || {}), link: v }));
   const [currentFileLink, setCurrentFileLink] = window.useDraft('roulette', 'file-link', "");
   const [gatekeeperName, setGatekeeperName] = useState("Greg");
   const [huhInput, setHuhInput] = window.useDraft('roulette', 'huh', "");
@@ -8780,12 +8784,14 @@ function CreativeRoulette() {
       const data = JSON.stringify(merged);
       try { await window.storage.set("creative-log-v2", data); } catch(e) {}
       try { await window.storage.set("creative-log", data); } catch(e) {}
+      // Reps: the stored count, or the entries in the log if that is more. It is never lowered.
       try {
-        const r = await window.storage.get("creative-streak");
-        if (r?.value) setStreak(Math.max(parseInt(r.value), 11));
-        else setStreak(11);
-      } catch (e) { setStreak(11); }
-      try { await window.storage.set("creative-streak", "11"); } catch(e) {}
+        const r = await window.storage.get("creative-reps");
+        const stored = parseInt(r?.value) || 0;
+        const n = Math.max(stored, merged.length);
+        setReps(n);
+        if (n !== stored) await window.storage.set("creative-reps", String(n));
+      } catch (e) { setReps(merged.length); }
       try {
         const g = await window.storage.get("gatekeeper-name");
         if (g?.value) setGatekeeperName(g.value);
@@ -8854,13 +8860,22 @@ function CreativeRoulette() {
   const logEntry = (type, prompt, notes, fileLink) => {
     const entry = { date: new Date().toISOString(), type, prompt: prompt || "", category: currentPrompt?.category || type, notes: notes || "", fileLink: fileLink || "" };
     logWithBar(entry, `${type}: ${prompt || ''}`.slice(0, 80));
-    setStreak(s => { const n = s + 1; try { window.storage.set("creative-streak", n.toString()); } catch(e) {} return n; });
+    setReps(n => { const m = n + 1; try { window.storage.set("creative-reps", String(m)); } catch(e) {} return m; });
     if (notes?.trim()) {
       const d = new Date();
       const clipText = `[${d.toLocaleDateString("en-US", {month:"short",day:"numeric"})} ${d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"})}] ${type.toUpperCase()} — ${entry.category}\nPrompt: ${prompt}\n\n${notes}${fileLink ? `\nFile: ${fileLink}` : ""}`;
       try { navigator.clipboard.writeText(clipText); } catch(e) {}
     }
   };
+
+  // 10-minute idea dump: each line is its own creative-catch entry (kind "dump"). Also used by the Waking up screen.
+  const dumpLine = async (text) => {
+    const entry = { id: 'c_' + Math.random().toString(36).slice(2, 9), date: new Date().toISOString(), kind: 'dump', text: String(text).trim(), fileLink: '', blobURL: '', hasAudio: false };
+    catchRef.current = [entry, ...catchRef.current];
+    return saveCatchEntries(catchRef.current);
+  };
+  const dumpLineRef = useRef(dumpLine); dumpLineRef.current = dumpLine;
+  useEffect(() => { window.nwCatchQuick = (t) => dumpLineRef.current(t); return () => { delete window.nwCatchQuick; }; }, []);
 
   const copyEntry = (entry) => {
     const d = new Date(entry.date);
@@ -8875,9 +8890,7 @@ function CreativeRoulette() {
     const updated = [...log];
     updated[realIndex] = { ...updated[realIndex], notes: newNotes, fileLink: newFileLink || updated[realIndex].fileLink || "" };
     saveLog(updated);
-    setEditingIdx(null);
-    setEditText("");
-    setEditFileLink("");
+    clearEditDraft();
   };
 
   const logHuh = (text) => {
@@ -8967,6 +8980,7 @@ function CreativeRoulette() {
     if (logFilter === "with-notes") return e.notes?.trim().length > 0;
     return (e.category || e.type).toLowerCase() === logFilter;
   });
+  const editingIdx = editDraft && editDraft.date ? filteredLog.findIndex(e => e.date === editDraft.date) : -1;
 
   const notesCount = log.filter(e => e.notes?.trim()).length;
 
@@ -8981,7 +8995,7 @@ function CreativeRoulette() {
           <div>
             <div style={{ fontSize: 11, letterSpacing: 4, color: "#FF6B6B", textTransform: "uppercase", marginBottom: 4 }}>Nikhil's Inner World Lab</div>
             <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2 }}>Creative Roulette</div>
-            <div style={{ fontSize: 11, color: "#666", marginTop: 4 }}>{log.length} entries · {notesCount} captured · {catchEntries.length} caught</div>
+            <div style={{ fontSize: 11, color: "#666", marginTop: 4 }}><span data-play-reps>{reps} reps</span> · {log.length} entries · {notesCount} captured · {catchEntries.length} caught</div>
           </div>
           <window.SaveStatusPill state={saveStatus}/>
         </div>
@@ -8993,6 +9007,7 @@ function CreativeRoulette() {
           { id: "sense",    label: `Sense ${senseToday.icon}` },
           { id: "roulette", label: "Roulette" },
           { id: "catch",    label: `Catch (${catchEntries.length})` },
+          { id: "dump",     label: "10-min dump" },
           { id: "build",    label: "Build" },
           { id: "log",      label: `Log (${log.length})` },
         ].map(tab => (
@@ -9008,6 +9023,10 @@ function CreativeRoulette() {
       </div>
 
       <div style={{ padding: "20px", maxWidth: 600, margin: "0 auto" }}>
+
+        {view === "dump" && window.NwIdeaDump && (<div>
+          <window.NwIdeaDump tab="roulette" onLine={dumpLine} onFinish={(n) => logEntry("dump", "10-minute idea dump", `${n} ${n === 1 ? "line" : "lines"}`)} />
+        </div>)}
 
         {view === "home" && (<div>
           <div style={{ background: "#1a1a1a", border: "1px solid #60A5FA", borderRadius: 12, padding: 16, marginBottom: 12 }}>
@@ -9596,7 +9615,7 @@ function CreativeRoulette() {
                           border: "none", borderRadius: 4, fontWeight: 700, fontSize: 11,
                           fontFamily: "inherit", cursor: "pointer"
                         }}>SAVE</button>
-                        <button onClick={() => { setEditingIdx(null); setEditText(""); setEditFileLink(""); }} style={{
+                        <button onClick={() => { clearEditDraft(); }} style={{
                           padding: "8px 12px", background: "transparent", color: "#666",
                           border: "1px solid #333", borderRadius: 4, fontSize: 11,
                           fontFamily: "inherit", cursor: "pointer"
@@ -9630,9 +9649,7 @@ function CreativeRoulette() {
                       }}>📋 COPY</button>
                       <button onClick={(e) => {
                         e.stopPropagation();
-                        setEditingIdx(i);
-                        setEditText(entry.notes || "");
-                        setEditFileLink(entry.fileLink || "");
+                        setEditDraft({ date: entry.date, text: entry.notes || "", link: entry.fileLink || "" });
                       }} style={{
                         padding: "4px 12px", background: "transparent",
                         border: "1px solid #555", borderRadius: 4, color: "#888",
@@ -9661,8 +9678,7 @@ function CreativeRoulette() {
           {log.length > 0 && (
             <button onClick={async () => {
               if (confirm("Clear all log entries? This can't be undone.")) {
-                saveLog([]); setStreak(0);
-                try { await window.storage.set("creative-streak", "0"); } catch(e) {}
+                saveLog([]); // the rep count stays: it only goes up
               }
             }} style={{
               marginTop: 16, padding: "8px 16px", background: "transparent", border: "1px solid #333",
@@ -10338,6 +10354,8 @@ function PAllTimeReps({ practiceId, refreshKey }) {
   );
 }
 
+// resources: [{ title, url, kind }] on a playbook practice: shown as links that open in a new tab. Nothing is fetched or embedded.
+const pResources = (p) => (Array.isArray(p?.resources) ? p.resources : []).filter(r => r && typeof r.url === 'string' && /^https?:\/\//i.test(r.url.trim())).map(r => ({ title: String(r.title || '').trim(), url: r.url.trim(), kind: String(r.kind || '').trim() }));
 function PracticeDetail({ p, onBack, onStart, onLog, onStatus, refreshKey }) {
   const [busy, wrap] = window.useBusy();
   const Row = ({ label, children }) => children ? (
@@ -10367,6 +10385,9 @@ function PracticeDetail({ p, onBack, onStart, onLog, onStatus, refreshKey }) {
             <ol style={{ margin: 0, paddingLeft: 20 }}>{p.steps.map((s, i) => <li key={i} style={{ marginBottom: 4 }}>{pText(s)}</li>)}</ol>
           </Row>
         )}
+        <Row label="Resources">{pResources(p).length ? pResources(p).map((r, i) => (
+          <div key={i}><a href={r.url} target="_blank" rel="noopener noreferrer" style={{ color: PC.accent, overflowWrap: 'anywhere' }}>{r.title || r.url}</a>{r.kind ? <span style={{ color: PC.muted }}> · {r.kind}</span> : null}</div>
+        )) : null}</Row>
         <Row label="Note">{p.note ? pText(p.note) : null}</Row>
         <Row label="Evidence">{p.evidence ? pList(p.evidence).map((e, i) => <div key={i}>{pText(e)}</div>) : null}</Row>
         <Row label="Source">{p.source ? pText(p.source) : null}</Row>
@@ -10521,11 +10542,18 @@ async function pSaveAsk(ask, prompt, data, model) {
 // Returns { data, saved }: the parsed JSON body, and whether the reply was saved to today's answers
 // (saved before any checks on it). Throws an Error describing what failed; a failed call saves nothing.
 // The system prompt goes in one block with a cache breakpoint, so tools + system are cached.
-async function pCallClaude({ system, text, tools, toolChoice, ask }) {
+// The last ask per screen, in ms. A cache breakpoint is set only on a follow-up sent within 5 minutes of the
+// previous ask on the same screen; a one-off ask would pay for a cache write that is never read.
+const P_LAST_ASK = {};
+const P_CACHE_WINDOW_MS = 5 * 60 * 1000;
+async function pCallClaude({ system, text, tools, toolChoice, ask, screen }) {
   if (!pOnline()) throw new Error('This device is offline.');
   const url = window.AI_PROXY_URL, model = window.AI_MODEL;
   if (!url || !model) throw new Error('AI proxy settings not found.');
-  const body = { model, max_tokens: 16000, output_config: { effort: 'low' }, system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }] };
+  const sentAt = Date.now();
+  const followUp = !!screen && P_LAST_ASK[screen] != null && sentAt - P_LAST_ASK[screen] <= P_CACHE_WINDOW_MS;
+  if (screen) P_LAST_ASK[screen] = sentAt;
+  const body = { model, max_tokens: 16000, output_config: { effort: 'low' }, system: [{ type: 'text', text: system, ...(followUp ? { cache_control: { type: 'ephemeral' } } : {}) }] };
   if (tools) body.tools = tools;
   if (toolChoice) body.tool_choice = toolChoice;
   body.messages = [{ role: 'user', content: text }];
@@ -10799,7 +10827,7 @@ function PStepWidget({ w, counts }) {
 
 // One step per screen. The flow in progress (step, ratings, step notes, "Anything else?") is a draft in
 // practice:drafts (flow:<practice id>), so closing or reloading the app keeps it; saving the rep clears it.
-const P_FLOW_START = { i: -1, before: null, after: null, notes: {}, myNote: '', counts: [] };
+const P_FLOW_START = { i: -1, before: null, after: null, notes: {}, myNote: '', counts: [], situation: '' };
 function GuidedFlow({ practiceId, source, note, playbook, onSave, onClose }) {
   const p = pFindPractice(playbook, practiceId);
   const [flow, setFlow, clearFlow] = window.useDraft('practice', `flow:${practiceId}`, { ...P_FLOW_START, practiceId, source: source || 'app', note: note || null });
@@ -10834,6 +10862,8 @@ function GuidedFlow({ practiceId, source, note, playbook, onSave, onClose }) {
         {i < 0 && (
           <>
             {pTrigger(p) && <div style={{ fontSize: 16, color: PC.text, lineHeight: 1.5, marginBottom: 14 }}>{pText(pTrigger(p))}</div>}
+            <label style={pLabel} htmlFor="pr-situation">What's going on right now? (optional)</label>
+            <textarea id="pr-situation" aria-label="What's going on right now?" rows={2} value={flow?.situation || ''} onChange={e => upd({ situation: e.target.value })} style={{ ...pInput, minHeight: 60, marginBottom: 12, resize: 'vertical' }} />
             <PRating label={label} value={before} onChange={v => upd({ before: v })} when="Before" />
           </>
         )}
@@ -10842,6 +10872,7 @@ function GuidedFlow({ practiceId, source, note, playbook, onSave, onClose }) {
             <div style={{ fontSize: 24, color: PC.text, lineHeight: 1.4, fontWeight: 600, marginBottom: 14 }}>{pText(steps[i])}</div>
             <PStepWidget key={i} w={w} counts={{ list: flow?.counts || [], add: (a) => upd({ counts: [...(flow?.counts || []), { n: (flow?.counts || []).length + 1, ...a }] }), setPos: (pos) => upd({ counts: (flow?.counts || []).map((c, k, arr) => (k === arr.length - 1 ? (pos ? { ...c, position: pos } : (({ position, ...r }) => r)(c)) : c)) }) }} />
             <window.NwStepNote key={`n${i}`} value={notes[i] || ''} onChange={v => upd({ notes: { ...notes, [i]: v } })} />
+            <AskAboutStep key={`a${i}`} practiceName={p.name} stepText={pText(steps[i])} situation={flow?.situation} />
           </>
         )}
         {i >= n && (
@@ -10871,14 +10902,25 @@ function GuidedFlow({ practiceId, source, note, playbook, onSave, onClose }) {
 }
 
 // Cards for Claude's picks. onStart(id, pick).
-function PPicks({ picks, onStart }) {
-  return picks.map(x => (
-    <div key={x.id} style={pCard({ borderLeft: `3px solid ${PC.accent}` })}>
-      <div style={{ fontSize: 16, color: PC.text, fontWeight: 700, marginBottom: 4 }}>{x.p.name} <PStageTag p={x.p} /></div>
-      {x.why && <div style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, marginBottom: 10 }}>{x.why}</div>}
-      <button style={pBtn('solid', { width: '100%' })} onClick={() => onStart(x.id, x)}>Start</button>
-    </div>
-  ));
+function PPicks({ picks, onStart, onMisfit, misfitId = 'picks', disabled }) {
+  const [why, setWhy, clearWhy] = window.useDraft('practice', `misfit:${misfitId}`, '');
+  return (
+    <>
+      {picks.map(x => (
+        <div key={x.id} style={pCard({ borderLeft: `3px solid ${PC.accent}` })}>
+          <div style={{ fontSize: 16, color: PC.text, fontWeight: 700, marginBottom: 4 }}>{x.p.name} <PStageTag p={x.p} /></div>
+          {x.why && <div style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, marginBottom: 10 }}>{x.why}</div>}
+          <button style={pBtn('solid', { width: '100%' })} onClick={() => onStart(x.id, x)}>Start</button>
+        </div>
+      ))}
+      {onMisfit && (
+        <div data-pr-misfit style={{ marginTop: 4 }}>
+          <input aria-label="Why these don't fit (optional)" value={why} onChange={e => setWhy(e.target.value)} placeholder="Why (optional)" style={{ ...pInput, marginBottom: 6 }} />
+          <button style={pBtn('ghost', { width: '100%' })} disabled={disabled} onClick={() => { const w = why.trim(); clearWhy(); onMisfit(w); }}>These don't fit</button>
+        </div>
+      )}
+    </>
+  );
 }
 
 // Note on a rep started from one of Claude's picks.
@@ -11013,7 +11055,7 @@ function pWakeRecord(rec, upAt) {
 
 // Waking up in progress (answers, step, notes) is a draft in practice:drafts ("waking"): closing or
 // reloading keeps it; "I'm up and moving" clears it (after the entry with its full record is saved).
-const P_WAKING_START = { where: null, blocks: [], other: '', stage: 'q1', queue: [], idx: 0, tried: [], noMore: false, notes: {}, rec: null, prevStage: null };
+const P_WAKING_START = { where: null, blocks: [], other: '', stage: 'q1', queue: [], idx: 0, tried: [], noMore: false, notes: {}, rec: null, prevStage: null, situation: '' };
 const P_WAKING_Q = { q1: 'Where are you?', q2: "What's in the way?" };
 function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, onStart, onClose }) {
   const [wk, setWk, clearWk] = window.useDraft('practice', 'waking', P_WAKING_START);
@@ -11045,6 +11087,7 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
   const setStage = (v) => upd({ stage: v });
   const setIdx = (v) => upd({ idx: v });
   const [coach, setCoach] = useState({ busy: false, err: '', picks: null });
+  const [showDump, setShowDump] = useState(false);
   const [busy, wrap] = window.useBusy();
   // Step notes: { q1, q2, <step index>: { text, note } }. Numbered in the order shown: Q1 = 1, Q2 = 2, steps from 3.
   const noteOf = (k) => (notes[k] && notes[k].note) || '';
@@ -11083,7 +11126,7 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
     const eyes = rec.eyes || null;
     const ok = await onLog({
       practiceId: 'waking-ladder', level: 4, note: answers(), source: 'app-waking', stepNotes: stepNotes(),
-      wake: pWakeRecord(r, upAt), counts: rec.counts, eyesOpen: eyes || undefined,
+      wake: pWakeRecord(r, upAt), counts: rec.counts, eyesOpen: eyes || undefined, situation: (st.situation || '').trim() || undefined,
       minutesEyesToUp: eyes ? Math.round((upAt.getTime() - Date.parse(eyes.at)) / 60000) : undefined,
     });
     if (ok) { clearWk({ ...P_WAKING_START, stage: 'up' }); }
@@ -11120,14 +11163,15 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
     else upd(c => ({ tried: [...tried, cur.text], noMore: true, rec: withEv(c, recEv('tried-another', idx)) }));
   };
 
-  const coachMe = async () => {
+  const coachMe = async (feedback) => {
     setCoach({ busy: true, err: '', picks: null });
     const lo = pLastLightsOut(yesterdayLog, todayLog);
     const words = answers();
-    const text = `${words}\nContext: local time ${pClock()}${lo ? `; last night's lights-out: ${pTimeOf(lo)}` : ''}.`;
+    const again = typeof feedback === 'string';
+    const text = `${words}\nContext: local time ${pClock()}${lo ? `; last night's lights-out: ${pTimeOf(lo)}` : ''}.${again ? `\nThe picks I just got did not fit${feedback ? `. Why: ${feedback}` : ''}. Pick different practices.` : ''}`;
     try {
       const { picks, saved } = await pChoosePractices({
-        playbook, text, ask: { kind: 'coach-me', words },
+        playbook, text, ask: { kind: 'coach-me', words, ...(again ? { feedback: feedback || '(no reason given)' } : {}) }, screen: 'waking',
         allow: (p) => ['pre4', 'stage4', 'any'].includes(p.stage) && !pIsPhysioOrGrief(p),
       });
       setCoach({ busy: false, err: '', picks, saved, words });
@@ -11157,6 +11201,8 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
             {rec.eyes?.kind === 'time' && <input type="time" aria-label="Time your eyes first opened" value={pTimeHM(new Date(rec.eyes.at))} onChange={e => pickEyesTime(e.target.value)} style={{ ...pInput, marginTop: 8 }} />}
             {rec.eyes && <div style={{ fontSize: 13, color: PC.muted, marginTop: 6 }}>Eyes open about {pTimeHM(new Date(rec.eyes.at))}{rec.eyes.plus ? ' or earlier' : ''}.</div>}
           </div>
+          <label style={pLabel} htmlFor="pr-wk-situation">What's going on right now? (optional)</label>
+          <textarea id="pr-wk-situation" aria-label="What's going on right now?" rows={2} value={st.situation || ''} onChange={e => upd({ situation: e.target.value })} style={{ ...pInput, minHeight: 60, marginBottom: 14, resize: 'vertical' }} />
           <div style={{ fontSize: 26, fontWeight: 700, color: PC.text, marginBottom: 14 }}>Where are you?</div>
           {P_WHERE_Q.map(o => <button key={o.id} style={big()} onClick={() => upd({ where: o.id, stage: 'q2' })}>{o.label}</button>)}
           <window.NwStepNote key="q1" value={noteOf('q1')} onChange={v => setNote('q1', P_WAKING_Q.q1, v)} />
@@ -11211,7 +11257,7 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
           <div style={{ fontSize: 13, color: PC.muted, marginBottom: 8, fontFamily: pMono }}>Step {idx + 1} of {queue.length}</div>
           <div style={{ fontSize: 28, fontWeight: 700, color: PC.text, lineHeight: 1.35, marginBottom: 16 }}>{queue[idx].text}</div>
           {queue[idx].kind === 'count' ? <PHiddenCount key={`c${idx}`} target={60} attempts={rec.counts} onAttempt={addCount} onPosition={setCountPos} /> : (pDuration(queue[idx].text) ? <PTimer key={`t${idx}-${queue[idx].text}`} seconds={pDuration(queue[idx].text)} /> : null)}
-          <div style={{ marginBottom: 10 }}><window.NwStepNote key={`s${idx}`} value={noteOf(idx)} onChange={v => setNote(idx, queue[idx].text, v)} /></div>
+          <div style={{ marginBottom: 10 }}><window.NwStepNote key={`s${idx}`} value={noteOf(idx)} onChange={v => setNote(idx, queue[idx].text, v)} /><AskAboutStep key={`as${idx}`} practiceName="Waking up" stepText={queue[idx].text} situation={st.situation} /></div>
           {idx < queue.length - 1 ? (
             <>
               <div style={{ display: 'grid', gridTemplateColumns: queue[idx].required ? '1fr' : '1fr 1fr', gap: 8, marginBottom: 10 }}>
@@ -11226,6 +11272,10 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
             </>
           ) : (
             <>
+              {/* Last screen: the 10-minute idea dump (his early-morning anchor). */}
+              {window.NwIdeaDump && window.nwCatchQuick && (showDump
+                ? <window.NwIdeaDump tab="practice" onLine={window.nwCatchQuick} onFinish={(n) => onLog({ practiceId: 'idea-dump', source: 'app-waking', note: `${n} ${n === 1 ? 'line' : 'lines'}` })} onClose={() => setShowDump(false)} />
+                : <button data-pr-dump-open style={pBtn('ghost', { width: '100%', marginBottom: 10 })} onClick={() => setShowDump(true)}>10-minute idea dump</button>)}
               {/* Last step: tapping it means he's up, so it logs straight away. */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
                 <button style={pBtn('warn', { minHeight: 60, fontSize: 16 })} disabled={busy} onClick={imUp}>I'm up and moving</button>
@@ -11238,10 +11288,10 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
               <button style={pBtn('ghost', { width: '100%', marginBottom: 14 })} onClick={startOver}>Not yet, start over</button>
             </>
           )}
-          <button style={pBtn('ghost', { width: '100%' })} disabled={!online || coach.busy} onClick={coachMe}>{coach.busy ? 'Asking…' : 'Coach me'}</button>
+          <button style={pBtn('ghost', { width: '100%' })} disabled={!online || coach.busy} onClick={() => coachMe()}>{coach.busy ? 'Asking…' : 'Coach me'}</button>
           {!online && <div style={{ fontSize: 12, color: PC.muted, marginTop: 6 }}>Coach me needs the internet. The steps above still work offline.</div>}
           {coach.err && <><PNote msg={`❌ ${coach.err} The steps above still work.`} /><PSaved saved={coach.saved} /></>}
-          {coach.picks && <div style={{ marginTop: 12 }}><PPicks picks={coach.picks} onStart={(id, pick) => onStart(id, 'app-waking', pPickNote(coach.words, pick))} /><PSaved saved={coach.saved} /></div>}
+          {coach.picks && <div style={{ marginTop: 12 }}><PPicks picks={coach.picks} misfitId="coach" disabled={!online || coach.busy} onMisfit={(why) => coachMe(why)} onStart={(id, pick) => onStart(id, 'app-waking', pPickNote(coach.words, pick))} /><PSaved saved={coach.saved} /></div>}
         </div>
       )}
 
@@ -11361,14 +11411,16 @@ function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onW
       .filter(p => p && p.status !== 'not-working' && !(pIsInBed(s) && p.stage === 'post4')),
   })).filter(s => s.items.length || pIsInBed(s));
 
-  const runAsk = async (words, kind = 'stuck') => {
+  const runAsk = async (words, kind = 'stuck', feedback) => {
     const w = (words ?? askText).trim();
     if (!w) return;
     setAskText(w);
     setAsk({ busy: true, err: '', picks: null });
+    const again = typeof feedback === 'string';
+    const fb = again ? `\nThe picks I just got did not fit${feedback ? `. Why: ${feedback}` : ''}. Pick different practices.` : '';
     try {
-      const { picks, saved } = await pChoosePractices({ playbook, text: `${w}\n${pContextLine(todayLog)}`, ask: { kind, words: w } });
-      setAsk({ busy: false, err: '', picks, saved, words: w });
+      const { picks, saved } = await pChoosePractices({ playbook, text: `${w}\n${pContextLine(todayLog)}${fb}`, ask: { kind, words: w, ...(again ? { feedback: feedback || '(no reason given)' } : {}) }, screen: 'stuck' });
+      setAsk({ busy: false, err: '', picks, saved, words: w, kind });
     } catch (e) { setAsk({ busy: false, err: e.message, picks: null, saved: e.saved }); }
     // Sent: the words stay in the box (Look outside uses them) but are no longer a draft.
     clearAsk(w); if (kind === 'stuck-else') clearElse(elseText);
@@ -11432,7 +11484,7 @@ function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onW
         <button style={pBtn('solid', { width: '100%' })} disabled={!online || !askText.trim() || ask.busy || !playbook} onClick={() => runAsk()}>{ask.busy ? 'Asking…' : 'Pick practices for me'}</button>
         {!online && <div style={{ fontSize: 12, color: PC.muted, marginTop: 6 }}>Ask Claude needs the internet. The list above works offline.</div>}
         {ask.err && <div style={{ marginTop: 10 }}><PNote msg={`❌ ${ask.err}`} /><div style={{ fontSize: 13, color: PC.muted }}>Pick from the list above instead; those practices work offline.</div><PSaved saved={ask.saved} /></div>}
-        {ask.picks && <div style={{ marginTop: 12 }}><PPicks picks={ask.picks} onStart={(id, pick) => onStart(id, 'app-stuck', pPickNote(ask.words, pick))} /><PSaved saved={ask.saved} /></div>}
+        {ask.picks && <div style={{ marginTop: 12 }}><PPicks picks={ask.picks} misfitId="stuck" disabled={!online || ask.busy} onMisfit={(why) => runAsk(ask.words, ask.kind || 'stuck', why)} onStart={(id, pick) => onStart(id, 'app-stuck', pPickNote(ask.words, pick))} /><PSaved saved={ask.saved} /></div>}
       </div>
 
       <div style={pCard()}>
@@ -11668,7 +11720,7 @@ function ShobhaScreen({ data, onAddQueue, onCover, onAddUpdate, flash }) {
     setDraft({ busy: true, err: '', text: '' });
     try {
       const system = `${P_VOICE}\n\nRewrite this WhatsApp message to Dr. Shobha so it reads naturally. Keep every item and its order, numbered 1, 2, 3 with no gaps, in plain sentences. No practice ids. Return only the message.`;
-      const { data, saved } = await pCallClaude({ system, text: message, ask: { kind: 'draft-shobha', words: message } });
+      const { data, saved } = await pCallClaude({ system, text: message, ask: { kind: 'draft-shobha', words: message }, screen: 'shobha' });
       const t = (data?.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
       if (!t) throw pAskError('Claude sent back no text.', saved);
       setDraft({ busy: false, err: '', text: pNoIds(t, playbook), saved });
@@ -12135,6 +12187,7 @@ const NW_QUICK = [{ id: 'joy', label: 'Joy', Panel: JoyPanel }];
 function NwQuickActions({ tab }) {
   const [open, setOpen] = useState(null);
   useEffect(() => { setOpen(null); }, [tab]);
+  useEffect(() => { const f = (e) => setOpen(e.detail); window.addEventListener('nw-open-quick', f); return () => window.removeEventListener('nw-open-quick', f); }, []);
   const cur = NW_QUICK.find(q => q.id === open);
   return (
     <>
@@ -13278,6 +13331,174 @@ function PredictPanel({ tab, onDone }) {
   );
 }
 NW_QUICK.push({ id: 'predict', label: 'Predict', Panel: PredictPanel });
+// ─────────────────────────────────────────────────────
+// BUILD v3 · PART 5 — small fixes: ask about a step, "These don't fit", feedback, 10-minute dump
+// ─────────────────────────────────────────────────────
+
+// "Ask about this step": the practice name, the step text and his opening line go to Claude; a short answer comes back.
+function AskAboutStep({ practiceName, stepText, situation }) {
+  const [st, setSt] = useState({ busy: false, err: '', text: '', saved: null });
+  const online = pOnline();
+  const go = async () => {
+    setSt({ busy: true, err: '', text: '', saved: null });
+    try {
+      const { data, saved } = await pCallClaude({
+        system: `${P_VOICE}\n\nHe is partway through one step of a practice and wants help with that step only. Answer in 2 to 4 short sentences about how to do this step. No list of options.`,
+        text: `Practice: ${practiceName}\nStep: ${stepText}\nWhat's going on right now: ${situation && situation.trim() ? situation.trim() : '(not said)'}`,
+        ask: { kind: 'ask-step', words: stepText }, screen: 'step',
+      });
+      const text = (data?.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
+      if (!text) throw pAskError('Claude sent no answer.', saved);
+      setSt({ busy: false, err: '', text, saved });
+    } catch (e) { setSt({ busy: false, err: e.message, text: '', saved: e.saved }); }
+  };
+  return (
+    <div data-pr-askstep style={{ marginTop: 8 }}>
+      <button style={pBtn('ghost', { fontSize: 13, minHeight: 36, padding: '4px 12px' })} disabled={!online || st.busy} onClick={go}>{st.busy ? 'Asking…' : 'Ask about this step'}</button>
+      {!online && <span style={{ fontSize: 12, color: PC.muted }}> Needs internet.</span>}
+      {st.err && <PNote msg={`❌ ${st.err}`} />}
+      {st.text && <div style={{ ...pCard({ marginTop: 8, marginBottom: 0 }), fontSize: 14, color: PC.text, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{st.text}<PSaved saved={st.saved} /></div>}
+    </div>
+  );
+}
+
+// ── Feedback for the app: append-only feedback:app { entries: [{ id, at, date, screen, text, status }] } ──
+const NW_FEEDBACK_KEY = 'feedback:app';
+async function nwFeedbackRead() {
+  try {
+    const r = await (window.storage.getAll || window.storage.get)(NW_FEEDBACK_KEY);
+    if (!r || !r.value) return [];
+    const d = JSON.parse(r.value);
+    return (Array.isArray(d.entries) ? d.entries : []).filter(e => e && !e.deleted && e.text).sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+  } catch (_) { return []; }
+}
+// Adds one entry. The storage layer joins entries by id with the cloud copy, so another device's feedback is never lost.
+async function nwFeedbackAdd(text, tab) {
+  const ctx = (window.nwContext && window.nwContext[tab]) || {};
+  const now = new Date();
+  const entry = { id: `f_${now.getTime().toString(36)}${Math.random().toString(36).slice(2, 6)}`, at: now.toISOString(), u: now.getTime(), date: pLocalISO(now), screen: `${tab}${ctx.screen ? ` · ${ctx.screen}` : ''}${ctx.practice ? ` · ${ctx.practice}` : ''}`, text: String(text).trim(), status: 'new' };
+  let cur = [];
+  try { const r = await (window.storage.getAll || window.storage.get)(NW_FEEDBACK_KEY); cur = r && r.value ? (JSON.parse(r.value).entries || []) : []; } catch (_) { cur = []; }
+  const where = await window.storage.set(NW_FEEDBACK_KEY, JSON.stringify({ entries: [...cur, entry] }));
+  return { where, entry };
+}
+function FeedbackPanel({ tab, onDone }) {
+  const [text, setText, clearText] = window.useDraft(tab, 'feedback-app', '');
+  const [busy, wrap] = window.useBusy();
+  const save = wrap(async () => {
+    if (!text.trim()) return;
+    const r = await window.nwLog({ tab, what: 'Feedback for the app', scope: 'feedback', sig: text.trim(), run: async () => {
+      try { const { where, entry } = await nwFeedbackAdd(text, tab); return { where, ref: { id: entry.id, what: 'Feedback for the app' } }; }
+      catch (e) { return { where: false, error: e.message }; }
+    } });
+    if (r && r.where) { clearText(); window.dispatchEvent(new Event('nw-feedback-changed')); onDone && onDone(); }
+  });
+  return (
+    <div data-nw-feedback>
+      <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>Feedback for the app</div>
+      <textarea aria-label="Feedback for the app" rows={3} value={text} onChange={e => setText(e.target.value)} placeholder="What should change" style={nwQuickInput} />
+      <div style={{ marginTop: 8 }}><button style={{ ...nwQuickBtn, ...nwQuickBtnOn }} disabled={busy || !text.trim()} onClick={save}>Save feedback</button></div>
+    </div>
+  );
+}
+NW_QUICK.push({ id: 'feedback', label: 'Feedback', Panel: FeedbackPanel });
+
+function NwFeedbackList({ active }) {
+  const [list, setList] = useState(null);
+  const load = () => nwFeedbackRead().then(setList);
+  useEffect(() => { if (active) load(); }, [active]);
+  useEffect(() => { window.addEventListener('nw-feedback-changed', load); return () => window.removeEventListener('nw-feedback-changed', load); }, []);
+  const [text, setText, clearText] = window.useDraft('system', 'feedback-app', '');
+  const [busy, wrap] = window.useBusy();
+  const [msg, setMsg] = useState('');
+  const save = wrap(async () => {
+    if (!text.trim()) return;
+    try {
+      const { where } = await nwFeedbackAdd(text, 'system');
+      setMsg(where === 'cloud' ? 'Feedback saved' : where === 'device-only' ? 'Feedback is on this device only, not in the cloud yet' : 'Feedback not saved. Nothing was stored.');
+      if (where) { clearText(); load(); }
+    } catch (e) { setMsg(`Feedback not saved: ${e.message}`); }
+  });
+  const lab = { fontSize: 11, color: '#aaa', letterSpacing: 1, marginBottom: 8 };
+  return (
+    <div data-nw-feedback-list style={{ background: '#1a1a1a', padding: 16, borderRadius: 12, border: '1px solid #333', marginBottom: 16 }}>
+      <div style={lab}>FEEDBACK FOR THE APP</div>
+      <textarea aria-label="Feedback for the app (System tab)" rows={3} value={text} onChange={e => { setText(e.target.value); setMsg(''); }} placeholder="What should change" style={{ width: '100%', boxSizing: 'border-box', padding: 10, background: '#0a0a0a', color: '#eee', border: '1px solid #444', borderRadius: 6, fontFamily: 'inherit', fontSize: 13, marginBottom: 8 }} />
+      <button onClick={save} disabled={busy || !text.trim()} style={{ width: '100%', padding: 12, background: '#4ECDC4', color: '#0f0f0f', border: 'none', borderRadius: 8, fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer', marginBottom: 8 }}>Save feedback</button>
+      {msg && <div role="status" style={{ fontSize: 13, color: /^Feedback saved/.test(msg) ? '#86efac' : '#fbbf24', marginBottom: 8 }}>{msg}</div>}
+      {list === null ? <div style={{ fontSize: 13, color: '#9ca3af' }}>Loading…</div> : !list.length ? <div style={{ fontSize: 13, color: '#9ca3af' }}>No feedback yet.</div> : list.map(f => (
+        <div key={f.id} data-nw-feedback-item style={{ padding: '8px 0', borderTop: '1px solid #262626', fontSize: 13, lineHeight: 1.5 }}>
+          <div style={{ fontSize: 11, color: '#9ca3af' }}>{f.date} · {f.screen} · <span style={{ color: f.status === 'done' ? '#86efac' : f.status === 'planned' ? '#fbbf24' : '#4ECDC4' }}>{f.status || 'new'}</span></div>
+          <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{f.text}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+window.NwFeedbackList = NwFeedbackList;
+
+// ── 10-minute idea dump: a big box and a visible countdown; each Enter keeps that line as its own entry and clears the box ──
+const nwDumpSeconds = () => Number(window.__NW_DUMP_SECONDS) || 600;
+function IdeaDump({ tab = 'practice', onLine, onFinish, onClose }) {
+  const [phase, setPhase] = useState('ready');     // ready | running | done
+  const [left, setLeft] = useState(nwDumpSeconds());
+  const [line, setLine, clearLine] = window.useDraft(tab, 'idea-dump-line', '');
+  const [count, setCount] = useState(0);
+  const [lost, setLost] = useState(0);
+  const endRef = useRef(0);
+  const countRef = useRef(0);
+  const finish = async () => {
+    setPhase('done');
+    try { navigator.vibrate && navigator.vibrate(300); } catch (_) {}
+    if (onFinish) { try { await onFinish(countRef.current); } catch (_) {} }
+  };
+  useEffect(() => {
+    if (phase !== 'running') return undefined;
+    const iv = setInterval(() => {
+      const l = Math.max(0, Math.ceil((endRef.current - Date.now()) / 1000));
+      setLeft(l);
+      if (l <= 0) { clearInterval(iv); finishRef.current(); }
+    }, 250);
+    return () => clearInterval(iv);
+  }, [phase]);
+  const finishRef = useRef(finish); finishRef.current = finish;
+  const keep = async () => {
+    const t = line.trim();
+    if (!t) { clearLine(); return; }
+    clearLine();
+    countRef.current += 1; setCount(countRef.current);
+    try { const where = await onLine(t); if (!where) setLost(x => x + 1); } catch (_) { setLost(x => x + 1); }
+  };
+  const start = () => { endRef.current = Date.now() + nwDumpSeconds() * 1000; setLeft(nwDumpSeconds()); setPhase('running'); };
+  return (
+    <div data-pr-ideadump style={pCard({ background: '#0b0d12' })}>
+      <div style={pLabel}>10-minute idea dump</div>
+      {phase === 'ready' && (
+        <>
+          <div style={{ fontSize: 15, color: PC.text, lineHeight: 1.5, marginBottom: 10 }}>Type any idea, press Enter, and the line is kept and the box clears. Nothing to reread.</div>
+          <button style={pBtn('solid', { width: '100%', minHeight: 56, fontSize: 17 })} onClick={start}>Start the 10 minutes</button>
+        </>
+      )}
+      {phase === 'running' && (
+        <>
+          <div data-pr-dump-clock aria-live="off" style={{ fontSize: 44, fontFamily: pMono, color: PC.text, textAlign: 'center', marginBottom: 8 }}>{pFmt(left)}</div>
+          <textarea aria-label="Idea line" autoFocus rows={5} value={line} onChange={e => setLine(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); keep(); } }}
+            style={{ ...pInput, minHeight: 140, fontSize: 18, resize: 'none' }} />
+          <button style={pBtn('ghost', { width: '100%', marginTop: 8 })} onClick={() => { if (line.trim()) keep(); finish(); }}>Stop now</button>
+        </>
+      )}
+      {phase === 'done' && (
+        <>
+          <div data-pr-dump-done style={{ fontSize: 24, color: PC.text, fontWeight: 700, marginBottom: 6 }}>{count} {count === 1 ? 'line' : 'lines'} caught.</div>
+          {lost > 0 && <div role="alert" style={{ fontSize: 13, color: PC.bad, marginBottom: 6 }}>{lost} {lost === 1 ? 'line was' : 'lines were'} not stored.</div>}
+          {onClose && <button style={pBtn('ghost', { width: '100%' })} onClick={onClose}>Close</button>}
+        </>
+      )}
+    </div>
+  );
+}
+window.NwIdeaDump = IdeaDump;
 const P_SCREENS = [
   { id: 'today',    label: 'Today' },
   { id: 'library',  label: 'Library' },

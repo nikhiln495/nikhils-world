@@ -1,5 +1,10 @@
 # Rules for working on Nikhil's World
 
+**Start every build session by reading `feedback:app`** (the "Feedback for the app" box on the System tab and the
+Feedback button at the bottom of every tab; `{ entries: [{ id, at, date, screen, text, status }] }`, status
+`new | planned | done`; format in `docs/DATA-FORMAT.md`). Read it through the Firestore REST recipe in that file, then
+plan from what is `new`. Feedback is append-only: never delete an entry; a build session may set `status`.
+
 The app is one file, `index.html` (React via Babel in the browser, Firestore for data). Grep for what
 you need; don't read it end to end.
 
@@ -126,6 +131,11 @@ as Nikhil's own Google account.
   exactly that entry (for keys in `SEALED_LOG_KEYS`, whole items go through `window.storage.deleteItem`).
   Disable the button while its save runs (`window.useBusy()`); a repeat of the same entry within 60 s shows
   "Already logged · Log again".
+- **Text that is Ledger or Brain Dump text uses `useDeviceDraft`, not `useDraft`** (drafts sync to Firestore; the Ledger
+  link, Ledger comments and steps, and Brain Dump captures must stay on the device). See `NW-DEVICE-CACHE` above.
+- **Every flow starts with the optional "What's going on right now?" line** and every step screen has
+  "Ask about this step". Claude calls pass `screen` to `pCallClaude`; `cache_control` is set only on a follow-up
+  within 5 minutes on the same screen.
 - **Every step screen gets "+ Note"** (`window.NwStepNote`, closed by default); step notes are saved on the
   entry as `stepNotes: [{ step, text, note }]`.
 - A day's entries are shown, and sent to Claude, in time order (no time last) without reordering what's
