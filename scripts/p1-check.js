@@ -57,7 +57,9 @@ function pageInit({ seed, now, offline, noList, fakeFirestore }) {
       }
       window.Date = FakeDate;
     }
-    if (offline) Object.defineProperty(navigator, 'onLine', { get: () => false });
+    // A test can go back online with: window.__offline = false; window.dispatchEvent(new Event('online'))
+    window.__offline = !!offline;
+    if (offline) Object.defineProperty(navigator, 'onLine', { get: () => !window.__offline, configurable: true });
     if (fakeFirestore) {
       const docs = new Map(Object.entries(fakeFirestore));
       const calls = [];
@@ -170,7 +172,12 @@ function pageInit({ seed, now, offline, noList, fakeFirestore }) {
 // html: a function that changes the page's HTML before it is served (e.g. a test-only SEALED_LOG_KEYS).
 // The service worker is blocked here (scripts/sw-test.js covers it), and every other file at ORIGIN is served
 // from the repo, so the live site is never asked for anything.
-async function openPage({ seed = {}, now = null, proxy = null, offline = false, timezoneId = 'America/Anchorage', noList = false, fakeFirestore = null, html = null } = {}) {
+// device: { key: string } put into this page's localStorage before it starts (this device's own settings).
+// google: async (route, url) => true when it answered the request (the Sheets, Docs and Drive APIs). Without it, every
+// Google request is aborted, as before. Tests give it a fake (scripts/google-fake.js); the real Google is never called.
+// token: put a Drive token in this page's localStorage (the way a signed-in device has one). googleStub: a fake
+// google.accounts.oauth2 so "Connect Google" works without Google's script.
+async function openPage({ seed = {}, now = null, proxy = null, offline = false, timezoneId = 'America/Anchorage', noList = false, fakeFirestore = null, html = null, google = null, token = false, googleStub = false, device = null } = {}) {
   const browser = await chromium.launch({
     proxy: process.env.HTTPS_PROXY ? { server: process.env.HTTPS_PROXY } : undefined,
   });
@@ -209,12 +216,16 @@ async function openPage({ seed = {}, now = null, proxy = null, offline = false, 
       const r = await proxy(body);
       return route.fulfill({ status: r.status || 200, contentType: 'application/json', body: JSON.stringify(r.json) });
     }
+    if (google && /^https:\/\/(sheets|docs|www)\.googleapis\.com\//.test(url)) { if (await google(route, url)) return; }
     if (isBlocked(url)) { blocked.push(url); return route.abort(); }
     if ((/^https:\/\/unpkg\.com\//.test(url) || FONTS.test(url)) && route.request().method() === 'GET') return cdnFulfill(route);
     return route.continue();
   });
 
   await page.addInitScript(pageInit, { seed, now, offline, noList, fakeFirestore });
+  if (device) await page.addInitScript((d) => { try { Object.keys(d).forEach(k => localStorage.setItem(k, d[k])); } catch (_) {} }, device);
+  if (token) await page.addInitScript(() => { try { localStorage.setItem('gdrive_token_v1', JSON.stringify({ token: 'TEST-TOKEN', expiresAt: Date.now() + 3600000 })); } catch (_) {} });
+  if (googleStub) await page.addInitScript(() => { window.google = { accounts: { oauth2: { initTokenClient: (cfg) => ({ requestAccessToken: () => setTimeout(() => cfg.callback({ access_token: 'TEST-TOKEN', expires_in: 3600 }), 20) }) } } }; });
 
   await page.goto(ORIGIN + '/');
   await page.waitForFunction(() => document.querySelector('nav button'), null, { timeout: 60000 });

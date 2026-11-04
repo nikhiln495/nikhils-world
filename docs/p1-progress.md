@@ -14,6 +14,75 @@ All 4 steps are committed, plus one follow-up Nikhil asked for after reviewing: 
 
 **Drafts, notes everywhere, log tidy, cost tracker, room on this device** is on `claude/gallant-lamport-dgg90d` as a draft PR (see the section below).
 
+## Build v3 (Nov 3-4, 2026)
+
+Branch: `claude/compassionate-cannon-gdqecq`, draft PR. Starts from main after PR #18. Tests: `scripts/v3-test.js`.
+
+Also done first: in the Library detail the buttons (Start, Log rep, Change status) are now above When / Steps / Note /
+Source / History / Last reps, and a "Reps, all time" block (total, first and latest day, "Show all N reps") sits under
+"Last reps (30 days)".
+
+### Part 1 · Stop the remaining losses
+
+| Item | What changed | How checked |
+|------|--------------|-------------|
+| 1 Waking record | The waking-ladder level-4 entry carries `wake` (start, up tap, minutes between, every step: number, text, source, shown time, outcome with time, trail), written before the waking draft is cleared | `v3-test.js 1`: all fields; log write comes before the draft clear |
+| 2 Back | Every waking step has Back (to the previous step; from step 1 to the question screen); typed notes stay; the Back is recorded | note survives Back; `wake.backs` |
+| 3 Not today | Next to Done, next; recorded as `skipped`; flow items with `required: true` get none | required step has no button; step 3 `skipped` |
+| 4 Eyes open | First screen: just now / 15 / 30 / 45 / 60+ min ago / pick a time → `eyesOpen`, `minutesEyesToUp` | 30 min ago → 06:10, 30 min |
+| 5 Going back to sleep | Button on the waking screens: logs `sleepAt`, keeps the flow; Today shows Continue; "I'm awake again" resumes the step | resume at step 2 |
+| 6 Count to 60 | `PHiddenCount` (guided flow, waking, `kind: count`): attempts `{ n, seconds (0.1), position?, at }` saved on the entry; this morning's list; 14-day best-per-day chart (distance from 60); seeds written once | attempts on the entry; chart values from the seeds; seed twice writes nothing; seeds wait for their dates |
+| 7 Joy | Button at the bottom of every tab; `practice:joy:YYYY_MM`; chips (+ typed names offered next time), editable time; Joys view; the Oct 10 joy seeded | all tabs, Undo, names, Joys order |
+| 8 Lights out | Today: Bed / Couch / Other with an optional line → `lights-out` entry with `place` | places, time, offline wording |
+| 9 Day history | Practice > History: one day, read only, time order, date picker; log entries with step records and counts, asks, notes, joys, What now results and Brain Dump captures when they exist | seven item kinds in time order, past day |
+
+### Part 2 · The Ledger and the Brain Dump, in sync (see `docs/LEDGER-AND-BRAIN-DUMP.md`)
+
+| Item | What changed | How checked (`v3-test.js 2`, Google faked by `scripts/google-fake.js`) |
+|------|--------------|------------------|
+| 1 Google access | `window.nwGoogle` (token, clear, connect) in the `NW-TOKEN-CACHE` block; no new scope | token header on every call; Connect Google with a stubbed `google.accounts.oauth2` |
+| 2 Setup | System tab: paste the link (device only, not a draft); Brain Dump found by Drive search | link in `localStorage` only, not in the database |
+| 3 Read | `Ledger` and `Rules` by header name; cache on the device with its time (`NW-DEVICE-CACHE`) | same strip with the columns reversed; offline shows the cache with its time |
+| 4 Work rows | dropped by Bucket / Domain / Trello_Board (+ their whole task) | VINE, ASMP, STARR, Work rows not in the page, cache or database; "Homework" kept |
+| 5 Strip | Today: Spark, this week, due in 14 days, by Flow_Order; tap a task for steps and comments; one-line errors | sections and order; no link / not signed in / Sheets API off / offline |
+| 6 Writes | preview then confirm; formula guard; row re-found by 3 fields; never My_ / Pin; offline queue + Send to Ledger | done, comment, step, task cells exactly; formula column; moved row; two matches; no match |
+| 7 Brain Dump | Dump button on every tab; tags; preview before the first send; requiredRevisionId; stale revision retried; offline queue; last 10 | new heading vs under today's; existing text untouched; stale; offline then sent |
+
+### Part 3 · "What now?"
+
+| Item | What changed | How checked (`v3-test.js 3`, proxy faked) |
+|------|--------------|------------------|
+| 1-2 Request | Box under the Ledger strip (drafts hook). Sends his words, the open allowed Ledger rows (with row numbers), the Rules texts, today's log line and the local time through `pCallClaude`; forced tool `plan_next` (patterns, 2-3 options of chained steps, parked, new tasks, one question) | tool_choice, request text, no work rows, system rules |
+| 3 Prompt rules | Only what he wrote and the rows sent; Rules tab; plain words; no "vessel"; no grades; "when" not "whether"; rewards first; Academic / Other / Recovery; x2-3 and est. over 10 min; synthesize first (`P_SYNTH`) | system text; est. set in code |
+| 4 Screen | Patterns, tappable options, parked worries collapsed; edit / reorder / remove steps; Start (timer, + Note, minutes it took); Done logs `what-now` with actual minutes and offers the mark-done write with `Actual_Mins "N mins"`; new tasks and worries to the Brain Dump or Ledger in one tap | run, Ledger write cells, Brain Dump text |
+| 5 Tomorrow | "Save as tomorrow's first step" → `practice:today:<tomorrow>`, never over an existing plan | saved; second tap refused |
+| 6 Saved results | `practice:ramp:<day>` append-only, merged by id; the ask record keeps kind and usage only | two-device merge; no Ledger text in asks; offline: box kept, says it needs internet |
+
+### Part 4 · Prediction record
+
+| Item | What changed | How checked (`v3-test.js 4`) |
+|------|--------------|------------------|
+| 1 View | Practice > Predictions: every `prediction-log` entry from all days, newest first (prediction, before, what happened, after, result); old entries read from step notes (1 prediction, 3 outcome, 4 result); a guided flow now also saves `prediction`, `outcome`, `result` fields and keeps `stepNotes` | four days, both formats, order, parsing |
+| 2 Quick add | Predict button on every tab: prediction + 0-10 now, date and time editable (past ones go to their own day's log); outcome later is an edit of the same entry (merged by id), with `after` and a result | past date entry; outcome edit keeps id, adds `edits` and step notes 3 and 4 |
+| 3 Tags | free-text chips; tags from earlier predictions are offered | offered, saved |
+| 4 Record | this week and all time: came true / partly / didn't, and how many wait; counts only | exact counts; no scores or grades |
+| 5 Context line | "Predictions, last 30 days: N logged; came true X, partly Y, didn't Z. Newest with outcomes: …" added for Ask Claude, Something else, Coach me, Look outside and What now? (nothing added when there are none) | the line in four requests; absent with none |
+| two devices | prediction edits and new entries from the laptop are joined by id, no conflict copy | fake Firestore with a write between read and commit |
+
+### Part 5 · Small fixes
+
+| Item | What changed | How checked (`v3-test.js 5`) |
+|------|--------------|------------------|
+| 1 Opening line | Every guided flow and Waking up start with an optional "What's going on right now?" (saved as `situation`); every step screen has "Ask about this step" (practice name, step text, that line) | the request text; entry field; skipping leaves no field |
+| 2 These don't fit | Under Ask Claude / Something else and Coach me picks: optional reason, asks again with it, the new record has `feedback`; What now? has the same | request text; record |
+| 3 Voice | `P_SYNTH` (synthesize, name patterns, few highest-leverage options) added for Ask Claude / Something else / Coach me / Look outside / What now? | system text; old rules remain |
+| 4 Feedback | `feedback:app` (append-only); System tab box and list; Feedback button on every tab and in the Note panel; CLAUDE.md says build sessions read it first | saved with date, screen, text, status; listed |
+| 5 Resources | `resources: [{ title, url, kind }]` shown as new-tab links; documented in DATA-FORMAT.md | link attributes; bad URL hidden; no request |
+| 6 Caching | `cache_control` only on a follow-up within 5 minutes on the same screen (`screen` argument) | first ask none; second set; 6 minutes later none; another screen none |
+| 7 Idea dump | Waking up's last screen and Play's "10-min dump" tab: 10:00 countdown, Enter keeps a line as a `creative-catch` entry (kind `dump`) and clears; end shows only the count; one rep | separate entries; count only; rep logged |
+| 8 Reps | Play shows "N reps" (never lowered) instead of the streak; `creative-streak` is no longer written | stored 40 → 41; Reset Log leaves it |
+| 9 Play edits | An edit in progress is the draft `entry-edit` in `drafts:roulette` | draft saved after the pause |
+
 ## Drafts, notes everywhere, log tidy, cost tracker, room on this device (Oct 5)
 
 Branch: `claude/gallant-lamport-dgg90d`, draft PR. Precondition: main contains the storage and Drive session (`grep -c "SEALED_LOG_KEYS" index.html` → 17; `sw.js` and `tools/drive-backup.gs` exist). ✅
