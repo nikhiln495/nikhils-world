@@ -12449,6 +12449,7 @@ function LedgerPreview({ op, onConfirm, onCancel, busy, error }) {
       <div style={{ fontSize: 15, fontWeight: 600, color: PC.text, marginBottom: 6 }}>{pv.title}</div>
       {pv.lines.map((l, i) => <div key={i} style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{l}</div>)}
       {error && <div role="alert" style={{ fontSize: 13, color: PC.bad, marginTop: 6 }}>{error}</div>}
+      {error && /Not signed in|expired/.test(error) && <div style={{ marginTop: 6 }}><ConnectGoogle /></div>}
       <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
         <button style={pBtn('solid', { flex: 2 })} disabled={busy} onClick={onConfirm}>Confirm and send</button>
         <button style={pBtn('ghost', { flex: 1 })} disabled={busy} onClick={onCancel}>Cancel</button>
