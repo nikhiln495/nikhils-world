@@ -1195,6 +1195,111 @@ async function part5() {
   }
 }
 
+// ───────────────────────── Follow-up fixes (Nov 4) ─────────────────────────
+async function part6() {
+  console.log('\n[6. Done: preview in view, "10 mins" not "10 mins min", moves a finished task to Done Log]');
+  {
+    let fake = newFake();
+    fake.sheets.Ledger[2][8] = '10 mins';
+    let ctx = await openLedger(fake);
+    let page = ctx.page;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('[data-pr-ledger-open]').first().click();
+    const detail = await page.locator('[data-pr-ledger-task]').innerText();
+    ok(detail.includes('10 mins') && !/mins min/.test(detail) && detail.includes('2 min') , 'a value that already says "10 mins" is not shown as "10 mins min" → ' + detail.split('\n').filter(l => /mins|min/.test(l)).join(' | '));
+    await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Put the tax folder' }).getByRole('button', { name: 'Done', exact: true }).click();
+    await wait(page, 700);
+    const box = await page.locator('[data-pr-ledger-preview]').boundingBox();
+    ok(box && box.y >= 0 && box.y + box.height <= 844 + 2, 'the preview is brought into view after tapping Done → y ' + (box && Math.round(box.y)) + ', h ' + (box && Math.round(box.height)));
+    ok(!(await page.locator('[data-pr-ledger-preview]').innerText()).includes('Bucket →'), 'not the last step: no Bucket line');
+    await clickName(page, 'Cancel');
+    await ctx.browser.close();
+
+    // last open step of a task -> Bucket moves to the Done Log bucket (all its rows)
+    fake = newFake();
+    ctx = await openLedger(fake); page = ctx.page;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('[data-pr-ledger-open]').filter({ hasText: 'Book the dentist' }).click();
+    await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Open the dentist page' }).getByRole('button', { name: 'Done', exact: true }).click();
+    const pv = await page.locator('[data-pr-ledger-preview]').innerText();
+    ok(pv.includes('Bucket → 7. 🎉 DONE LOG (all 1 step of this task: it was the last open step)'), 'preview: the task moves to Done Log, shown like every other cell');
+    await clickName(page, 'Confirm and send');
+    await wait(page, 900);
+    const w = writes(fake, 'update');
+    ok(w.some(x => x.range === 'Ledger!A5' && x.values[0][0] === true) && w.some(x => x.range === 'Ledger!C5' && x.values[0][0] === '7. 🎉 DONE LOG') && w.length === 3, 'Done, Completed_At and Bucket written (3 cells) → ' + w.map(x => x.range).join(', '));
+    ok(fake.sheets.Ledger[4][2] === '7. 🎉 DONE LOG', 'the sheet shows the new bucket');
+    await ctx.browser.close();
+
+    // the task got a new open step while the preview was open: Done only, no move
+    fake = newFake();
+    ctx = await openLedger(fake); page = ctx.page;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('[data-pr-ledger-open]').filter({ hasText: 'Book the dentist' }).click();
+    await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Open the dentist page' }).getByRole('button', { name: 'Done', exact: true }).click();
+    fake.sheets.Ledger.push(G.ledgerRow({ Done: false, Bucket: G.WEEK, Domain: 'Body', Parent_Task: 'Book the dentist', Step_Num: 2, Step_Action: 'Pick a time' }));
+    await clickName(page, 'Confirm and send');
+    await wait(page, 900);
+    const w2 = writes(fake, 'update');
+    ok(w2.length === 2 && !w2.some(x => /^Ledger!C/.test(x.range)), 'another step opened meanwhile: only Done and Completed_At, the bucket is left alone');
+    await ctx.browser.close();
+  }
+
+  console.log('\n[6. Brain Dump: no doc for this month yet → the newest "Brain Dump …" doc]');
+  {
+    const fake = newFake({ doc: { title: 'Brain Dump Oct 2026', paras: [{ text: 'Saturday, Oct 31, 2026', style: 'HEADING_1' }, { text: 'old', style: 'NORMAL_TEXT' }] } });
+    const ctx = await openLedger(fake);
+    const { page } = ctx;
+    await wait(page, 600);
+    await page.locator('[data-nw-quick="dump"]').click();
+    await page.locator('textarea[aria-label="Brain Dump text"]').fill('Month-start thought');
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
+    await page.waitForSelector('[data-nw-dump-preview]');
+    const pv = await page.locator('[data-nw-dump-preview]').innerText();
+    ok(pv.includes('Brain Dump Oct 2026') && /newest Brain Dump doc/.test(pv), 'the preview says it is using the newest doc');
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send now' }).click();
+    await wait(page, 1000);
+    ok(fake.doc.paras[0].text === 'Tuesday, Nov 3, 2026' && /^Month-start thought/.test(fake.doc.paras[1].text) && fake.doc.paras[3].text === 'old', 'added at the top of the October doc; its text is untouched');
+    await ctx.browser.close();
+    const none = newFake({ driveFiles: [] });
+    const c2 = await openLedger(none);
+    await wait(c2.page, 600);
+    await c2.page.locator('[data-nw-quick="dump"]').click();
+    await c2.page.locator('textarea[aria-label="Brain Dump text"]').fill('x');
+    await c2.page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
+    await wait(c2.page, 800);
+    ok(/No Google Doc named/.test(await c2.page.locator('[data-nw-dump]').innerText()), 'no Brain Dump doc at all: says so, nothing is lost');
+    await c2.browser.close();
+  }
+
+  console.log('\n[6. Step_Num as the Ledger writes it: "Step 10 (90%->100%)"]');
+  {
+    const fake = newFake();
+    const ctx = await openLedger(fake);
+    const { page } = ctx;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('[data-pr-ledger-open]').filter({ hasText: 'Real format task' }).click();
+    const d = await page.locator('[data-pr-ledger-task]').innerText();
+    ok(d.indexOf('Step 9') < d.indexOf('Step 10') && !/\(80%/.test(d), 'steps are ordered by their number (9 before 10) and shown as "Step 9", "Step 10"');
+    await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Ten' }).getByRole('button', { name: 'Done', exact: true }).click();
+    ok((await page.locator('[data-pr-ledger-preview]').innerText()).includes('Mark done: Real format task · Step 10') && !/step Step/.test(await page.locator('[data-pr-ledger-preview]').innerText()), 'the preview says "Step 10", not "step Step 10"');
+    // the canvas rewrites the percentages while the preview is open: the row is still found by its step number
+    fake.sheets.Ledger.forEach(r => { if (r[5] === 'Step 10 (90%->100%)') r[5] = 'Step 10 (85%->100%)'; });
+    await clickName(page, 'Confirm and send');
+    await wait(page, 900);
+    const w = writes(fake, 'update');
+    ok(w.length >= 2 && w.some(x => x.range === 'Ledger!A13' && x.values[0][0] === true), 'the percentages changed meanwhile: still the same row (13) → ' + w.map(x => x.range).join(', '));
+    // adding a step uses the same "Step N" form
+    await page.locator('input[aria-label="New step for this task"]').fill('Eleven');
+    await clickName(page, 'Review new step');
+    ok((await page.locator('[data-pr-ledger-preview]').innerText()).includes('Step_Num Step 11 · Eleven'), 'new step preview: Step 11');
+    await clickName(page, 'Confirm and send');
+    await wait(page, 900);
+    const last = fake.sheets.Ledger[fake.sheets.Ledger.length - 1];
+    ok(last[4] === 'Real format task' && last[5] === 'Step 11' && last[6] === 'Eleven', 'the new row says "Step 11" like the others');
+    await ctx.browser.close();
+  }
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
   if (which === 'all' || which === '1') await part1();
@@ -1202,6 +1307,7 @@ async function part5() {
   if (which === 'all' || which === '3') await part3();
   if (which === 'all' || which === '4') await part4();
   if (which === 'all' || which === '5') await part5();
+  if (which === 'all' || which === '6') await part6();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

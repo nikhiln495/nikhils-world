@@ -158,7 +158,8 @@ function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null
     const q = u.searchParams.get('q') || '';
     const nm = q.match(/name='((?:[^'\\]|\\.)*)'/);
     const name = nm ? nm[1].replace(/\\'/g, "'") : null;
-    const files = F.driveFiles.filter(f => (!name || f.name === name)).sort((a, b) => String(b.modifiedTime).localeCompare(String(a.modifiedTime)));
+    const nc = q.match(/name contains '((?:[^'\\]|\\.)*)'/);
+    const files = F.driveFiles.filter(f => (nc ? f.name.includes(nc[1]) : (!name || f.name === name))).sort((a, b) => String(b.modifiedTime).localeCompare(String(a.modifiedTime)));
     return json(route, 200, { files });
   }
 
@@ -193,6 +194,9 @@ const LEDGER_ROWS = [
   { Done: false, Auto_Status: 'Open', Bucket: WEEK, Domain: 'Admin', Parent_Task: 'Send ASMP report', Step_Num: 1, Step_Action: 'Email the ASMP report', Trello_Board: 'ASMP' },
   { Done: false, Auto_Status: 'Open', Bucket: 'Work admin', Domain: 'Admin', Parent_Task: 'Prep STARR slides', Step_Num: 1, Step_Action: 'Open the STARR deck' },
   { Done: false, Auto_Status: 'Open', Bucket: WEEK, Domain: 'Home', Parent_Task: 'Homework help', Step_Num: 1, Step_Action: 'Do the Homework sheet', Flow_Order: 5 },
+  { Done: false, Auto_Status: 'Open', Bucket: '4. 📚 UAF COURSEWORK', Domain: 'GEOS', Parent_Task: 'Real format task', Step_Num: 'Step 9 (80%->90%)', Step_Action: 'Nine', Deadline: '2026-11-05' },
+  { Done: false, Auto_Status: 'Open', Bucket: '4. 📚 UAF COURSEWORK', Domain: 'GEOS', Parent_Task: 'Real format task', Step_Num: 'Step 10 (90%->100%)', Step_Action: 'Ten', Deadline: '2026-11-05' },
+  { Done: true, Auto_Status: 'Done', Bucket: '7. 🎉 DONE LOG', Domain: 'Home', Parent_Task: 'Old finished task', Step_Num: 1, Step_Action: 'Did it', Completed_At: '2026-10-31T10:00:00.000Z' },
 ];
 const ledgerValues = () => [LEDGER_HEAD, ...LEDGER_ROWS.map(ledgerRow)];
 const RULES_ROWS = [['Rule', 'Text'], ['Step 1', 'The first physical step is Step 1.'], ['Spark', 'Today Spark holds at most 3 tasks.'], ['Waiting', 'Park a worry in Waiting_Time, not in the task list.']];
