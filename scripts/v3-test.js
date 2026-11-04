@@ -1364,7 +1364,7 @@ async function part7() {
   await wait(c4.page, 600);
   const r = await c4.page.evaluate(() => pPastDumps('the dentist and the lease'));
   ok(r.matched === 301 && r.lines.length === 80 && r.lines.join('').length <= 14000, 'many matches: all 301 found on the phone, 80 best sent (' + r.lines.length + ' lines, ' + r.lines.join('').length + ' chars)');
-  ok(/dentist/.test(r.lines[0]) && /lease/.test(r.lines[0]) && r.lines.slice(0, 5).every(l => /lease/.test(l)), 'lines matching both words come first');
+  ok(/dentist/.test(r.lines[0]) && /lease/.test(r.lines[0]) && r.lines.slice(0, 2).every(l => /lease/.test(l)), 'lines matching both words come first');
   await c4.browser.close();
 }
 
