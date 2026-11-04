@@ -464,11 +464,11 @@ async function part2() {
     await page.locator('input[aria-label="New step for this task"]').fill('Photograph the form');
     await clickName(page, 'Review new step');
     pv = await page.locator('[data-pr-ledger-preview]').innerText();
-    ok(pv.includes('Step_Num 3') && pv.includes('Photograph the form'), 'new step preview: next Step_Num (3)');
+    ok(pv.includes('Step_Num Step 3') && pv.includes('Photograph the form'), 'new step preview: next Step_Num ("Step 3", the form this sheet uses)');
     await clickName(page, 'Confirm and send');
     await wait(page, 800);
     const last = fake.sheets.Ledger[fake.sheets.Ledger.length - 1];
-    ok(last[4] === 'File the tax form' && last[2] === G.SPARK && last[3] === 'Home' && last[5] === 3 && last[6] === 'Photograph the form' && last[0] === '' && last[12] === '', 'appended row: same Parent_Task, Bucket, Domain; Step_Num 3; other cells left alone');
+    ok(last[4] === 'File the tax form' && last[2] === G.SPARK && last[3] === 'Home' && last[5] === 'Step 3' && last[6] === 'Photograph the form' && last[0] === '' && last[12] === '', 'appended row: same Parent_Task, Bucket, Domain; Step_Num 3; other cells left alone');
     await clickName(page, 'Add task');
     await page.locator('input[aria-label="Task name"]').fill('Fix the bike');
     await page.locator('input[aria-label="First physical step (Step 1)"]').fill('Put the bike on the stand');
@@ -477,12 +477,12 @@ async function part2() {
     await page.locator('select[aria-label="Domain"]').selectOption('Home');
     await clickName(page, 'Review task');
     pv = await page.locator('[data-pr-ledger-preview]').innerText();
-    ok(pv.includes('Step_Num 1 · Put the bike on the stand') && pv.includes('Step_Num 3 · Patch the tube'), 'new task preview: first physical step is Step 1');
+    ok(pv.includes('Step_Num Step 1 · Put the bike on the stand') && pv.includes('Step_Num Step 3 · Patch the tube'), 'new task preview: first physical step is Step 1');
     await clickName(page, 'Confirm and send');
     await wait(page, 800);
     const n = fake.sheets.Ledger.length;
     const rows3 = fake.sheets.Ledger.slice(n - 3);
-    ok(rows3.map(r => r[5]).join() === '1,2,3' && rows3.every(r => r[4] === 'Fix the bike' && r[2] === G.WEEK && r[3] === 'Home') && rows3[0][6] === 'Put the bike on the stand', 'task rows appended: Step 1, 2, 3 with bucket and domain');
+    ok(rows3.map(r => r[5]).join() === 'Step 1,Step 2,Step 3' && rows3.every(r => r[4] === 'Fix the bike' && r[2] === G.WEEK && r[3] === 'Home') && rows3[0][6] === 'Put the bike on the stand', 'task rows appended: Step 1, 2, 3 with bucket and domain');
     ok(fake.writes.every(x => x.api !== 'docs'), 'no Docs write from the Ledger');
     // never My_ / Pin
     const before = fake.writes.length;
@@ -764,7 +764,7 @@ async function part3() {
     await page.locator('select[aria-label="Bucket"]').selectOption(G.WEEK);
     await page.locator('select[aria-label="Domain"]').selectOption('Home');
     await clickName(page, 'Review task');
-    ok((await page.locator('[data-pr-ledger-preview]').innerText()).includes('Step_Num 1 · Open the phone contacts'), 'preview, first physical step as Step 1');
+    ok((await page.locator('[data-pr-ledger-preview]').innerText()).includes('Step_Num Step 1 · Open the phone contacts'), 'preview, first physical step as Step 1');
     await clickName(page, 'Confirm and send');
     await wait(page, 800);
     ok(fake.sheets.Ledger[fake.sheets.Ledger.length - 1][4] === 'Call Dana about the move', 'the task is in the Ledger');
