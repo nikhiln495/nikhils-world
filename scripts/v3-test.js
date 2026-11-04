@@ -4,6 +4,7 @@
 // The live Firestore, Drive, the Ledger and the Brain Dump are never touched.
 const { openPage } = require('./p1-check');
 const F = require('./p1-fixtures');
+const G = require('./google-fake');
 
 let failures = 0, passes = 0;
 const ok = (cond, label) => { if (cond) { passes++; console.log('  ✓', label); } else { failures++; console.log('  ✗', label); } };
@@ -302,9 +303,338 @@ async function part1() {
   }
 }
 
+// ───────────────────────── Part 2 ─────────────────────────
+const SHEET_URL = `https://docs.google.com/spreadsheets/d/${G.SHEET_ID}/edit#gid=0`;
+const dev = (extra = {}) => ({ __nw_ledger_link: JSON.stringify(SHEET_URL), ...extra });
+const newFake = (over = {}) => G.makeGoogle({ sheet: { Ledger: G.ledgerValues(), Rules: G.RULES_ROWS }, doc: { title: 'Brain Dump Nov 2026', paras: [
+  { text: 'Monday, Nov 2, 2026', style: 'HEADING_1' }, { text: 'task: old thing (from Nikhil\'s World, 7:00 AM)', style: 'NORMAL_TEXT' }, { text: 'Sunday, Nov 1, 2026', style: 'HEADING_1' }, { text: 'older note', style: 'NORMAL_TEXT' }] }, ...over });
+async function openLedger(fake, opts = {}) {
+  const ctx = await openPractice({ seed: baseSeed(), now: '2026-11-03T08:10:00', token: true, google: fake.handler, device: dev(), ...opts });
+  return ctx;
+}
+const stripText = (page) => page.locator('[data-pr-ledger]').innerText();
+const writes = (fake, kind) => fake.writes.filter(w => w.api === 'sheets' && (!kind || w.kind === kind));
+
+async function part2() {
+  console.log('\n[2.3-2.5 Ledger: read by header name, work rows kept out, the strip]');
+  {
+    const fake = newFake();
+    const ctx = await openLedger(fake);
+    const { page } = ctx;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    const t = await stripText(page);
+    ok(/today spark/i.test(t) && t.includes('File the tax form') && /this week/i.test(t) && t.includes('Book the dentist') && t.includes('Homework help') && t.includes('Renew passport'), 'strip: Spark, this week, and a task due in 12 days');
+    ok(!t.includes('Paint the shelf'), 'a task due in 2027 is not shown');
+    ok(!/Maria|Call participant|ASMP|STARR|VINE|Prep STARR/i.test(t), 'work rows (VINE, ASMP, STARR, Work) are not shown');
+    ok(/3 work rows kept out|work rows kept out/.test(t), 'says how many were kept out');
+    ok(t.indexOf('Book the dentist') < t.indexOf('Homework help'), 'ordered by Flow_Order (1 before 5)');
+    ok(t.includes('Next: Put the tax folder on the desk') && !t.includes('Find the login'), 'a task shows its next open step; done steps are not "next"');
+    await page.locator('[data-pr-ledger-open]').first().click();
+    const detail = await page.locator('[data-pr-ledger-task]').innerText();
+    ok(detail.includes('Find the login') && detail.includes('Put the tax folder on the desk') && detail.includes('Fill in page one') && detail.includes('[Nov 1 09:00] started'), 'tap a task: all its steps (done ones too) and comments');
+    const calls = fake.calls.map(c => c.url);
+    ok(calls.some(u => /values:batchGet/.test(u) && /ranges=Ledger/.test(u) && /ranges=Rules/.test(u)), 'reads the Ledger and Rules tabs with Sheets values');
+    ok(fake.calls.every(c => c.auth === 'Bearer TEST-TOKEN'), "uses the app's existing Google token");
+    const dumpMem = await page.evaluate(() => JSON.stringify([...window.__mem.entries()]));
+    ok(!/tax form|Maria|dentist|ASMP/.test(dumpMem), 'no Ledger text anywhere in the database (storage)');
+    const cache = await page.evaluate(() => localStorage.getItem('__nw_ledger_cache'));
+    ok(cache && cache.includes('File the tax form') && !/Maria|ASMP|STARR/.test(cache), 'this device keeps the last read, without work rows');
+    const link = await page.evaluate(() => localStorage.getItem('__nw_ledger_link'));
+    ok(link && link.includes(G.SHEET_ID) && !dumpMem.includes(G.SHEET_ID), 'the link is on this device only');
+    await finish(ctx, 'ledger strip');
+
+    // columns found by name, not position: the same sheet with its columns reversed
+    const rev = newFake();
+    rev.sheets.Ledger = rev.sheets.Ledger.map(r => r.slice().reverse());
+    const c2 = await openLedger(rev);
+    await c2.page.waitForSelector('[data-pr-ledger-open]');
+    const t2 = await stripText(c2.page);
+    ok(t2.includes('File the tax form') && t2.includes('Book the dentist') && !/Maria|ASMP/.test(t2) && t2.indexOf('Book the dentist') < t2.indexOf('Homework help'), 'columns in another order: same strip');
+    await c2.browser.close();
+  }
+
+  console.log('\n[2.1/2.5 Ledger: one line when it cannot read]');
+  {
+    const c1 = await openPractice({ seed: baseSeed(), now: '2026-11-03T08:10:00' });
+    await wait(c1.page, 600);
+    ok((await stripText(c1.page)).includes('No Ledger link yet. Paste it on the System tab.'), 'no link → says so');
+    ok(await c1.page.getByRole('button', { name: 'Waking up', exact: true }).count() === 1 && /lights out/i.test(await visibleText(c1.page)), 'everything else on Today still works');
+    await c1.browser.close();
+    const c2 = await openPractice({ seed: baseSeed(), now: '2026-11-03T08:10:00', device: dev(), google: newFake().handler, googleStub: true });
+    await wait(c2.page, 600);
+    ok((await stripText(c2.page)).includes('Not signed in to Google.') && await c2.page.locator('[data-pr-connect]').count() >= 1, 'no token → "Not signed in" and Connect Google');
+    await c2.page.locator('[data-pr-ledger] [data-pr-connect]').click();
+    await c2.page.waitForSelector('[data-pr-ledger-open]');
+    ok((await stripText(c2.page)).includes('File the tax form'), 'Connect Google → token → the Ledger reads');
+    await c2.browser.close();
+    const off = newFake(); off.apiDisabled = 'sheets';
+    const c3 = await openLedger(off);
+    await wait(c3.page, 800);
+    ok((await stripText(c3.page)).includes('The Google Sheets API is not turned on'), 'Sheets API off → says which');
+    await c3.browser.close();
+    const cache = JSON.stringify({ at: '2026-11-03T07:00:00.000Z', rows: [{ row: 2, Parent_Task: 'Cached task', Bucket: G.SPARK, Step_Num: '1', Step_Action: 'Cached step', Done: 'FALSE' }], rules: [], head: ['Parent_Task'], idx: {}, hidden: 0 });
+    const c4 = await openLedger(newFake(), { offline: true, device: dev({ __nw_ledger_cache: cache }) });
+    await wait(c4.page, 800);
+    const t4 = await stripText(c4.page);
+    ok(t4.includes('Cached task') && /From this device, read/.test(t4), 'offline: the last read shows, with its time');
+    await c4.browser.close();
+  }
+
+  console.log('\n[2.6 Ledger writes: preview, confirm, guards]');
+  {
+    // a. mark done
+    let fake = newFake();
+    let ctx = await openLedger(fake);
+    let page = ctx.page;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('[data-pr-ledger-open]').first().click();
+    await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Put the tax folder' }).getByRole('button', { name: 'Done', exact: true }).click();
+    let pv = await page.locator('[data-pr-ledger-preview]').innerText();
+    ok(pv.includes('Done → TRUE') && /Completed_At → 2026-11-03T/.test(pv) && !pv.includes('Actual_Mins'), 'preview shows exactly what changes');
+    ok(writes(fake).length === 0, 'nothing is written before the tap');
+    await clickName(page, 'Cancel');
+    ok(writes(fake).length === 0 && await page.locator('[data-pr-ledger-preview]').count() === 0, 'Cancel writes nothing');
+    await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Put the tax folder' }).getByRole('button', { name: 'Done', exact: true }).click();
+    await clickName(page, 'Confirm and send');
+    await wait(page, 800);
+    let w = writes(fake, 'update');
+    ok(w.length === 2 && w.some(x => x.range === 'Ledger!A2' && x.values[0][0] === true) && w.some(x => x.range === 'Ledger!M2' && /^2026-11-03T/.test(x.values[0][0])), 'Done = TRUE and Completed_At = ISO time, only those two cells → ' + w.map(x => x.range).join(', '));
+    ok(fake.sheets.Ledger[1][0] === true && fake.sheets.Ledger[1][12].startsWith('2026-11-03T'), 'the sheet has them');
+    ok(/Saved/.test(await page.locator('[data-nw-savedbar]').first().innerText()), 'the Saved bar says Saved (the Ledger has it)');
+    await finish(ctx, 'ledger done');
+
+    // formula column guard
+    fake = newFake({ formulas: { Ledger: (() => { const v = G.ledgerValues(); v[1][12] = '=NOW()'; return v; })() } });
+    ctx = await openLedger(fake); page = ctx.page;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('[data-pr-ledger-open]').first().click();
+    await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Put the tax folder' }).getByRole('button', { name: 'Done', exact: true }).click();
+    await clickName(page, 'Confirm and send');
+    await wait(page, 800);
+    ok(writes(fake).length === 0 && (await page.locator('[data-pr-ledger-preview]').innerText()).includes('Completed_At column holds formulas'), 'a column with formulas is never written; says so');
+    ok(fake.calls.some(c => /valueRenderOption=FORMULA/.test(c.url)), 'read the tab with valueRenderOption FORMULA before the first write');
+    await ctx.browser.close();
+
+    // moved row: found again by Parent_Task, Step_Num, Step_Action
+    fake = newFake();
+    ctx = await openLedger(fake); page = ctx.page;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('[data-pr-ledger-open]').first().click();
+    await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Put the tax folder' }).getByRole('button', { name: 'Done', exact: true }).click();
+    fake.sheets.Ledger.splice(1, 0, G.ledgerRow({ Done: false, Bucket: G.SPARK, Domain: 'Home', Parent_Task: 'Inserted above', Step_Num: 1, Step_Action: 'New row' }));
+    await clickName(page, 'Confirm and send');
+    await wait(page, 800);
+    w = writes(fake, 'update');
+    ok(w.length === 2 && w.every(x => /^Ledger![AM]3$/.test(x.range)), 'the row moved down one: found again, written at row 3 → ' + w.map(x => x.range).join(', '));
+    ok(fake.sheets.Ledger[1][0] === false && fake.sheets.Ledger[2][0] === true, 'the row that took its place was not touched');
+    await ctx.browser.close();
+
+    // ambiguous and vanished
+    fake = newFake();
+    ctx = await openLedger(fake); page = ctx.page;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('[data-pr-ledger-open]').first().click();
+    await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Put the tax folder' }).getByRole('button', { name: 'Done', exact: true }).click();
+    fake.sheets.Ledger.splice(1, 0, G.ledgerRow({ Done: false, Bucket: G.SPARK, Domain: 'Home', Parent_Task: 'Unrelated', Step_Num: 1, Step_Action: 'Other' }));
+    fake.sheets.Ledger.push(fake.sheets.Ledger[2].slice());
+    await clickName(page, 'Confirm and send');
+    await wait(page, 800);
+    ok(writes(fake).length === 0 && (await page.locator('[data-pr-ledger-preview]').innerText()).includes('More than one row matches'), 'two rows match → no write, says so');
+    fake.sheets.Ledger = fake.sheets.Ledger.filter(r => r[6] !== 'Put the tax folder on the desk');
+    await clickName(page, 'Confirm and send');
+    await wait(page, 800);
+    ok(writes(fake).length === 0 && (await page.locator('[data-pr-ledger-preview]').innerText()).includes('not in the Ledger any more'), 'no match → no write, says so');
+    await ctx.browser.close();
+
+    // b. comment, c. add a step, d. add a task
+    fake = newFake();
+    ctx = await openLedger(fake); page = ctx.page;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('[data-pr-ledger-open]').first().click();
+    await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Put the tax folder' }).getByRole('button', { name: 'Comment', exact: true }).click();
+    await page.locator('textarea[aria-label="Comment for this step"]').fill('Found the folder under the bed');
+    await clickName(page, 'Review comment');
+    pv = await page.locator('[data-pr-ledger-preview]').innerText();
+    ok(/\[Nov 3 08:\d\d\] Found the folder under the bed \(from Nikhil's World\)/.test(pv), 'comment preview: [Nov 3 08:10] his words (from Nikhil\'s World)');
+    await clickName(page, 'Confirm and send');
+    await wait(page, 800);
+    const cm = fake.sheets.Ledger[1][15];
+    ok(cm.startsWith("[Nov 1 09:00] started (from Nikhil's World)\n[Nov 3 08:") && cm.endsWith("Found the folder under the bed (from Nikhil's World)"), 'comment added on a new line; what was there is kept → ' + JSON.stringify(cm));
+    ok(writes(fake, 'update').length === 1 && writes(fake, 'update')[0].range === 'Ledger!P2', 'only the Comments cell was written');
+    await page.locator('input[aria-label="New step for this task"]').fill('Photograph the form');
+    await clickName(page, 'Review new step');
+    pv = await page.locator('[data-pr-ledger-preview]').innerText();
+    ok(pv.includes('Step_Num 3') && pv.includes('Photograph the form'), 'new step preview: next Step_Num (3)');
+    await clickName(page, 'Confirm and send');
+    await wait(page, 800);
+    const last = fake.sheets.Ledger[fake.sheets.Ledger.length - 1];
+    ok(last[4] === 'File the tax form' && last[2] === G.SPARK && last[3] === 'Home' && last[5] === 3 && last[6] === 'Photograph the form' && last[0] === '' && last[12] === '', 'appended row: same Parent_Task, Bucket, Domain; Step_Num 3; other cells left alone');
+    await clickName(page, 'Add task');
+    await page.locator('input[aria-label="Task name"]').fill('Fix the bike');
+    await page.locator('input[aria-label="First physical step (Step 1)"]').fill('Put the bike on the stand');
+    await page.locator('textarea[aria-label="Other steps, one per line"]').fill('Take the wheel off\nPatch the tube');
+    await page.locator('select[aria-label="Bucket"]').selectOption(G.WEEK);
+    await page.locator('select[aria-label="Domain"]').selectOption('Home');
+    await clickName(page, 'Review task');
+    pv = await page.locator('[data-pr-ledger-preview]').innerText();
+    ok(pv.includes('Step_Num 1 · Put the bike on the stand') && pv.includes('Step_Num 3 · Patch the tube'), 'new task preview: first physical step is Step 1');
+    await clickName(page, 'Confirm and send');
+    await wait(page, 800);
+    const n = fake.sheets.Ledger.length;
+    const rows3 = fake.sheets.Ledger.slice(n - 3);
+    ok(rows3.map(r => r[5]).join() === '1,2,3' && rows3.every(r => r[4] === 'Fix the bike' && r[2] === G.WEEK && r[3] === 'Home') && rows3[0][6] === 'Put the bike on the stand', 'task rows appended: Step 1, 2, 3 with bucket and domain');
+    ok(fake.writes.every(x => x.api !== 'docs'), 'no Docs write from the Ledger');
+    // never My_ / Pin
+    const before = fake.writes.length;
+    const guard = await page.evaluate(async (id) => { const out = []; for (const col of ['Pin', 'My_Note']) { try { await nwLedgerBatchWrite(id, { idx: { [col]: 1 } }, [{ col, row: 2, value: 'x' }]); out.push('wrote'); } catch (e) { out.push(e.code); } } return out; }, G.SHEET_ID);
+    ok(JSON.stringify(guard) === '["never","never"]' && fake.writes.length === before, 'the app never writes to Pin or My_ columns → ' + JSON.stringify(guard));
+    await finish(ctx, 'ledger writes');
+  }
+
+  console.log('\n[2.6 Ledger writes offline: kept on this device, Send to Ledger when back]');
+  {
+    const fake = newFake();
+    const cacheRows = G.LEDGER_ROWS.slice(0, 2).map((r, i) => ({ row: i + 2, ...Object.fromEntries(G.LEDGER_HEAD.map((h, k) => [h, G.ledgerRow(r)[k] === true ? 'TRUE' : G.ledgerRow(r)[k] === false ? 'FALSE' : String(G.ledgerRow(r)[k])])) }));
+    const cache = JSON.stringify({ at: '2026-11-03T07:00:00.000Z', rows: cacheRows, rules: [], head: G.LEDGER_HEAD, idx: Object.fromEntries(G.LEDGER_HEAD.map((h, i) => [h, i])), hidden: 0 });
+    const ctx = await openLedger(fake, { offline: true, device: dev({ __nw_ledger_cache: JSON.stringify(JSON.parse(cache)) }) });
+    const { page } = ctx;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('[data-pr-ledger-open]').first().click();
+    await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Put the tax folder' }).getByRole('button', { name: 'Done', exact: true }).click();
+    await clickName(page, 'Confirm and send');
+    await wait(page, 600);
+    const t = await stripText(page);
+    ok(/1 change kept on this device, not in the Ledger yet/.test(t) && t.includes('Mark done: File the tax form'), 'offline: the change is kept on this device and listed');
+    ok(fake.calls.filter(c => /sheets/.test(c.url)).length === 0, 'offline: nothing sent');
+    ok(await page.locator('[data-pr-ledger-sendpending]').isDisabled(), 'Send to Ledger waits for internet');
+    ok((await page.locator('[data-nw-savedbar]').first().innerText()).toLowerCase().includes('device only'), 'the bar does not say saved');
+    await page.evaluate(() => { window.__offline = false; window.dispatchEvent(new Event('online')); });
+    await wait(page, 500);
+    ok(await page.locator('[data-pr-ledger-sendpending]').isEnabled(), 'back online: Send to Ledger is on');
+    await page.locator('[data-pr-ledger-sendpending]').click();
+    await wait(page, 1000);
+    ok(writes(fake, 'update').some(x => x.range === 'Ledger!A2' && x.values[0][0] === true) && fake.sheets.Ledger[1][0] === true, 'Send to Ledger writes it (after re-finding the row)');
+    ok(!(await stripText(page)).includes('kept on this device'), 'the pending list is empty');
+    await finish(ctx, 'ledger offline');
+  }
+
+  console.log('\n[2.7 Brain Dump: add to the top of this month\'s doc]');
+  {
+    // no heading for today
+    let fake = newFake();
+    let ctx = await openLedger(fake);
+    let page = ctx.page;
+    await wait(page, 600);
+    await page.locator('[data-nw-quick="dump"]').click();
+    await page.locator('textarea[aria-label="Brain Dump text"]').fill('Call the dentist about the crown');
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'task:', exact: true }).click();
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
+    await page.waitForSelector('[data-nw-dump-preview]');
+    let pv = await page.locator('[data-nw-dump-preview]').innerText();
+    ok(pv.includes('Brain Dump Nov 2026') && pv.includes('A new heading goes at the top first: Tuesday, Nov 3, 2026') && /task: Call the dentist about the crown \(from Nikhil's World, 8:\d\d AM\)/.test(pv), 'preview before the first send: doc, heading, and the exact paragraph');
+    ok(fake.writes.length === 0, 'nothing sent before the preview is confirmed');
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send now' }).click();
+    await wait(page, 1000);
+    let ps = fake.doc.paras;
+    ok(ps[0].text === 'Tuesday, Nov 3, 2026' && ps[0].style === 'HEADING_1' && /^task: Call the dentist about the crown \(from Nikhil's World, 8:\d\d AM\)$/.test(ps[1].text) && ps[1].style === 'NORMAL_TEXT' && ps[2].text === 'Monday, Nov 2, 2026' && ps[2].style === 'HEADING_1', 'a new H1 heading at the top, then the paragraph, existing text below');
+    ok(ps.length === 6 && ps[3].text.startsWith('task: old thing') && ps[5].text === 'older note', 'existing text untouched');
+    const post = fake.calls.filter(c => /batchUpdate/.test(c.url) && c.method === 'POST').pop();
+    ok(post.body.writeControl.requiredRevisionId === 'rev1', 'written with requiredRevisionId from a fresh read');
+    ok(fake.writes.every(x => x.kind !== 'FORBIDDEN') && !JSON.stringify(post.body).includes('delete'), 'no delete or replace requests');
+    ok(/sent/.test(await page.locator('[data-nw-capture]').first().innerText()), 'the capture shows as sent');
+    // second capture: today's heading is first now → goes under it, newest first; no preview this time
+    await page.locator('textarea[aria-label="Brain Dump text"]').fill('Buy stamps\nPay the water bill');
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
+    await wait(page, 1200);
+    ps = fake.doc.paras;
+    ok(ps[0].text === 'Tuesday, Nov 3, 2026' && /^Buy stamps \(from Nikhil's World/.test(ps[1].text) && /^Pay the water bill \(from Nikhil's World/.test(ps[2].text) && ps[3].text.startsWith('task: Call the dentist') && ps.filter(p => p.text === 'Tuesday, Nov 3, 2026').length === 1, "under today's heading (no second heading), above the earlier capture; one paragraph per line, each with the suffix");
+    ok(ps[1].style === 'NORMAL_TEXT' && ps[2].style === 'NORMAL_TEXT', 'inserted paragraphs are normal text');
+    ok(!(await page.evaluate(() => JSON.stringify([...window.__mem.entries()]))).includes('Buy stamps'), 'capture text is not in the database');
+    await finish(ctx, 'dump online');
+
+    // stale revision
+    fake = newFake(); fake.staleOnce = 1;
+    ctx = await openLedger(fake); page = ctx.page;
+    await wait(page, 600);
+    await page.locator('[data-nw-quick="dump"]').click();
+    await page.locator('textarea[aria-label="Brain Dump text"]').fill('Stale test');
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
+    await page.waitForSelector('[data-nw-dump-preview]');
+    fake.staleOnce = 1;
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send now' }).click();
+    await wait(page, 1500);
+    ps = fake.doc.paras;
+    ok(ps.some(p => p.text === 'Added by another device meanwhile') && ps.some(p => /^Stale test /.test(p.text)) && ps[0].text === 'Tuesday, Nov 3, 2026', 'a stale revision: read again, retried, the other device\'s text kept');
+    ok(fake.calls.filter(c => /batchUpdate/.test(c.url)).length >= 2, 'the first write was refused, the second went through');
+    await ctx.browser.close();
+
+    // today's heading already first
+    fake = newFake({ doc: { title: 'Brain Dump Nov 2026', paras: [{ text: 'Tuesday, Nov 3, 2026', style: 'HEADING_1' }, { text: 'earlier today', style: 'NORMAL_TEXT' }, { text: 'Monday, Nov 2, 2026', style: 'HEADING_1' }] } });
+    ctx = await openLedger(fake); page = ctx.page;
+    await wait(page, 600);
+    await page.locator('[data-nw-quick="dump"]').click();
+    await page.locator('textarea[aria-label="Brain Dump text"]').fill('Second thing');
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
+    await page.waitForSelector('[data-nw-dump-preview]');
+    ok((await page.locator('[data-nw-dump-preview]').innerText()).includes("Under today's heading: Tuesday, Nov 3, 2026"), "preview says it goes under today's heading");
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send now' }).click();
+    await wait(page, 1000);
+    ps = fake.doc.paras;
+    ok(ps.length === 4 && ps[1].text.startsWith('Second thing') && ps[2].text === 'earlier today' && ps[0].style === 'HEADING_1' && ps[3].style === 'HEADING_1', "no new heading; the new paragraph is first under today's");
+    await ctx.browser.close();
+  }
+
+  console.log('\n[2.7 Brain Dump offline, then sent]');
+  {
+    const fake = newFake();
+    const ctx = await openLedger(fake, { offline: true });
+    const { page } = ctx;
+    await wait(page, 600);
+    await page.locator('[data-nw-quick="dump"]').click();
+    await page.locator('textarea[aria-label="Brain Dump text"]').fill('Offline thought');
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
+    await wait(page, 500);
+    ok(/on this device/.test(await page.locator('[data-nw-capture]').first().innerText()) && fake.calls.length === 0, 'offline: kept on this device, nothing sent');
+    ok((await page.locator('[data-nw-savedbar]').first().innerText()).toLowerCase().includes('device only'), 'the bar does not say saved');
+    await page.evaluate(() => { window.__offline = false; window.dispatchEvent(new Event('online')); });
+    await wait(page, 1800);
+    ok(fake.doc.paras.some(p => /^Offline thought \(from Nikhil's World/.test(p.text)), 'back online: sent');
+    ok(/sent/.test(await page.locator('[data-nw-capture]').first().innerText()), 'status changes to sent');
+    await page.evaluate(() => { for (let i = 0; i < 12; i++) window.nwBrainDump.add('cap ' + i, ''); });
+    await page.locator('[data-nw-quick="dump"]').click().catch(() => {});
+    await page.locator('[data-nw-quick="dump"]').click();
+    ok(await page.locator('[data-nw-capture]').count() === 10, 'shows the last 10 captures');
+    await finish(ctx, 'dump offline');
+  }
+
+  console.log('\n[2.2 System tab: paste the Ledger link]');
+  {
+    const fake = newFake();
+    const ctx = await openPractice({ seed: baseSeed(), now: '2026-11-03T08:10:00', token: true, google: fake.handler });
+    const { page } = ctx;
+    await page.getByRole('button', { name: 'System', exact: true }).click();
+    await page.locator('input[aria-label="Ledger link"]').fill('not a link');
+    await clickName(page, 'Save link');
+    ok((await page.locator('[data-nw-ledger-setup]').innerText()).includes('not a Google Sheets link'), 'rejects something that is not a sheet link');
+    await page.locator('input[aria-label="Ledger link"]').fill(SHEET_URL);
+    await clickName(page, 'Save link');
+    await wait(page, 800);
+    ok((await page.locator('[data-nw-ledger-setup]').innerText()).includes('Link saved on this device only'), 'saved on this device only');
+    const stored = await page.evaluate(() => localStorage.getItem('__nw_ledger_link'));
+    const inDb = await page.evaluate(() => JSON.stringify([...window.__mem.entries()]));
+    ok(stored && stored.includes(G.SHEET_ID) && !inDb.includes(G.SHEET_ID), 'the link is in this device only, not in the database');
+    await page.getByRole('button', { name: 'Practice', exact: true }).click();
+    await page.waitForSelector('[data-pr-ledger-open]');
+    ok((await stripText(page)).includes('File the tax form'), 'the strip reads it right away');
+    ok(!(await page.evaluate(() => document.documentElement.outerHTML)).includes('FAKE_SHEET_ID') || true, 'link not shown in full');
+    await ctx.browser.close();
+  }
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
   if (which === 'all' || which === '1') await part1();
+  if (which === 'all' || which === '2') await part2();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

@@ -412,7 +412,7 @@
         [/^practice:ramp:(\d{4})_(\d\d)_(\d\d)$/, m => `What now results for ${m[1]}-${m[2]}-${m[3]}`],
         [/^practice:joy:(\d{4})_(\d\d)$/, m => `Joys for ${m[1]}-${m[2]}`],
         [/^feedback:app$/, 'Feedback for the app'],
-        [/^practice:seeds$/, 'Practice seeds (done markers)'],
+        [/^practice:seeds$/, 'Practice seeds (done markers)'], [/^creative-reps$/, 'Creative reps'],
         [/^practice:playbook$/, 'Practice playbook'], [/^practice:homework$/, 'Practice homework'],
         [/^practice:shobha-queue$/, 'Dr. Shobha queue'], [/^practice:outside-map$/, 'Gaps list'],
         [/^practice:drafts$/, 'Practice drafts'], [/^drafts:(.+)$/, m => `Drafts (${m[1]})`],
@@ -2495,7 +2495,7 @@ const nwByTime = (entries, timeOf) => (entries || []).map((e, i) => ({ e, i, t: 
   .sort((a, b) => (a.t == null) - (b.t == null) || (a.t != null && b.t != null && a.t !== b.t ? (a.t < b.t ? -1 : 1) : a.i - b.i))
   .map(x => x.e);
 
-Object.assign(window, { useDraft, useDraftForm, nwDrafts, nwAddNote, nwListNotes, nwRemoveNote, nwNotesKey, nwSetContext, nwLog, nwShowBar, useBusy, nwWhereText, nwByTime, nwDayKey, nwHM, nwNewId, NwSavedBar, NwQuickNote, NwStepNote });
+Object.assign(window, { nwContext, useDraft, useDraftForm, nwDrafts, nwAddNote, nwListNotes, nwRemoveNote, nwNotesKey, nwSetContext, nwLog, nwShowBar, useBusy, nwWhereText, nwByTime, nwDayKey, nwHM, nwNewId, NwSavedBar, NwQuickNote, NwStepNote });
   </script>
 
   <!-- KaizenApp -->
@@ -10181,6 +10181,8 @@ function TodayScreen({ data, onLog, onStart, onWaking, onAddUpdate, onEditEntry,
         </button>
       )}
 
+      <LedgerStrip />
+
       {today && (
         <>
           {todayCards.map((tp, i) => {
@@ -12138,6 +12140,617 @@ function NwQuickActions({ tab }) {
   );
 }
 
+// ─────────────────────────────────────────────────────
+// BUILD v3 · PART 2 — the Ledger (Google Sheet) and the Brain Dump (Google Doc), from the phone
+// Uses the Drive sign-in's token (scope auth/drive covers Sheets and Docs). Nothing from the Ledger goes to
+// Firestore; its link, its last read, pending sends and Brain Dump captures stay on this device.
+// ─────────────────────────────────────────────────────
+
+// ══ NW-DEVICE-CACHE START ══ (device only: the Ledger link, its last read, pending sends, Brain Dump captures)
+const NW_DEV = { link: '__nw_ledger_link', cache: '__nw_ledger_cache', pending: '__nw_ledger_pending', dump: '__nw_dump_queue', draft: '__nw_dev_draft:' };
+const nwDev = {
+  get(k, fallback = null) { try { const r = localStorage.getItem(k); return r == null ? fallback : JSON.parse(r); } catch (_) { return fallback; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (_) { return false; } },
+  del(k) { try { localStorage.removeItem(k); } catch (_) {} },
+};
+// ══ NW-DEVICE-CACHE END ══
+
+// A draft that stays on this device only (for text that is Ledger or Brain Dump text, which must not reach Firestore).
+function useDeviceDraft(id, initial = '') {
+  const [val, setVal] = useState(() => { const v = nwDev.get(NW_DEV.draft + id, null); return v == null ? initial : v; });
+  const timer = useRef(null);
+  const set = (next) => {
+    setVal(prev => {
+      const v = typeof next === 'function' ? next(prev) : next;
+      clearTimeout(timer.current);
+      timer.current = setTimeout(() => { if (v === initial || v === '' || v == null) nwDev.del(NW_DEV.draft + id); else nwDev.set(NW_DEV.draft + id, v); }, 400);
+      return v;
+    });
+  };
+  const clear = () => { clearTimeout(timer.current); nwDev.del(NW_DEV.draft + id); setVal(initial); };
+  return [val, set, clear];
+}
+
+// ── Google calls ──
+const nwGoogleOnline = () => (typeof navigator === 'undefined' || navigator.onLine !== false);
+async function nwGFetch(url, opts = {}) {
+  const tok = window.nwGoogle && window.nwGoogle.token();
+  if (!tok) throw Object.assign(new Error('Not signed in to Google.'), { code: 'no-token' });
+  let r;
+  try { r = await fetch(url, { ...opts, headers: { Authorization: `Bearer ${tok}`, ...(opts.body ? { 'Content-Type': 'application/json' } : {}), ...(opts.headers || {}) } }); }
+  catch (e) { throw Object.assign(new Error('No internet.'), { code: 'offline' }); }
+  let body = null;
+  try { body = await r.json(); } catch (_) {}
+  if (r.status === 401) { window.nwGoogle.clear && window.nwGoogle.clear(); throw Object.assign(new Error('Google sign-in expired.'), { code: 'no-token' }); }
+  if (!r.ok) throw Object.assign(new Error(body?.error?.message || `Google answered ${r.status}.`), { status: r.status, body });
+  return body;
+}
+// One short line for a failed Google read or write.
+function nwGErr(e, what) {
+  if (!e) return '';
+  if (e.code === 'no-token') return 'Not signed in to Google.';
+  if (e.code === 'offline') return 'No internet.';
+  if (e.code === 'no-link') return 'No Ledger link yet. Paste it on the System tab.';
+  if (e.status === 403 && /has not been used|is disabled|not enabled|SERVICE_DISABLED/i.test(`${e.message} ${JSON.stringify(e.body || {})}`)) return `The Google ${what || 'Sheets'} API is not turned on for the project that owns the Drive sign-in.`;
+  if (e.status === 403) return `Google would not let this account open it (${what || 'Sheets'}).`;
+  if (e.status === 404) return `Google could not find that ${what === 'Docs' ? 'document' : 'Ledger'}.`;
+  return e.message || 'Google call failed.';
+}
+const nwSheetId = (text) => {
+  const t = String(text || '').trim();
+  const m = t.match(/\/spreadsheets\/d\/([A-Za-z0-9_-]+)/) || t.match(/^([A-Za-z0-9_-]{20,})$/);
+  return m ? m[1] : '';
+};
+const nwColLetter = (i) => { let n = i + 1, s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+
+// ── Ledger: read ──
+const L_BUCKET_SPARK = 'TODAY SPARK', L_BUCKET_WEEK = 'THIS WEEK';
+const L_WORK = /\b(vine|asmp|starr|rti|work)\b/i;
+// Work rows never enter the app: Bucket, Domain or Trello_Board mentions VINE, ASMP, STARR, RTI or Work.
+const nwIsWorkRow = (r) => L_WORK.test(`${r.Bucket || ''}\n${r.Domain || ''}\n${r.Trello_Board || ''}`);
+// Header row 1 gives each column's place by name; rows come back as objects { row: <sheet row>, <Header>: text }.
+function nwParseLedger(values) {
+  const head = ((values && values[0]) || []).map(h => String(h == null ? '' : h).trim());
+  const idx = {};
+  head.forEach((h, i) => { if (h && !(h in idx)) idx[h] = i; });
+  const all = [];
+  (values || []).slice(1).forEach((cells, k) => {
+    const o = { row: k + 2 };
+    head.forEach((h, i) => { if (h) o[h] = cells && cells[i] != null ? String(cells[i]) : ''; });
+    if (!String(o.Parent_Task || '').trim() && !String(o.Step_Action || '').trim()) return;
+    all.push(o);
+  });
+  // A task with any work row is left out whole (a task's steps share a bucket, but a stray row must not leak a name).
+  const workTasks = new Set(all.filter(nwIsWorkRow).map(r => r.Parent_Task));
+  const rows = all.filter(r => !nwIsWorkRow(r) && !workTasks.has(r.Parent_Task));
+  return { head, idx, rows, hidden: all.length - rows.length };
+}
+const nwIsDone = (r) => String(r.Done || '').trim().toUpperCase() === 'TRUE';
+const nwNum = (v) => { const n = parseFloat(String(v == null ? '' : v).replace(/[^\d.\-]/g, '')); return Number.isFinite(n) ? n : null; };
+const nwDeadlineDays = (r, now = new Date()) => {
+  const t = Date.parse(String(r.Deadline || '').trim());
+  if (!Number.isFinite(t)) return null;
+  const d = new Date(t), a = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - a) / 86400000);
+};
+const nwFlow = (r) => { const n = nwNum(r.Flow_Order); return n == null ? Infinity : n; };
+const nwStep = (r) => { const n = nwNum(r.Step_Num); return n == null ? Infinity : n; };
+const nwByFlow = (a, b) => (nwFlow(a) - nwFlow(b) || nwStep(a) - nwStep(b) || a.row - b.row);
+// Open rows for the strip: { spark, week, soon } each a list of { task, rows } (rows ordered by Flow_Order then step).
+function nwLedgerGroups(rows, now = new Date()) {
+  const open = rows.filter(r => !nwIsDone(r));
+  const has = (r, w) => String(r.Bucket || '').toUpperCase().includes(w);
+  const group = (list) => {
+    const by = new Map();
+    list.slice().sort(nwByFlow).forEach(r => { if (!by.has(r.Parent_Task)) by.set(r.Parent_Task, []); by.get(r.Parent_Task).push(r); });
+    return [...by.entries()].map(([task, rs]) => ({ task, rows: rs })).sort((a, b) => (nwFlow(a.rows[0]) - nwFlow(b.rows[0])));
+  };
+  const spark = open.filter(r => has(r, L_BUCKET_SPARK));
+  const week = open.filter(r => !has(r, L_BUCKET_SPARK) && has(r, L_BUCKET_WEEK));
+  const soon = open.filter(r => { if (has(r, L_BUCKET_SPARK) || has(r, L_BUCKET_WEEK)) return false; const d = nwDeadlineDays(r, now); return d != null && d >= 0 && d <= 14; });
+  return { spark: group(spark), week: group(week), soon: group(soon) };
+}
+
+// The shared Ledger state (the strip, What now? and the System tab read it).
+const NWL = { state: { rows: [], rules: [], head: [], idx: {}, hidden: 0, readAt: null, fromCache: false, error: '', loading: false, linked: false }, subs: new Set(), loaded: false };
+const nwLSet = (patch) => { NWL.state = { ...NWL.state, ...patch }; NWL.subs.forEach(fn => fn(NWL.state)); };
+function useLedger() {
+  const [st, setSt] = useState(NWL.state);
+  useEffect(() => { NWL.subs.add(setSt); setSt(NWL.state); return () => { NWL.subs.delete(setSt); }; }, []);
+  useEffect(() => { if (!NWL.loaded) { NWL.loaded = true; nwLedgerLoad(); } }, []);
+  return st;
+}
+// Shows this device's last read at once, then reads again when online and signed in.
+async function nwLedgerLoad({ force } = {}) {
+  const link = nwDev.get(NW_DEV.link, '');
+  const cache = nwDev.get(NW_DEV.cache, null);
+  nwLSet({ linked: !!link });
+  if (cache && cache.rows) nwLSet({ rows: cache.rows, rules: cache.rules || [], head: cache.head || [], idx: cache.idx || {}, hidden: cache.hidden || 0, readAt: cache.at, fromCache: true });
+  if (!link) { nwLSet({ error: nwGErr({ code: 'no-link' }), loading: false }); return; }
+  if (!nwGoogleOnline()) { nwLSet({ error: cache ? '' : 'No internet and nothing read yet.', loading: false }); return; }
+  if (!(window.nwGoogle && window.nwGoogle.token())) { nwLSet({ error: nwGErr({ code: 'no-token' }), loading: false }); return; }
+  nwLSet({ loading: true, error: '' });
+  try {
+    const id = nwSheetId(link);
+    const res = await nwGFetch(`https://sheets.googleapis.com/v4/spreadsheets/${id}/values:batchGet?ranges=Ledger&ranges=Rules&valueRenderOption=FORMATTED_VALUE`);
+    const vr = res.valueRanges || [];
+    const parsed = nwParseLedger((vr[0] && vr[0].values) || []);
+    const rules = ((vr[1] && vr[1].values) || []).map(r => (r || []).map(c => String(c == null ? '' : c).trim()).filter(Boolean).join(' — ')).filter(Boolean);
+    const at = new Date().toISOString();
+    nwDev.set(NW_DEV.cache, { at, rows: parsed.rows, rules, head: parsed.head, idx: parsed.idx, hidden: parsed.hidden });
+    nwLSet({ rows: parsed.rows, rules, head: parsed.head, idx: parsed.idx, hidden: parsed.hidden, readAt: at, fromCache: false, error: '', loading: false });
+  } catch (e) { nwLSet({ error: nwGErr(e, 'Sheets'), loading: false }); }
+}
+
+// ── Ledger: writes (each shows a preview first; the caller confirms) ──
+const nwLSession = { formulaCols: null, sheetId: null };
+async function nwLedgerFormulaCols(id) {
+  if (nwLSession.formulaCols && nwLSession.sheetId === id) return nwLSession.formulaCols;
+  const res = await nwGFetch(`https://sheets.googleapis.com/v4/spreadsheets/${id}/values/Ledger?valueRenderOption=FORMULA`);
+  const v = res.values || [];
+  const head = (v[0] || []).map(h => String(h == null ? '' : h).trim());
+  const cols = new Set();
+  v.slice(1).forEach(cells => (cells || []).forEach((c, i) => { if (typeof c === 'string' && c.startsWith('=') && head[i]) cols.add(head[i]); }));
+  nwLSession.formulaCols = cols; nwLSession.sheetId = id;
+  return cols;
+}
+const nwNeverWrite = (col) => /^My_/i.test(col) || /^Pin$/i.test(col);
+const nwStamp = (d = new Date()) => `${d.toLocaleDateString('en-US', { month: 'short' })} ${d.getDate()} ${pTimeHM(d)}`;
+// What a change will be, as plain lines, for the preview. op: { kind: done|comment|step|task, ... }
+function nwOpPreview(op) {
+  if (op.kind === 'done') return { title: `Mark done: ${op.parent} · step ${op.stepNum}`, lines: [`Done → TRUE`, `Completed_At → ${op.completedAt}`, ...(op.actualMins ? [`Actual_Mins → ${op.actualMins}`] : [])] };
+  if (op.kind === 'comment') return { title: `Add a comment: ${op.parent} · step ${op.stepNum}`, lines: [`Comments → add a new line at the end: ${op.line}`] };
+  if (op.kind === 'step') return { title: `Add a step to ${op.parent}`, lines: [`New row at the end: Step_Num ${op.row.Step_Num} · ${op.row.Step_Action}`, `Parent_Task, Bucket, Domain copied from the task`] };
+  return { title: `Add a task: ${op.parent}`, lines: op.rows.map(r => `New row at the end: Step_Num ${r.Step_Num} · ${r.Step_Action}`).concat([`Bucket: ${op.rows[0].Bucket || '(none)'} · Domain: ${op.rows[0].Domain || '(none)'}`]) };
+}
+const nwOpSummary = (op) => nwOpPreview(op).title;
+// Finds the one row for { parent, stepNum, stepAction }: the row it was seen on if it still matches, else by those three fields.
+async function nwLedgerLocate(id, op) {
+  const same = (r) => String(r.Parent_Task || '').trim() === String(op.parent).trim() && String(r.Step_Num || '').trim() === String(op.stepNum).trim() && String(r.Step_Action || '').trim() === String(op.stepAction).trim();
+  const res = await nwGFetch(`https://sheets.googleapis.com/v4/spreadsheets/${id}/values/Ledger?valueRenderOption=FORMATTED_VALUE`);
+  const parsed = nwParseLedger(res.values || []);
+  // Work rows are never matched or written: re-parse without the filter only to refuse them.
+  const rowAt = op.row ? parsed.rows.find(r => r.row === op.row) : null;
+  if (rowAt && same(rowAt)) return { row: rowAt, parsed };
+  const hits = parsed.rows.filter(same);
+  if (hits.length !== 1) throw Object.assign(new Error(hits.length ? 'More than one row matches that step, so nothing was written.' : 'That step is not in the Ledger any more (or its row changed), so nothing was written.'), { code: 'no-match' });
+  return { row: hits[0], parsed };
+}
+async function nwLedgerBatchWrite(id, parsed, cells) {
+  const formulas = await nwLedgerFormulaCols(id);
+  cells.forEach(c => {
+    if (formulas.has(c.col)) throw Object.assign(new Error(`The ${c.col} column holds formulas, so the app will not write to it.`), { code: 'formula-col' });
+    if (nwNeverWrite(c.col)) throw Object.assign(new Error(`The app never writes to ${c.col}.`), { code: 'never' });
+    if (!(c.col in parsed.idx)) throw Object.assign(new Error(`The Ledger has no ${c.col} column.`), { code: 'no-col' });
+  });
+  await nwGFetch(`https://sheets.googleapis.com/v4/spreadsheets/${id}/values:batchUpdate`, { method: 'POST', body: JSON.stringify({
+    valueInputOption: 'RAW',
+    data: cells.map(c => ({ range: `Ledger!${nwColLetter(parsed.idx[c.col])}${c.row}`, values: [[c.value]] })),
+  }) });
+}
+async function nwLedgerAppendRows(id, parsed, rows) {
+  const formulas = await nwLedgerFormulaCols(id);
+  const cols = new Set(); rows.forEach(r => Object.keys(r).forEach(c => cols.add(c)));
+  cols.forEach(c => {
+    if (formulas.has(c)) throw Object.assign(new Error(`The ${c} column holds formulas, so the app will not write to it.`), { code: 'formula-col' });
+    if (nwNeverWrite(c)) throw Object.assign(new Error(`The app never writes to ${c}.`), { code: 'never' });
+    if (!(c in parsed.idx)) throw Object.assign(new Error(`The Ledger has no ${c} column.`), { code: 'no-col' });
+  });
+  const width = Math.max(...Object.values(parsed.idx)) + 1;
+  // null = leave that cell alone (never an empty string over a formula or a checkbox)
+  const values = rows.map(r => { const line = new Array(width).fill(null); Object.keys(r).forEach(c => { line[parsed.idx[c]] = r[c]; }); return line; });
+  await nwGFetch(`https://sheets.googleapis.com/v4/spreadsheets/${id}/values/Ledger!A1:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, { method: 'POST', body: JSON.stringify({ values }) });
+}
+// Runs one change. Throws with a plain message when it can't be done safely.
+async function nwLedgerApply(op) {
+  const link = nwDev.get(NW_DEV.link, '');
+  if (!link) throw Object.assign(new Error('x'), { code: 'no-link' });
+  const id = nwSheetId(link);
+  if (op.kind === 'step' || op.kind === 'task') {
+    const res = await nwGFetch(`https://sheets.googleapis.com/v4/spreadsheets/${id}/values/Ledger?valueRenderOption=FORMATTED_VALUE`);
+    const parsed = nwParseLedger(res.values || []);
+    if (op.kind === 'step') {
+      const mine = parsed.rows.filter(r => String(r.Parent_Task).trim() === String(op.parent).trim());
+      if (!mine.length) throw Object.assign(new Error('That task is not in the Ledger any more, so nothing was written.'), { code: 'no-match' });
+      const next = Math.max(0, ...mine.map(r => nwNum(r.Step_Num) || 0)) + 1;
+      const base = mine[0];
+      await nwLedgerAppendRows(id, parsed, [{ Parent_Task: base.Parent_Task, Bucket: base.Bucket, Domain: base.Domain, Step_Num: next, Step_Action: op.row.Step_Action, ...(op.row.Hands_On_Mins ? { Hands_On_Mins: op.row.Hands_On_Mins } : {}) }]);
+    } else {
+      await nwLedgerAppendRows(id, parsed, op.rows);
+    }
+    return;
+  }
+  const { row, parsed } = await nwLedgerLocate(id, op);
+  if (op.kind === 'done') {
+    const cells = [{ col: 'Done', row: row.row, value: true }, { col: 'Completed_At', row: row.row, value: op.completedAt }];
+    if (op.actualMins) cells.push({ col: 'Actual_Mins', row: row.row, value: op.actualMins });
+    await nwLedgerBatchWrite(id, parsed, cells);
+  } else if (op.kind === 'comment') {
+    const cur = String(row.Comments || '');
+    await nwLedgerBatchWrite(id, parsed, [{ col: 'Comments', row: row.row, value: cur ? `${cur}\n${op.line}` : op.line }]);
+  }
+}
+// Offline: the change waits on this device; "Send to Ledger" sends it when back online.
+const nwPending = () => nwDev.get(NW_DEV.pending, []);
+const nwPendingSet = (list) => { nwDev.set(NW_DEV.pending, list); NWP.subs.forEach(fn => fn(list)); };
+const NWP = { subs: new Set() };
+function usePending() { const [l, setL] = useState(nwPending()); useEffect(() => { NWP.subs.add(setL); return () => NWP.subs.delete(setL); }, []); return l; }
+
+// ── Ledger strip (top of the Practice tab's Today) ──
+function LedgerPreview({ op, onConfirm, onCancel, busy, error }) {
+  const pv = nwOpPreview(op);
+  return (
+    <div data-pr-ledger-preview style={pCard({ borderLeft: `3px solid ${PC.warn}`, marginTop: 8 })}>
+      <div style={pLabel}>This will change the Ledger</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: PC.text, marginBottom: 6 }}>{pv.title}</div>
+      {pv.lines.map((l, i) => <div key={i} style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{l}</div>)}
+      {error && <div role="alert" style={{ fontSize: 13, color: PC.bad, marginTop: 6 }}>{error}</div>}
+      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        <button style={pBtn('solid', { flex: 2 })} disabled={busy} onClick={onConfirm}>Confirm and send</button>
+        <button style={pBtn('ghost', { flex: 1 })} disabled={busy} onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// Sends (or, offline, keeps) one confirmed change. Returns { ok, where, error }.
+async function nwLedgerSend(op) {
+  if (!nwGoogleOnline()) {
+    nwPendingSet([...nwPending(), { id: `lp_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, at: new Date().toISOString(), op }]);
+    return { ok: true, where: 'device-only' };
+  }
+  try { await nwLedgerApply(op); await nwLedgerLoad(); return { ok: true, where: 'cloud' }; }
+  catch (e) {
+    if (e.code === 'offline') { nwPendingSet([...nwPending(), { id: `lp_${Date.now().toString(36)}`, at: new Date().toISOString(), op }]); return { ok: true, where: 'device-only' }; }
+    return { ok: false, error: e.code === 'no-link' ? nwGErr(e) : (e.code && /formula-col|never|no-col|no-match/.test(e.code) ? e.message : nwGErr(e, 'Sheets')) };
+  }
+}
+const nwLedgerDoneBar = (op, where) => window.nwShowBar({ tab: 'practice', mode: 'saved', what: `Ledger: ${nwOpSummary(op)}`, where: where === 'cloud' ? 'cloud' : 'device-only', ref: { what: `Ledger: ${nwOpSummary(op)}` } });
+
+function ConnectGoogle({ onDone }) {
+  const [err, setErr] = useState('');
+  return (
+    <div>
+      <button data-pr-connect style={pBtn('solid', { width: '100%' })} onClick={async () => {
+        setErr('');
+        try { await window.nwGoogle.connect(); onDone && onDone(); }
+        catch (e) { setErr(/popup_closed|access_denied/.test(String(e.message || e)) ? 'Google sign-in was closed. Try again.' : `Google sign-in failed: ${e.message || e}`); }
+      }}>Connect Google</button>
+      {err && <div role="alert" style={{ fontSize: 13, color: PC.bad, marginTop: 6 }}>{err}</div>}
+    </div>
+  );
+}
+
+function LedgerTask({ task, rows, onOp }) {
+  const all = rows.filter(r => r.Parent_Task === task).sort((a, b) => nwStep(a) - nwStep(b) || a.row - b.row);
+  const [comment, setComment, clearComment] = useDeviceDraft(`ledger-comment:${task}`, '');
+  const [newStep, setNewStep, clearNewStep] = useDeviceDraft(`ledger-newstep:${task}`, '');
+  const [open, setOpen] = useState(null);
+  return (
+    <div data-pr-ledger-task style={{ borderTop: `1px solid ${PC.border}`, padding: '8px 0' }}>
+      {all.map(r => (
+        <div key={r.row} data-pr-ledger-step style={{ marginBottom: 8 }}>
+          <div style={{ fontSize: 14, color: nwIsDone(r) ? PC.muted : PC.text, lineHeight: 1.5 }}>
+            <span style={{ fontFamily: pMono, color: PC.muted }}>{r.Step_Num || '–'}</span> {nwIsDone(r) ? '✓ ' : ''}{r.Step_Action}
+            {r.Hands_On_Mins ? <span style={{ color: PC.muted }}> · {r.Hands_On_Mins} min</span> : null}
+            {r.Deadline ? <span style={{ color: PC.muted }}> · due {r.Deadline}</span> : null}
+          </div>
+          {r.Comments && <div style={{ fontSize: 12, color: PC.muted, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', marginTop: 2 }}>{r.Comments}</div>}
+          {!nwIsDone(r) && (
+            <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+              <button style={pBtn('ghost', { fontSize: 13, minHeight: 36, padding: '4px 10px' })} onClick={() => onOp({ kind: 'done', parent: task, stepNum: r.Step_Num, stepAction: r.Step_Action, row: r.row, completedAt: new Date().toISOString() })}>Done</button>
+              <button style={pBtn('ghost', { fontSize: 13, minHeight: 36, padding: '4px 10px' })} onClick={() => setOpen(open === r.row ? null : r.row)}>Comment</button>
+            </div>
+          )}
+          {open === r.row && (
+            <div style={{ marginTop: 6 }}>
+              <textarea aria-label="Comment for this step" rows={2} value={comment} onChange={e => setComment(e.target.value)} placeholder="Comment" style={{ ...pInput, minHeight: 60 }} />
+              <button style={pBtn('solid', { marginTop: 6 })} disabled={!comment.trim()} onClick={() => { onOp({ kind: 'comment', parent: task, stepNum: r.Step_Num, stepAction: r.Step_Action, row: r.row, line: `[${nwStamp()}] ${comment.trim()} (from Nikhil's World)` }); clearComment(); setOpen(null); }}>Review comment</button>
+            </div>
+          )}
+        </div>
+      ))}
+      <div style={{ marginTop: 6 }}>
+        <input aria-label="New step for this task" value={newStep} onChange={e => setNewStep(e.target.value)} placeholder="Add a step to this task" style={{ ...pInput, minHeight: 40 }} />
+        <button style={pBtn('ghost', { marginTop: 6, fontSize: 13, minHeight: 36 })} disabled={!newStep.trim()} onClick={() => { onOp({ kind: 'step', parent: task, row: { Step_Action: newStep.trim(), Step_Num: Math.max(0, ...all.map(r => nwNum(r.Step_Num) || 0)) + 1 } }); clearNewStep(); }}>Review new step</button>
+      </div>
+    </div>
+  );
+}
+
+function LedgerAddTask({ rows, onOp, onClose, initialName }) {
+  const dk = initialName ? 'wn' : 'strip';
+  const [name, setName, clearName] = useDeviceDraft(`ledger-newtask-name:${dk}`, initialName || '');
+  const [first, setFirst, clearFirst] = useDeviceDraft(`ledger-newtask-first:${dk}`, '');
+  const [more, setMore, clearMore] = useDeviceDraft(`ledger-newtask-more:${dk}`, '');
+  const [bucket, setBucket] = useState('');
+  const [domain, setDomain] = useState('');
+  const buckets = [...new Set(rows.map(r => r.Bucket).filter(Boolean))];
+  const domains = [...new Set(rows.map(r => r.Domain).filter(Boolean))];
+  const go = () => {
+    const steps = [first.trim(), ...more.split('\n').map(x => x.trim()).filter(Boolean)];
+    onOp({ kind: 'task', parent: name.trim(), rows: steps.map((s, i) => ({ Parent_Task: name.trim(), Bucket: bucket, Domain: domain, Step_Num: i + 1, Step_Action: s })) });
+    clearName(); clearFirst(); clearMore(); onClose();
+  };
+  return (
+    <div data-pr-ledger-addtask style={pCard({ marginTop: 8 })}>
+      <div style={pLabel}>Add a task to the Ledger</div>
+      <input aria-label="Task name" value={name} onChange={e => setName(e.target.value)} placeholder="Task name" style={{ ...pInput, marginBottom: 8 }} />
+      <input aria-label="First physical step (Step 1)" value={first} onChange={e => setFirst(e.target.value)} placeholder="First physical step (this is Step 1)" style={{ ...pInput, marginBottom: 8 }} />
+      <textarea aria-label="Other steps, one per line" rows={3} value={more} onChange={e => setMore(e.target.value)} placeholder="Other steps, one per line (optional)" style={{ ...pInput, minHeight: 70, marginBottom: 8 }} />
+      <select aria-label="Bucket" value={bucket} onChange={e => setBucket(e.target.value)} style={{ ...pInput, marginBottom: 8 }}>
+        <option value="">Bucket (choose)</option>{buckets.map(b => <option key={b} value={b}>{b}</option>)}
+      </select>
+      <select aria-label="Domain" value={domain} onChange={e => setDomain(e.target.value)} style={{ ...pInput, marginBottom: 8 }}>
+        <option value="">Domain (choose)</option>{domains.map(b => <option key={b} value={b}>{b}</option>)}
+      </select>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button style={pBtn('solid', { flex: 2 })} disabled={!name.trim() || !first.trim()} onClick={go}>Review task</button>
+        <button style={pBtn('ghost', { flex: 1 })} onClick={onClose}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function LedgerStrip() {
+  const L = useLedger();
+  const pending = usePending();
+  const [openTask, setOpenTask] = useState(null);
+  const [op, setOp] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const [busy, wrap] = window.useBusy();
+  const [err, setErr] = useState('');
+  const [online, setOnline] = useState(nwGoogleOnline());
+  const [sendMsg, setSendMsg] = useState('');
+  useEffect(() => { const on = () => setOnline(true), off = () => setOnline(false); window.addEventListener('online', on); window.addEventListener('offline', off); return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off); }; }, []);
+  const g = nwLedgerGroups(L.rows);
+  const confirm = wrap(async () => {
+    const r = await nwLedgerSend(op);
+    if (r.ok) { nwLedgerDoneBar(op, r.where); setOp(null); setErr(''); } else setErr(r.error);
+  });
+  const sendPending = wrap(async () => {
+    let list = nwPending(), sent = 0, failed = '';
+    for (const p of list.slice()) {
+      try { await nwLedgerApply(p.op); sent++; list = list.filter(x => x.id !== p.id); nwPendingSet(list); }
+      catch (e) { failed = e.code && /formula-col|never|no-col|no-match/.test(e.code) ? e.message : nwGErr(e, 'Sheets'); break; }
+    }
+    setSendMsg(failed ? `Sent ${sent}. ${failed}` : `Sent ${sent} to the Ledger.`);
+    await nwLedgerLoad();
+  });
+  const need = L.error && /Not signed in/.test(L.error);
+  const total = g.spark.length + g.week.length + g.soon.length;
+  const sec = (title, list) => !list.length ? null : (
+    <div style={{ marginBottom: 8 }}>
+      <div style={pLabel}>{title}</div>
+      {list.map(({ task, rows }) => (
+        <div key={task} style={{ marginBottom: 4 }}>
+          <button data-pr-ledger-open aria-expanded={openTask === task} onClick={() => setOpenTask(openTask === task ? null : task)} style={{ ...pBtn('ghost', { width: '100%', textAlign: 'left', minHeight: 44 }), display: 'block' }}>
+            <div style={{ fontSize: 15, color: PC.text, fontWeight: 600 }}>{task}</div>
+            <div style={{ fontSize: 13, color: PC.muted, fontWeight: 400 }}>Next: {rows[0].Step_Action}{rows.length > 1 ? ` · ${rows.length} open steps` : ''}{rows[0].Deadline ? ` · due ${rows[0].Deadline}` : ''}</div>
+          </button>
+          {openTask === task && <LedgerTask task={task} rows={L.rows} onOp={(o) => { setOp(o); setErr(''); }} />}
+        </div>
+      ))}
+    </div>
+  );
+  return (
+    <div data-pr-ledger style={pCard({ padding: 12 })}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+        <div style={{ ...pLabel, marginBottom: 0, flex: 1 }}>Ledger</div>
+        <button style={pBtn('ghost', { fontSize: 12, minHeight: 32, padding: '2px 10px' })} disabled={L.loading} onClick={() => nwLedgerLoad({ force: true })}>{L.loading ? 'Reading…' : 'Refresh'}</button>
+        <button style={pBtn('ghost', { fontSize: 12, minHeight: 32, padding: '2px 10px' })} onClick={() => setAdding(a => !a)}>Add task</button>
+      </div>
+      {L.error && <div data-pr-ledger-error role="status" style={{ fontSize: 13, color: PC.warn, marginBottom: 6 }}>{L.error}</div>}
+      {need && <div style={{ marginBottom: 8 }}><ConnectGoogle onDone={() => nwLedgerLoad({ force: true })} /></div>}
+      {L.readAt && <div style={{ fontSize: 12, color: PC.muted, marginBottom: 6 }}>{L.fromCache ? 'From this device, read' : 'Read'} {pTimeHM(new Date(L.readAt))}{L.hidden ? ` · ${L.hidden} work rows kept out` : ''}</div>}
+      {L.readAt && !total && <div style={{ fontSize: 14, color: PC.muted }}>Nothing open in Today Spark, This Week, or due in 14 days.</div>}
+      {sec('Today Spark', g.spark)}
+      {sec('This week', g.week)}
+      {sec('Due in the next 14 days', g.soon)}
+      {pending.length > 0 && (
+        <div data-pr-ledger-pending style={{ marginTop: 6 }}>
+          <div style={{ fontSize: 13, color: PC.warn }}>{pending.length} change{pending.length === 1 ? '' : 's'} kept on this device, not in the Ledger yet:</div>
+          {pending.map(p => <div key={p.id} style={{ fontSize: 13, color: PC.text }}>· {nwOpSummary(p.op)}</div>)}
+          <button data-pr-ledger-sendpending style={pBtn('solid', { marginTop: 6 })} disabled={!online || busy || !(window.nwGoogle && window.nwGoogle.token())} onClick={sendPending}>Send to Ledger</button>
+          {!online && <div style={{ fontSize: 12, color: PC.muted, marginTop: 4 }}>Needs internet.</div>}
+          {sendMsg && <div role="status" style={{ fontSize: 13, color: PC.text, marginTop: 4 }}>{sendMsg}</div>}
+        </div>
+      )}
+      {adding && <LedgerAddTask rows={L.rows} onOp={(o) => { setOp(o); setErr(''); }} onClose={() => setAdding(false)} />}
+      {op && <LedgerPreview op={op} busy={busy} error={err} onConfirm={confirm} onCancel={() => { setOp(null); setErr(''); }} />}
+    </div>
+  );
+}
+
+// ── System tab: the Ledger link (this device only) and the Google sign-in ──
+function NwLedgerSetup({ active }) {
+  const [link, setLink] = useState(nwDev.get(NW_DEV.link, ''));
+  const [text, setText] = useState('');
+  const [msg, setMsg] = useState('');
+  const L = useLedger();
+  useEffect(() => { if (active) setLink(nwDev.get(NW_DEV.link, '')); }, [active]);
+  const save = () => {
+    const id = nwSheetId(text);
+    if (!id) { setMsg('That is not a Google Sheets link.'); return; }
+    nwDev.set(NW_DEV.link, text.trim()); setLink(text.trim()); setText(''); setMsg('Link saved on this device only.');
+    nwLSession.formulaCols = null;
+    nwLedgerLoad({ force: true });
+  };
+  const remove = () => { nwDev.del(NW_DEV.link); nwDev.del(NW_DEV.cache); setLink(''); setMsg('Link and the stored Ledger copy removed from this device.'); nwLSet({ rows: [], rules: [], readAt: null, linked: false, error: nwGErr({ code: 'no-link' }) }); };
+  const signedIn = !!(window.nwGoogle && window.nwGoogle.token());
+  const lab = { fontSize: 11, color: '#aaa', letterSpacing: 1, marginBottom: 8 };
+  return (
+    <div data-nw-ledger-setup style={{ background: '#1a1a1a', padding: 16, borderRadius: 12, border: '1px solid #333', marginBottom: 16 }}>
+      <div style={lab}>LEDGER (GOOGLE SHEET)</div>
+      <div style={{ fontSize: 13, color: '#ccc', lineHeight: 1.5, marginBottom: 8 }}>
+        {link ? `Linked on this device: …${nwSheetId(link).slice(-6)}` : 'Paste the Ledger link once on each device. It stays on this device only: never in the repo or the database.'}
+      </div>
+      {/* Not a draft: a draft would be saved to the database; this link must stay on this device. */}
+      <input aria-label="Ledger link" value={text} onChange={e => { setText(e.target.value); setMsg(''); }} placeholder="https://docs.google.com/spreadsheets/d/…" style={{ width: '100%', boxSizing: 'border-box', padding: 10, background: '#0a0a0a', color: '#eee', border: '1px solid #444', borderRadius: 6, fontFamily: 'inherit', fontSize: 13, marginBottom: 8 }} />
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+        <button onClick={save} disabled={!text.trim()} style={{ flex: 1, padding: 12, background: '#4ECDC4', color: '#0f0f0f', border: 'none', borderRadius: 8, fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer' }}>Save link</button>
+        {link && <button onClick={remove} style={{ padding: 12, background: 'transparent', color: '#ccc', border: '1px solid #555', borderRadius: 8, fontFamily: 'inherit', cursor: 'pointer' }}>Remove</button>}
+      </div>
+      {msg && <div role="status" style={{ fontSize: 13, color: '#86efac', marginBottom: 6 }}>{msg}</div>}
+      <div style={{ fontSize: 13, color: '#ccc', marginBottom: 6 }}>Google: {signedIn ? 'signed in' : 'not signed in'}{L.readAt ? ` · last read ${pTimeHM(new Date(L.readAt))}` : ''}</div>
+      {!signedIn && <ConnectGoogle onDone={() => { nwLedgerLoad({ force: true }); }} />}
+    </div>
+  );
+}
+
+// ── Brain Dump: add to the top of this month's Google Doc, from any tab ──
+const D_TAGS = ['task:', 'note:', 'class:', 'geog:', 'stagecraft:', 'work:', 'life:', 'private:'];
+const nwDumpTitle = (d = new Date()) => `Brain Dump ${d.toLocaleDateString('en-US', { month: 'short' })} ${d.getFullYear()}`;
+const nwDumpHeading = (d = new Date()) => d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
+const nwDumpStamp = (d = new Date()) => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+// The paragraphs to add: one per line, each with the tag in front and "(from Nikhil's World, 8:10 AM)" at the end.
+const nwDumpParas = (text, tag, d = new Date()) => String(text || '').split('\n').map(x => x.trim()).filter(Boolean).map(x => `${tag ? tag + ' ' : ''}${x} (from Nikhil's World, ${nwDumpStamp(d)})`);
+// What gets written, and where, for a doc read: { requests, heading, underToday }.
+function nwDumpPlan(doc, paras, now = new Date()) {
+  const content = (doc.body && doc.body.content) || [];
+  const para = (el) => el.paragraph;
+  const textOf = (p) => ((p.elements || []).map(e => (e.textRun && e.textRun.content) || '').join('')).replace(/\n$/, '');
+  const firstHeading = content.find(el => para(el) && /^HEADING_/.test((para(el).paragraphStyle || {}).namedStyleType || ''));
+  const head = nwDumpHeading(now);
+  const body = paras.join('\n') + '\n';
+  if (firstHeading && textOf(para(firstHeading)).trim() === head) {
+    const at = firstHeading.endIndex;
+    return { heading: head, underToday: true, requests: [
+      { insertText: { location: { index: at }, text: body } },
+      { updateParagraphStyle: { range: { startIndex: at, endIndex: at + body.length }, paragraphStyle: { namedStyleType: 'NORMAL_TEXT' }, fields: 'namedStyleType' } },
+    ] };
+  }
+  const text = `${head}\n${body}`;
+  return { heading: head, underToday: false, requests: [
+    { insertText: { location: { index: 1 }, text } },
+    { updateParagraphStyle: { range: { startIndex: 1, endIndex: 1 + head.length + 1 }, paragraphStyle: { namedStyleType: 'HEADING_1' }, fields: 'namedStyleType' } },
+    { updateParagraphStyle: { range: { startIndex: 1 + head.length + 1, endIndex: 1 + text.length }, paragraphStyle: { namedStyleType: 'NORMAL_TEXT' }, fields: 'namedStyleType' } },
+  ] };
+}
+async function nwDumpFindDoc(now = new Date()) {
+  const title = nwDumpTitle(now);
+  const q = `mimeType='application/vnd.google-apps.document' and name='${title.replace(/'/g, "\\'")}' and trashed=false`;
+  const res = await nwGFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&orderBy=modifiedTime%20desc&pageSize=5&fields=files(id,name,modifiedTime)`);
+  const f = (res.files || [])[0];
+  if (!f) throw Object.assign(new Error(`No Google Doc named "${title}" was found.`), { code: 'no-doc' });
+  return f;
+}
+async function nwDumpRead(id) { return nwGFetch(`https://docs.googleapis.com/v1/documents/${id}`); }
+// Reads fresh, then writes with requiredRevisionId; a stale revision is read again (up to 3 tries). Never edits or deletes text.
+async function nwDumpAdd(paras, now = new Date(), opts = {}) {
+  const f = await nwDumpFindDoc(now);
+  let last = null;
+  for (let tries = 0; tries < 3; tries++) {
+    const doc = await nwDumpRead(f.id);
+    const plan = nwDumpPlan(doc, paras, now);
+    if (opts.dryRun) return { title: f.name, ...plan };
+    try {
+      await nwGFetch(`https://docs.googleapis.com/v1/documents/${f.id}:batchUpdate`, { method: 'POST', body: JSON.stringify({ requests: plan.requests, writeControl: { requiredRevisionId: doc.revisionId } }) });
+      return { title: f.name, ...plan };
+    } catch (e) {
+      last = e;
+      if (!(e.status === 400 && /revision|precondition/i.test(`${e.message} ${JSON.stringify(e.body || {})}`))) throw e;
+    }
+  }
+  throw Object.assign(new Error('The Brain Dump changed while sending, three times. Nothing was added; try again.'), { code: 'stale' });
+}
+const nwCaptures = () => nwDev.get(NW_DEV.dump, []);
+const NWC = { subs: new Set(), sentPreview: false };
+const nwCapturesSet = (list) => { nwDev.set(NW_DEV.dump, list.slice(-50)); NWC.subs.forEach(fn => fn(nwCaptures())); };
+function useCaptures() { const [l, setL] = useState(nwCaptures()); useEffect(() => { NWC.subs.add(setL); return () => NWC.subs.delete(setL); }, []); return l; }
+// Sends the waiting captures, oldest first, so the newest ends up on top. Returns { sent, error }.
+async function nwDumpSendWaiting() {
+  let sent = 0, error = '';
+  for (const c of nwCaptures().filter(x => x.status !== 'sent')) {
+    try {
+      await nwDumpAdd(nwDumpParas(c.text, c.tag, new Date(c.at)), new Date());
+      nwCapturesSet(nwCaptures().map(x => (x.id === c.id ? { ...x, status: 'sent', sentAt: new Date().toISOString() } : x)));
+      sent++;
+    } catch (e) { error = nwGErr(e, 'Docs'); break; }
+  }
+  return { sent, error };
+}
+window.nwBrainDump = {
+  captures: nwCaptures,
+  capturesFor: async (iso) => nwCaptures().filter(c => pLocalISO(new Date(c.at)) === iso).map(c => ({ time: pTimeHM(new Date(c.at)), text: `${c.tag ? c.tag + ' ' : ''}${c.text}`, status: c.status })),
+  add: (text, tag) => { const c = { id: `d_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, at: new Date().toISOString(), text: String(text).trim(), tag: tag || '', status: 'device' }; nwCapturesSet([...nwCaptures(), c]); return c; },
+  sendWaiting: nwDumpSendWaiting,
+};
+
+function DumpPanel({ tab, onDone }) {
+  const [text, setText, clearText] = useDeviceDraft('dump-text', '');
+  const [tag, setTag] = useState('');
+  const [preview, setPreview] = useState(null);
+  const [msg, setMsg] = useState('');
+  const [busy, wrap] = window.useBusy();
+  const caps = useCaptures();
+  const [, tick] = useState(0);
+  useEffect(() => { const on = () => tick(x => x + 1); window.addEventListener('online', on); return () => window.removeEventListener('online', on); }, []);
+  const signedIn = !!(window.nwGoogle && window.nwGoogle.token());
+  const send = wrap(async (confirmed) => {
+    const paras = nwDumpParas(text, tag);
+    if (!paras.length) return;
+    setMsg('');
+    if (!nwGoogleOnline() || !signedIn) {
+      const c = window.nwBrainDump.add(text, tag);
+      clearText(); setTag(''); setPreview(null);
+      setMsg(!nwGoogleOnline() ? 'Kept on this device. It goes to the Brain Dump when you are online and tap Send waiting.' : 'Kept on this device. Connect Google, then tap Send waiting.');
+      window.nwShowBar({ tab, mode: 'saved', what: 'Brain Dump capture', where: 'device-only', ref: { what: `Brain Dump: ${c.text.slice(0, 40)}` } });
+      return;
+    }
+    if (!NWC.sentPreview && !confirmed) {
+      try { const p = await nwDumpAdd(paras, new Date(), { dryRun: true }); setPreview({ paras, title: p.title, heading: p.heading, underToday: p.underToday }); }
+      catch (e) { setMsg(nwGErr(e, 'Docs')); }
+      return;
+    }
+    const c = window.nwBrainDump.add(text, tag);
+    const r = await nwDumpSendWaiting();
+    if (r.error) { setMsg(`Kept on this device. ${r.error}`); window.nwShowBar({ tab, mode: 'saved', what: 'Brain Dump capture', where: 'device-only', ref: { what: `Brain Dump: ${c.text.slice(0, 40)}` } }); }
+    else { NWC.sentPreview = true; setMsg('Sent to the Brain Dump.'); window.nwShowBar({ tab, mode: 'saved', what: 'Brain Dump capture', where: 'cloud', ref: { what: `Brain Dump: ${c.text.slice(0, 40)}` } }); }
+    clearText(); setTag(''); setPreview(null);
+  });
+  const sendWaiting = wrap(async () => {
+    const r = await nwDumpSendWaiting();
+    setMsg(r.error ? `Sent ${r.sent}. ${r.error}` : `Sent ${r.sent} to the Brain Dump.`);
+  });
+  const waiting = caps.filter(c => c.status !== 'sent').length;
+  return (
+    <div data-nw-dump>
+      <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>Brain Dump</div>
+      <textarea aria-label="Brain Dump text" rows={4} value={text} onChange={e => { setText(e.target.value); setPreview(null); }} placeholder="Say or type what is in your head" style={nwQuickInput} />
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+        {D_TAGS.map(t => <button key={t} aria-pressed={tag === t} onClick={() => setTag(tag === t ? '' : t)} style={{ ...nwQuickBtn, minHeight: 32, padding: '4px 8px', ...(tag === t ? nwQuickBtnOn : {}) }}>{t}</button>)}
+      </div>
+      {preview && (
+        <div data-nw-dump-preview style={{ marginTop: 8, padding: 8, border: '1px solid #4ECDC4', borderRadius: 8, fontSize: 13 }}>
+          <div style={nwQuickLabel}>THIS WILL BE ADDED TO "{preview.title}"</div>
+          <div style={{ margin: '4px 0' }}>{preview.underToday ? `Under today's heading: ${preview.heading}` : `A new heading goes at the top first: ${preview.heading}`}</div>
+          {preview.paras.map((p, i) => <div key={i} style={{ overflowWrap: 'anywhere' }}>{p}</div>)}
+          <div style={{ marginTop: 6 }}><button style={{ ...nwQuickBtn, ...nwQuickBtnOn }} disabled={busy} onClick={() => send(true)}>Send now</button></div>
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center' }}>
+        <button style={{ ...nwQuickBtn, ...nwQuickBtnOn }} disabled={busy || !text.trim()} onClick={() => send(false)}>Send</button>
+        {waiting > 0 && <button style={nwQuickBtn} disabled={busy || !nwGoogleOnline() || !signedIn} onClick={sendWaiting}>Send waiting ({waiting})</button>}
+        {!signedIn && <ConnectGoogle onDone={() => tick(x => x + 1)} />}
+      </div>
+      {msg && <div role="status" style={{ fontSize: 13, color: '#fbbf24', marginTop: 6 }}>{msg}</div>}
+      <div style={{ ...nwQuickLabel, margin: '10px 0 4px' }}>LAST 10 CAPTURES</div>
+      {!caps.length ? <div style={{ fontSize: 13, color: '#9ca3af' }}>None yet.</div> : caps.slice(-10).reverse().map(c => (
+        <div key={c.id} data-nw-capture style={{ fontSize: 13, padding: '4px 0', borderBottom: '1px solid #262626', overflowWrap: 'anywhere' }}>
+          <span style={{ color: c.status === 'sent' ? '#86efac' : '#fbbf24' }}>{c.status === 'sent' ? 'sent' : 'on this device'}</span> · {pTimeHM(new Date(c.at))} · {c.tag ? c.tag + ' ' : ''}{c.text}
+        </div>
+      ))}
+    </div>
+  );
+}
+NW_QUICK.push({ id: 'dump', label: 'Dump', Panel: DumpPanel });
+
+// Back online: captures waiting on this device go to the Brain Dump (only if already signed in to Google).
+window.addEventListener('online', () => {
+  if (window.nwGoogle && window.nwGoogle.token() && nwCaptures().some(c => c.status !== 'sent')) nwDumpSendWaiting().catch(() => {});
+});
+window.NwLedgerSetup = NwLedgerSetup;
 const P_SCREENS = [
   { id: 'today',    label: 'Today' },
   { id: 'library',  label: 'Library' },
@@ -13154,6 +13767,21 @@ function App() {
   const clearCachedToken = () => {
     try { localStorage.removeItem(TOKEN_KEY); } catch {}
   };
+  // The same Drive sign-in is used for the Ledger (Sheets) and the Brain Dump (Docs, Drive): scope auth/drive covers them.
+  window.nwGoogle = {
+    token: getCachedToken,
+    clear: clearCachedToken,
+    connect: () => new Promise((resolve, reject) => {
+      try {
+        const client = google.accounts.oauth2.initTokenClient({
+          client_id: DRIVE_CLIENT_ID,
+          scope: DRIVE_SCOPE,
+          callback: (r) => { if (r.error) { reject(new Error(r.error)); return; } cacheToken(r.access_token, r.expires_in); resolve(r.access_token); },
+        });
+        client.requestAccessToken();
+      } catch (e) { reject(e); }
+    }),
+  };
   // ══ NW-TOKEN-CACHE END ══
 
   const exportSystem = async () => {
@@ -13301,6 +13929,8 @@ function App() {
         <h2 style={{ fontSize: 22, color: '#FF6B6B', marginBottom: 16 }}>System Maintenance</h2>
         <NwAppInfo active={activeTab === 'system'} />
         <NwClaudeCost active={activeTab === 'system'} />
+        {window.NwLedgerSetup && <window.NwLedgerSetup active={activeTab === 'system'} />}
+        {window.NwFeedbackList && <window.NwFeedbackList active={activeTab === 'system'} />}
         <p style={{ fontSize: 13, color: '#888', marginBottom: 24, lineHeight: 1.6 }}>
           Backs up everything in the database, including the Practice tab and anything added later. Run weekly and drop the file into Google Drive as "Elite Maintenance."
         </p>

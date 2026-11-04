@@ -1,11 +1,12 @@
 // Static check: index.html may write to Firestore (db.collection(...).set/update/delete/add) or call
 // localStorage.setItem ONLY inside the storage layer (between the NW-STORAGE-LAYER START / END markers)
-// and the Drive token cache (NW-TOKEN-CACHE START / END). Any other place fails the harness.
+// the Drive token cache (NW-TOKEN-CACHE START / END) and the device-only cache for the Ledger and Brain Dump
+// (NW-DEVICE-CACHE START / END). Any other place fails the harness.
 // Run: node scripts/storage-layer-check.js [file]   (exit 1 on a violation)
 const fs = require('fs');
 const path = require('path');
 
-const ALLOWED = [['NW-STORAGE-LAYER START', 'NW-STORAGE-LAYER END'], ['NW-TOKEN-CACHE START', 'NW-TOKEN-CACHE END']];
+const ALLOWED = [['NW-STORAGE-LAYER START', 'NW-STORAGE-LAYER END'], ['NW-TOKEN-CACHE START', 'NW-TOKEN-CACHE END'], ['NW-DEVICE-CACHE START', 'NW-DEVICE-CACHE END']];
 
 // Returns [{ line, text, why }] for every write outside the allowed ranges.
 function check(html) {
@@ -25,7 +26,7 @@ function check(html) {
     [/\.collection\s*\(/, 'Firestore access outside the storage layer'],
     [/\bfirebase\s*\.\s*firestore\s*\(\s*\)/, 'Firestore access outside the storage layer'],
     [/\.doc\s*\([^)]*\)\s*\.\s*(set|update|delete)\s*\(/, 'Firestore write outside the storage layer'],
-    [/\blocalStorage\s*\.\s*setItem\s*\(/, 'localStorage.setItem outside the storage layer and the token cache'],
+    [/\blocalStorage\s*\.\s*setItem\s*\(/, 'localStorage.setItem outside the storage layer, the token cache and the device cache'],
     [/\blocalStorage\s*\[\s*['"`]/, 'localStorage write by index outside the storage layer'],
   ];
   lines.forEach((l, i) => {

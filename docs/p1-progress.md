@@ -36,6 +36,18 @@ Source / History / Last reps, and a "Reps, all time" block (total, first and lat
 | 8 Lights out | Today: Bed / Couch / Other with an optional line → `lights-out` entry with `place` | places, time, offline wording |
 | 9 Day history | Practice > History: one day, read only, time order, date picker; log entries with step records and counts, asks, notes, joys, What now results and Brain Dump captures when they exist | seven item kinds in time order, past day |
 
+### Part 2 · The Ledger and the Brain Dump, in sync (see `docs/LEDGER-AND-BRAIN-DUMP.md`)
+
+| Item | What changed | How checked (`v3-test.js 2`, Google faked by `scripts/google-fake.js`) |
+|------|--------------|------------------|
+| 1 Google access | `window.nwGoogle` (token, clear, connect) in the `NW-TOKEN-CACHE` block; no new scope | token header on every call; Connect Google with a stubbed `google.accounts.oauth2` |
+| 2 Setup | System tab: paste the link (device only, not a draft); Brain Dump found by Drive search | link in `localStorage` only, not in the database |
+| 3 Read | `Ledger` and `Rules` by header name; cache on the device with its time (`NW-DEVICE-CACHE`) | same strip with the columns reversed; offline shows the cache with its time |
+| 4 Work rows | dropped by Bucket / Domain / Trello_Board (+ their whole task) | VINE, ASMP, STARR, Work rows not in the page, cache or database; "Homework" kept |
+| 5 Strip | Today: Spark, this week, due in 14 days, by Flow_Order; tap a task for steps and comments; one-line errors | sections and order; no link / not signed in / Sheets API off / offline |
+| 6 Writes | preview then confirm; formula guard; row re-found by 3 fields; never My_ / Pin; offline queue + Send to Ledger | done, comment, step, task cells exactly; formula column; moved row; two matches; no match |
+| 7 Brain Dump | Dump button on every tab; tags; preview before the first send; requiredRevisionId; stale revision retried; offline queue; last 10 | new heading vs under today's; existing text untouched; stale; offline then sent |
+
 ## Drafts, notes everywhere, log tidy, cost tracker, room on this device (Oct 5)
 
 Branch: `claude/gallant-lamport-dgg90d`, draft PR. Precondition: main contains the storage and Drive session (`grep -c "SEALED_LOG_KEYS" index.html` → 17; `sw.js` and `tools/drive-backup.gs` exist). ✅
