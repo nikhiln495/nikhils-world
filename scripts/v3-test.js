@@ -464,11 +464,11 @@ async function part2() {
     await page.locator('input[aria-label="New step for this task"]').fill('Photograph the form');
     await clickName(page, 'Review new step');
     pv = await page.locator('[data-pr-ledger-preview]').innerText();
-    ok(pv.includes('Step_Num 3') && pv.includes('Photograph the form'), 'new step preview: next Step_Num (3)');
+    ok(pv.includes('Step_Num Step 3') && pv.includes('Photograph the form'), 'new step preview: next Step_Num ("Step 3", the form this sheet uses)');
     await clickName(page, 'Confirm and send');
     await wait(page, 800);
     const last = fake.sheets.Ledger[fake.sheets.Ledger.length - 1];
-    ok(last[4] === 'File the tax form' && last[2] === G.SPARK && last[3] === 'Home' && last[5] === 3 && last[6] === 'Photograph the form' && last[0] === '' && last[12] === '', 'appended row: same Parent_Task, Bucket, Domain; Step_Num 3; other cells left alone');
+    ok(last[4] === 'File the tax form' && last[2] === G.SPARK && last[3] === 'Home' && last[5] === 'Step 3' && last[6] === 'Photograph the form' && last[0] === '' && last[12] === '', 'appended row: same Parent_Task, Bucket, Domain; Step_Num 3; other cells left alone');
     await clickName(page, 'Add task');
     await page.locator('input[aria-label="Task name"]').fill('Fix the bike');
     await page.locator('input[aria-label="First physical step (Step 1)"]').fill('Put the bike on the stand');
@@ -477,12 +477,12 @@ async function part2() {
     await page.locator('select[aria-label="Domain"]').selectOption('Home');
     await clickName(page, 'Review task');
     pv = await page.locator('[data-pr-ledger-preview]').innerText();
-    ok(pv.includes('Step_Num 1 · Put the bike on the stand') && pv.includes('Step_Num 3 · Patch the tube'), 'new task preview: first physical step is Step 1');
+    ok(pv.includes('Step_Num Step 1 · Put the bike on the stand') && pv.includes('Step_Num Step 3 · Patch the tube'), 'new task preview: first physical step is Step 1');
     await clickName(page, 'Confirm and send');
     await wait(page, 800);
     const n = fake.sheets.Ledger.length;
     const rows3 = fake.sheets.Ledger.slice(n - 3);
-    ok(rows3.map(r => r[5]).join() === '1,2,3' && rows3.every(r => r[4] === 'Fix the bike' && r[2] === G.WEEK && r[3] === 'Home') && rows3[0][6] === 'Put the bike on the stand', 'task rows appended: Step 1, 2, 3 with bucket and domain');
+    ok(rows3.map(r => r[5]).join() === 'Step 1,Step 2,Step 3' && rows3.every(r => r[4] === 'Fix the bike' && r[2] === G.WEEK && r[3] === 'Home') && rows3[0][6] === 'Put the bike on the stand', 'task rows appended: Step 1, 2, 3 with bucket and domain');
     ok(fake.writes.every(x => x.api !== 'docs'), 'no Docs write from the Ledger');
     // never My_ / Pin
     const before = fake.writes.length;
@@ -764,7 +764,7 @@ async function part3() {
     await page.locator('select[aria-label="Bucket"]').selectOption(G.WEEK);
     await page.locator('select[aria-label="Domain"]').selectOption('Home');
     await clickName(page, 'Review task');
-    ok((await page.locator('[data-pr-ledger-preview]').innerText()).includes('Step_Num 1 · Open the phone contacts'), 'preview, first physical step as Step 1');
+    ok((await page.locator('[data-pr-ledger-preview]').innerText()).includes('Step_Num Step 1 · Open the phone contacts'), 'preview, first physical step as Step 1');
     await clickName(page, 'Confirm and send');
     await wait(page, 800);
     ok(fake.sheets.Ledger[fake.sheets.Ledger.length - 1][4] === 'Call Dana about the move', 'the task is in the Ledger');
@@ -1195,6 +1195,179 @@ async function part5() {
   }
 }
 
+// ───────────────────────── Follow-up fixes (Nov 4) ─────────────────────────
+async function part6() {
+  console.log('\n[6. Done: preview in view, "10 mins" not "10 mins min", moves a finished task to Done Log]');
+  {
+    let fake = newFake();
+    fake.sheets.Ledger[2][8] = '10 mins';
+    let ctx = await openLedger(fake);
+    let page = ctx.page;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('[data-pr-ledger-open]').first().click();
+    const detail = await page.locator('[data-pr-ledger-task]').innerText();
+    ok(detail.includes('10 mins') && !/mins min/.test(detail) && detail.includes('2 min') , 'a value that already says "10 mins" is not shown as "10 mins min" → ' + detail.split('\n').filter(l => /mins|min/.test(l)).join(' | '));
+    await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Put the tax folder' }).getByRole('button', { name: 'Done', exact: true }).click();
+    await wait(page, 700);
+    const box = await page.locator('[data-pr-ledger-preview]').boundingBox();
+    ok(box && box.y >= 0 && box.y + box.height <= 844 + 2, 'the preview is brought into view after tapping Done → y ' + (box && Math.round(box.y)) + ', h ' + (box && Math.round(box.height)));
+    ok(!(await page.locator('[data-pr-ledger-preview]').innerText()).includes('Bucket →'), 'not the last step: no Bucket line');
+    await clickName(page, 'Cancel');
+    await ctx.browser.close();
+
+    // last open step of a task -> Bucket moves to the Done Log bucket (all its rows)
+    fake = newFake();
+    ctx = await openLedger(fake); page = ctx.page;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('[data-pr-ledger-open]').filter({ hasText: 'Book the dentist' }).click();
+    await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Open the dentist page' }).getByRole('button', { name: 'Done', exact: true }).click();
+    const pv = await page.locator('[data-pr-ledger-preview]').innerText();
+    ok(pv.includes('Bucket → 7. 🎉 DONE LOG (all 1 step of this task: it was the last open step)'), 'preview: the task moves to Done Log, shown like every other cell');
+    await clickName(page, 'Confirm and send');
+    await wait(page, 900);
+    const w = writes(fake, 'update');
+    ok(w.some(x => x.range === 'Ledger!A5' && x.values[0][0] === true) && w.some(x => x.range === 'Ledger!C5' && x.values[0][0] === '7. 🎉 DONE LOG') && w.length === 3, 'Done, Completed_At and Bucket written (3 cells) → ' + w.map(x => x.range).join(', '));
+    ok(fake.sheets.Ledger[4][2] === '7. 🎉 DONE LOG', 'the sheet shows the new bucket');
+    await ctx.browser.close();
+
+    // the task got a new open step while the preview was open: Done only, no move
+    fake = newFake();
+    ctx = await openLedger(fake); page = ctx.page;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('[data-pr-ledger-open]').filter({ hasText: 'Book the dentist' }).click();
+    await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Open the dentist page' }).getByRole('button', { name: 'Done', exact: true }).click();
+    fake.sheets.Ledger.push(G.ledgerRow({ Done: false, Bucket: G.WEEK, Domain: 'Body', Parent_Task: 'Book the dentist', Step_Num: 2, Step_Action: 'Pick a time' }));
+    await clickName(page, 'Confirm and send');
+    await wait(page, 900);
+    const w2 = writes(fake, 'update');
+    ok(w2.length === 2 && !w2.some(x => /^Ledger!C/.test(x.range)), 'another step opened meanwhile: only Done and Completed_At, the bucket is left alone');
+    await ctx.browser.close();
+  }
+
+  console.log('\n[6. Brain Dump: no doc for this month yet → the newest "Brain Dump …" doc]');
+  {
+    const fake = newFake({ doc: { title: 'Brain Dump Oct 2026', paras: [{ text: 'Saturday, Oct 31, 2026', style: 'HEADING_1' }, { text: 'old', style: 'NORMAL_TEXT' }] } });
+    const ctx = await openLedger(fake);
+    const { page } = ctx;
+    await wait(page, 600);
+    await page.locator('[data-nw-quick="dump"]').click();
+    await page.locator('textarea[aria-label="Brain Dump text"]').fill('Month-start thought');
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
+    await page.waitForSelector('[data-nw-dump-preview]');
+    const pv = await page.locator('[data-nw-dump-preview]').innerText();
+    ok(pv.includes('Brain Dump Oct 2026') && /newest Brain Dump doc/.test(pv), 'the preview says it is using the newest doc');
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send now' }).click();
+    await wait(page, 1000);
+    ok(fake.doc.paras[0].text === 'Tuesday, Nov 3, 2026' && /^Month-start thought/.test(fake.doc.paras[1].text) && fake.doc.paras[3].text === 'old', 'added at the top of the October doc; its text is untouched');
+    await ctx.browser.close();
+    const none = newFake({ driveFiles: [] });
+    const c2 = await openLedger(none);
+    await wait(c2.page, 600);
+    await c2.page.locator('[data-nw-quick="dump"]').click();
+    await c2.page.locator('textarea[aria-label="Brain Dump text"]').fill('x');
+    await c2.page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
+    await wait(c2.page, 800);
+    ok(/No Google Doc named/.test(await c2.page.locator('[data-nw-dump]').innerText()), 'no Brain Dump doc at all: says so, nothing is lost');
+    await c2.browser.close();
+  }
+
+  console.log('\n[6. Step_Num as the Ledger writes it: "Step 10 (90%->100%)"]');
+  {
+    const fake = newFake();
+    const ctx = await openLedger(fake);
+    const { page } = ctx;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('[data-pr-ledger-open]').filter({ hasText: 'Real format task' }).click();
+    const d = await page.locator('[data-pr-ledger-task]').innerText();
+    ok(d.indexOf('Step 9') < d.indexOf('Step 10') && !/\(80%/.test(d), 'steps are ordered by their number (9 before 10) and shown as "Step 9", "Step 10"');
+    await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Ten' }).getByRole('button', { name: 'Done', exact: true }).click();
+    ok((await page.locator('[data-pr-ledger-preview]').innerText()).includes('Mark done: Real format task · Step 10') && !/step Step/.test(await page.locator('[data-pr-ledger-preview]').innerText()), 'the preview says "Step 10", not "step Step 10"');
+    // the canvas rewrites the percentages while the preview is open: the row is still found by its step number
+    fake.sheets.Ledger.forEach(r => { if (r[5] === 'Step 10 (90%->100%)') r[5] = 'Step 10 (85%->100%)'; });
+    await clickName(page, 'Confirm and send');
+    await wait(page, 900);
+    const w = writes(fake, 'update');
+    ok(w.length >= 2 && w.some(x => x.range === 'Ledger!A13' && x.values[0][0] === true), 'the percentages changed meanwhile: still the same row (13) → ' + w.map(x => x.range).join(', '));
+    // adding a step uses the same "Step N" form
+    await page.locator('input[aria-label="New step for this task"]').fill('Eleven');
+    await clickName(page, 'Review new step');
+    ok((await page.locator('[data-pr-ledger-preview]').innerText()).includes('Step_Num Step 11 · Eleven'), 'new step preview: Step 11');
+    await clickName(page, 'Confirm and send');
+    await wait(page, 900);
+    const last = fake.sheets.Ledger[fake.sheets.Ledger.length - 1];
+    ok(last[4] === 'Real format task' && last[5] === 'Step 11' && last[6] === 'Eleven', 'the new row says "Step 11" like the others');
+    await ctx.browser.close();
+  }
+}
+
+// ───────────────────────── Past Brain Dumps (Nov 4) ─────────────────────────
+async function part7() {
+  console.log('\n[7. What now? searches every Brain Dump through Google; Claude gets only the matching lines]');
+  const H = (t) => ({ text: t, style: 'HEADING_1' }), N = (t) => ({ text: t, style: 'NORMAL_TEXT' });
+  const extra = [
+    { id: 'DOC_OCT', title: 'Brain Dump Oct 2026', modifiedTime: '2026-10-31T10:00:00Z', paras: [H('Friday, Oct 30, 2026'), N("task: call the dentist about the crown before the cleaning (from Nikhil's World, 9:00 AM)"), N('work: phone Maria Lopez about the consent form'), N('note: ASMP report is late again'), N('life: buy a new bike light')] },
+    { id: 'DOC_SEP', title: 'Brain Dump Sep 2026', modifiedTime: '2026-09-30T10:00:00Z', paras: [H('Monday, Sep 14, 2026'), N('note: the dentist moved my appointment twice'), N('life: nothing about teeth here but the lease is confusing')] },
+  ];
+  const fake = newFake({ extraDocs: extra });
+  const ctx = await openLedger(fake, { proxy: nowProxy() });
+  const { page } = ctx;
+  await page.waitForSelector('[data-pr-ledger-open]');
+  await page.locator('textarea[aria-label="What is in your head"]').fill('I keep putting off the dentist and the lease.');
+  await clickName(page, 'What now?');
+  await page.waitForSelector('[data-pr-now-patterns]');
+  const text = ctx.proxyCalls[ctx.proxyCalls.length - 1].messages[0].content;
+  ok(/Older Brain Dump lines that match/.test(text) && text.includes('Friday, Oct 30, 2026: task: call the dentist about the crown before the cleaning') && text.includes('Monday, Sep 14, 2026: note: the dentist moved my appointment twice'), 'lines from earlier months (Oct and Sep) that match what he wrote are sent');
+  ok(text.includes('the lease is confusing'), 'a match in any month, not only the last 30 days');
+  ok(!/Maria|ASMP|work:/.test(text.split('Older Brain Dump lines')[1].split('Context:')[0]), 'work lines (work: tag, ASMP) never go to Claude');
+  ok(!text.includes('buy a new bike light') && !text.includes("from Nikhil's World, 9:00 AM"), 'unrelated lines are not sent; the app\'s own suffix is trimmed');
+  ok(/Past Brain Dumps: 3 matching lines sent/.test(await page.locator('[data-pr-now-past]').innerText()), 'the screen says how many lines were sent → ' + await page.locator('[data-pr-now-past]').innerText());
+  const driveCalls = fake.calls.filter(c => /drive\/v3\/files/.test(c.url));
+  ok(driveCalls.some(c => decodeURIComponent(c.url).includes("name contains 'Brain Dump'")), 'the doc list comes from the Drive API');
+  ok(fake.reads.extra === 2, 'each past doc was read once through the Docs API (' + fake.reads.extra + ')');
+  const mem0 = await page.evaluate(() => JSON.stringify([...window.__mem.entries()]));
+  ok(!/crown|lease is confusing/.test(mem0.replace(/I keep putting off the dentist and the lease\./g, '')), 'the older lines are not saved to the database');
+  // second ask: docs unchanged → read from this device
+  await page.locator('textarea[aria-label="What is in your head"]').fill('The dentist again.');
+  await clickName(page, 'What now?');
+  await wait(page, 1200);
+  ok(fake.reads.extra === 2, 'a second ask re-reads nothing (kept on this device; Drive says no doc changed)');
+  // a doc changes → only that one is read again
+  fake.driveFiles.find(f => f.id === 'DOC_OCT').modifiedTime = '2026-11-02T10:00:00Z';
+  await page.locator('textarea[aria-label="What is in your head"]').fill('The dentist, once more.');
+  await clickName(page, 'What now?');
+  await wait(page, 1200);
+  ok(fake.reads.extra === 3, 'a changed doc is read again, the other is not (' + fake.reads.extra + ')');
+  const cache = await page.evaluate(() => localStorage.getItem('__nw_dump_hist'));
+  ok(cache && !/Maria|ASMP/.test(cache), 'the device copy has no work lines');
+  await finish(ctx, 'past dumps');
+
+  // no token / API off / offline: What now still works and says why
+  const c2 = await openPractice({ seed: baseSeed(), now: '2026-11-03T08:10:00', device: dev(), google: newFake({ extraDocs: extra }).handler, proxy: nowProxy() });
+  await wait(c2.page, 600);
+  await c2.page.locator('textarea[aria-label="What is in your head"]').fill('the dentist');
+  await clickName(c2.page, 'What now?');
+  await c2.page.waitForSelector('[data-pr-now-patterns]');
+  ok(/not signed in to Google/.test(await c2.page.locator('[data-pr-now-past]').innerText()) && !/Older Brain Dump/.test(c2.proxyCalls[c2.proxyCalls.length - 1].messages[0].content), 'not signed in: What now still works, says Past Brain Dumps were not used');
+  await c2.browser.close();
+  const off = newFake({ extraDocs: extra }); off.apiDisabled = 'docs';
+  const c3 = await openLedger(off, { proxy: nowProxy() });
+  await wait(c3.page, 600);
+  await c3.page.locator('textarea[aria-label="What is in your head"]').fill('the dentist');
+  await clickName(c3.page, 'What now?');
+  await c3.page.waitForSelector('[data-pr-now-patterns]');
+  ok(/Docs API is not turned on/.test(await c3.page.locator('[data-pr-now-past]').innerText()), 'Docs API off: one line, What now still answers');
+  await c3.browser.close();
+
+  // a lot of matches: best first, capped by lines and characters
+  const many = [{ id: 'DOC_BIG', title: 'Brain Dump Aug 2026', modifiedTime: '2026-08-31T10:00:00Z', paras: [H('Monday, Aug 3, 2026'), ...Array.from({ length: 300 }, (_, i) => N(`note: dentist thought number ${i} ${'x'.repeat(40)}${i === 299 ? ' lease lease' : ''}`)), N('note: the dentist and the lease together')] }];
+  const c4 = await openLedger(newFake({ extraDocs: many }), { proxy: nowProxy() });
+  await wait(c4.page, 600);
+  const r = await c4.page.evaluate(() => pPastDumps('the dentist and the lease'));
+  ok(r.matched === 301 && r.lines.length === 80 && r.lines.join('').length <= 14000, 'many matches: all 301 found on the phone, 80 best sent (' + r.lines.length + ' lines, ' + r.lines.join('').length + ' chars)');
+  ok(/dentist/.test(r.lines[0]) && /lease/.test(r.lines[0]) && r.lines.slice(0, 2).every(l => /lease/.test(l)), 'lines matching both words come first');
+  await c4.browser.close();
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
   if (which === 'all' || which === '1') await part1();
@@ -1202,6 +1375,8 @@ async function part5() {
   if (which === 'all' || which === '3') await part3();
   if (which === 'all' || which === '4') await part4();
   if (which === 'all' || which === '5') await part5();
+  if (which === 'all' || which === '6') await part6();
+  if (which === 'all' || which === '7') await part7();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

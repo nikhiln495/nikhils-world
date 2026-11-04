@@ -12,7 +12,7 @@ const DOC_ID = 'FAKE_DOC_ID_0123456789';
 const colIndex = (letters) => letters.split('').reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0) - 1;
 const asText = (v) => (v === true ? 'TRUE' : v === false ? 'FALSE' : v == null ? '' : String(v));
 
-function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null, sheetId = SHEET_ID, docId = DOC_ID } = {}) {
+function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null, extraDocs = [], sheetId = SHEET_ID, docId = DOC_ID } = {}) {
   const calls = [];
   const F = {
     calls, SHEET_ID: sheetId, DOC_ID: docId,
@@ -20,7 +20,8 @@ function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null
     formulas,                      // optional { Ledger: [[...]] } served for valueRenderOption=FORMULA
     apiDisabled: null,
     doc: doc ? { id: docId, title: doc.title, revision: 1, paras: JSON.parse(JSON.stringify(doc.paras || [])) } : null,
-    driveFiles: driveFiles || (doc ? [{ id: docId, name: doc.title, modifiedTime: '2026-11-02T10:00:00Z' }] : []),
+    extra: new Map(extraDocs.map(e => [e.id, { id: e.id, title: e.title, revision: 1, paras: JSON.parse(JSON.stringify(e.paras)) }])),
+    driveFiles: (driveFiles || (doc ? [{ id: docId, name: doc.title, modifiedTime: '2026-11-02T10:00:00Z' }] : [])).concat(extraDocs.map(e => ({ id: e.id, name: e.title, modifiedTime: e.modifiedTime || '2026-10-31T10:00:00Z' }))),
     staleOnce: 0,                  // the next N Docs reads are followed by another writer's change (revision moves)
     reads: { docs: 0 },
     writes: [],                    // { api, ... } every accepted write
@@ -94,10 +95,10 @@ function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null
 
   // ── Docs ──
   const full = () => F.doc.paras.map(p => p.text + '\n').join('');
-  const content = () => {
+  const content = (d = F.doc) => {
     let at = 1;
     const out = [{ startIndex: 0, endIndex: 1, sectionBreak: {} }];
-    F.doc.paras.forEach(p => {
+    d.paras.forEach(p => {
       const end = at + p.text.length + 1;
       out.push({ startIndex: at, endIndex: end, paragraph: { elements: [{ startIndex: at, endIndex: end, textRun: { content: p.text + '\n' } }], paragraphStyle: { namedStyleType: p.style || 'NORMAL_TEXT' } } });
       at = end;
@@ -128,6 +129,8 @@ function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null
     if (F.apiDisabled === 'docs') return err(route, 403, 'Google Docs API has not been used in project 55888993304 before or it is disabled.', { status: 'PERMISSION_DENIED' });
     const u = new URL(url);
     const m = u.pathname.match(/^\/v1\/documents\/([^/:]+)(:batchUpdate)?$/);
+    const xd = m && F.extra.get(m[1]);
+    if (xd && req.method() === 'GET') { F.reads.docs++; F.reads.extra = (F.reads.extra || 0) + 1; return json(route, 200, { documentId: xd.id, title: xd.title, revisionId: 'rev1', body: { content: content(xd) } }); }
     if (!m || !F.doc || m[1] !== F.DOC_ID) return err(route, 404, 'Requested entity was not found.');
     if (req.method() === 'GET') {
       F.reads.docs++;
@@ -158,7 +161,8 @@ function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null
     const q = u.searchParams.get('q') || '';
     const nm = q.match(/name='((?:[^'\\]|\\.)*)'/);
     const name = nm ? nm[1].replace(/\\'/g, "'") : null;
-    const files = F.driveFiles.filter(f => (!name || f.name === name)).sort((a, b) => String(b.modifiedTime).localeCompare(String(a.modifiedTime)));
+    const nc = q.match(/name contains '((?:[^'\\]|\\.)*)'/);
+    const files = F.driveFiles.filter(f => (nc ? f.name.includes(nc[1]) : (!name || f.name === name))).sort((a, b) => String(b.modifiedTime).localeCompare(String(a.modifiedTime)));
     return json(route, 200, { files });
   }
 
@@ -193,6 +197,9 @@ const LEDGER_ROWS = [
   { Done: false, Auto_Status: 'Open', Bucket: WEEK, Domain: 'Admin', Parent_Task: 'Send ASMP report', Step_Num: 1, Step_Action: 'Email the ASMP report', Trello_Board: 'ASMP' },
   { Done: false, Auto_Status: 'Open', Bucket: 'Work admin', Domain: 'Admin', Parent_Task: 'Prep STARR slides', Step_Num: 1, Step_Action: 'Open the STARR deck' },
   { Done: false, Auto_Status: 'Open', Bucket: WEEK, Domain: 'Home', Parent_Task: 'Homework help', Step_Num: 1, Step_Action: 'Do the Homework sheet', Flow_Order: 5 },
+  { Done: false, Auto_Status: 'Open', Bucket: '4. 📚 UAF COURSEWORK', Domain: 'GEOS', Parent_Task: 'Real format task', Step_Num: 'Step 9 (80%->90%)', Step_Action: 'Nine', Deadline: '2026-11-05' },
+  { Done: false, Auto_Status: 'Open', Bucket: '4. 📚 UAF COURSEWORK', Domain: 'GEOS', Parent_Task: 'Real format task', Step_Num: 'Step 10 (90%->100%)', Step_Action: 'Ten', Deadline: '2026-11-05' },
+  { Done: true, Auto_Status: 'Done', Bucket: '7. 🎉 DONE LOG', Domain: 'Home', Parent_Task: 'Old finished task', Step_Num: 1, Step_Action: 'Did it', Completed_At: '2026-10-31T10:00:00.000Z' },
 ];
 const ledgerValues = () => [LEDGER_HEAD, ...LEDGER_ROWS.map(ledgerRow)];
 const RULES_ROWS = [['Rule', 'Text'], ['Step 1', 'The first physical step is Step 1.'], ['Spark', 'Today Spark holds at most 3 tasks.'], ['Waiting', 'Park a worry in Waiting_Time, not in the task list.']];
