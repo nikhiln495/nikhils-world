@@ -48,6 +48,16 @@ Source / History / Last reps, and a "Reps, all time" block (total, first and lat
 | 6 Writes | preview then confirm; formula guard; row re-found by 3 fields; never My_ / Pin; offline queue + Send to Ledger | done, comment, step, task cells exactly; formula column; moved row; two matches; no match |
 | 7 Brain Dump | Dump button on every tab; tags; preview before the first send; requiredRevisionId; stale revision retried; offline queue; last 10 | new heading vs under today's; existing text untouched; stale; offline then sent |
 
+### Part 3 · "What now?"
+
+| Item | What changed | How checked (`v3-test.js 3`, proxy faked) |
+|------|--------------|------------------|
+| 1-2 Request | Box under the Ledger strip (drafts hook). Sends his words, the open allowed Ledger rows (with row numbers), the Rules texts, today's log line and the local time through `pCallClaude`; forced tool `plan_next` (patterns, 2-3 options of chained steps, parked, new tasks, one question) | tool_choice, request text, no work rows, system rules |
+| 3 Prompt rules | Only what he wrote and the rows sent; Rules tab; plain words; no "vessel"; no grades; "when" not "whether"; rewards first; Academic / Other / Recovery; x2-3 and est. over 10 min; synthesize first (`P_SYNTH`) | system text; est. set in code |
+| 4 Screen | Patterns, tappable options, parked worries collapsed; edit / reorder / remove steps; Start (timer, + Note, minutes it took); Done logs `what-now` with actual minutes and offers the mark-done write with `Actual_Mins "N mins"`; new tasks and worries to the Brain Dump or Ledger in one tap | run, Ledger write cells, Brain Dump text |
+| 5 Tomorrow | "Save as tomorrow's first step" → `practice:today:<tomorrow>`, never over an existing plan | saved; second tap refused |
+| 6 Saved results | `practice:ramp:<day>` append-only, merged by id; the ask record keeps kind and usage only | two-device merge; no Ledger text in asks; offline: box kept, says it needs internet |
+
 ## Drafts, notes everywhere, log tidy, cost tracker, room on this device (Oct 5)
 
 Branch: `claude/gallant-lamport-dgg90d`, draft PR. Precondition: main contains the storage and Drive session (`grep -c "SEALED_LOG_KEYS" index.html` → 17; `sw.js` and `tools/drive-backup.gs` exist). ✅

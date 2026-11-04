@@ -9837,7 +9837,7 @@ const pEntryMs = (e, dateISO) => {
 
 // Structured fields an entry may carry beyond the basics (copied as given): the waking step record, count-to-60
 // attempts, when his eyes opened, the going-back-to-sleep time, place for lights out, and the flow's opening line.
-const P_EXTRA_FIELDS = ['wake', 'counts', 'eyesOpen', 'minutesEyesToUp', 'sleepAt', 'place', 'situation', 'seeded', 'dateUnknown'];
+const P_EXTRA_FIELDS = ['wake', 'counts', 'eyesOpen', 'minutesEyesToUp', 'sleepAt', 'place', 'situation', 'seeded', 'dateUnknown', 'prediction', 'outcome', 'result', 'tags', 'actualMins', 'plannedMins', 'rampId', 'stepIndex', 'ledgerStep'];
 
 // Append one rep to today's per-day log (created on first rep). Each new entry gets an id (for Undo and
 // edits) and `at` (when it was logged). An entry identical to the previous one within 60 seconds is not
@@ -10072,7 +10072,7 @@ function HomeworkStrip({ homework, missing, onAddUpdate }) {
   );
 }
 
-function PracticeCard({ p, name, why, trigger, firstStep, onStart, onLog }) {
+function PracticeCard({ p, name, why, trigger, firstStep, onStart, onLog, noStart }) {
   const [busy, wrap] = window.useBusy();
   return (
     <div style={pCard()}>
@@ -10081,7 +10081,7 @@ function PracticeCard({ p, name, why, trigger, firstStep, onStart, onLog }) {
       {trigger && <div style={{ fontSize: 13, color: PC.muted, lineHeight: 1.5, marginBottom: 6 }}><strong>When:</strong> {pText(trigger)}</div>}
       {firstStep && <div style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, background: PC.accentDim, borderRadius: 8, padding: '8px 10px', marginBottom: 10 }}><strong>First step:</strong> {pText(firstStep)}</div>}
       <div style={{ display: 'flex', gap: 8 }}>
-        <button style={pBtn('solid', { flex: 1 })} onClick={onStart}>Start</button>
+        {!noStart && <button style={pBtn('solid', { flex: 1 })} onClick={onStart}>Start</button>}
         <button style={pBtn('ghost', { flex: 1 })} disabled={busy} onClick={wrap(onLog)}>Log</button>
       </div>
     </div>
@@ -10182,6 +10182,7 @@ function TodayScreen({ data, onLog, onStart, onWaking, onAddUpdate, onEditEntry,
       )}
 
       <LedgerStrip />
+      <WhatNow todayLog={todayLog} onLog={onLog} />
 
       {today && (
         <>
@@ -10189,7 +10190,7 @@ function TodayScreen({ data, onLog, onStart, onWaking, onAddUpdate, onEditEntry,
             const p = pFindPractice(playbook, tp.id);
             return (
               <PracticeCard key={tp.id + i} p={p} name={tp.name} why={tp.why} trigger={tp.when || pTrigger(p)} firstStep={tp.firstStep}
-                onStart={() => onStart(tp.id)} onLog={() => onLog({ practiceId: tp.id })} />
+                onStart={() => onStart(tp.id)} onLog={() => onLog({ practiceId: tp.id })} noStart={tp.source === 'what-now'} />
             );
           })}
           <WakingQuickLog onLog={onLog} />
@@ -10481,7 +10482,7 @@ const pContextLine = (log) => {
 
 const pOnline = () => (typeof navigator === 'undefined' || navigator.onLine !== false);
 
-const P_ASK_KINDS = { 'stuck': 'Ask Claude', 'stuck-else': 'Something else', 'coach-me': 'Coach me', 'outside': 'Look outside', 'draft-shobha': 'Draft for Dr. Shobha', 'kaizen-foci': 'Kaizen session patterns' };
+const P_ASK_KINDS = { 'stuck': 'Ask Claude', 'stuck-else': 'Something else', 'coach-me': 'Coach me', 'outside': 'Look outside', 'draft-shobha': 'Draft for Dr. Shobha', 'kaizen-foci': 'Kaizen session patterns', 'what-now': 'What now?', 'what-now-again': 'What now? (again)', 'ask-step': 'Ask about a step' };
 
 // Appends one record of a Claude reply to practice:asks:<today>. Append-only; never throws.
 // Returns 'cloud', 'device-only' or false (not saved).
@@ -10506,6 +10507,8 @@ async function pSaveAsk(ask, prompt, data, model) {
       tools: content.filter(b => b && b.type === 'tool_use').map(b => ({ name: b.name, input: b.input ?? null })),
       sources, model: data?.model || model, usage,
     };
+    if (ask?.feedback) rec.feedback = ask.feedback;
+    if (ask?.redact) { rec.prompt = ''; rec.text = ''; rec.tools = []; rec.sources = []; } // the What now? dump and result live in practice:ramp, not here
     const doc = await pUpdate(P_KEYS.asks(pDayKey(now)), () => ({ date: pLocalISO(now), entries: [] }), (doc) => {
       if (!Array.isArray(doc.entries)) doc.entries = [];
       doc.entries.push(rec);
@@ -10901,7 +10904,7 @@ const P_FEET = 'Sit up and put your feet on the floor.';
 
 const pFirstPlanItem = (today, homework, playbook) => {
   const tp = (today?.practices || []).find(x => { const p = pFindPractice(playbook, x.id); return !p || pUsable(p); });
-  if (tp) return { id: tp.id, name: tp.name || pFindPractice(playbook, tp.id)?.name || tp.id, firstStep: tp.firstStep, why: tp.why };
+  if (tp) return { id: tp.source === 'what-now' ? null : tp.id, name: tp.name || pFindPractice(playbook, tp.id)?.name || tp.id, firstStep: tp.firstStep, why: tp.why };
   const hw = (homework?.items || [])[0];
   if (hw) return { id: null, name: hw.title, firstStep: null, why: hw.due ? `Homework, due ${pText(hw.due)}` : 'Homework' };
   return null;
@@ -11297,7 +11300,7 @@ function EarlierAnswers({ playbook, tick }) {
         const r = await pRead(P_KEYS.asks(pDayKey(date)));
         if (r.error) { errors.push(`${label}'s answers couldn't be read (${r.error}).`); continue; }
         const es = Array.isArray(r.data?.entries) ? r.data.entries : [];
-        es.forEach((rec, i) => { if (rec && typeof rec === 'object') rows.push({ rec, label, d, i, m: pMinutes(rec) }); });
+        es.forEach((rec, i) => { if (rec && typeof rec === 'object' && !/^what-now/.test(String(rec.kind || ''))) rows.push({ rec, label, d, i, m: pMinutes(rec) }); }); // What now? results live in practice:ramp
       }
       // Newest first: by day, then time (an entry without a time sorts last in its day), then order saved.
       rows.sort((a, b) => (b.d - a.d) || ((b.m ?? -1) - (a.m ?? -1)) || (b.i - a.i));
@@ -11845,7 +11848,7 @@ function ProgressScreen({ data, refreshKey }) {
 // BUILD v3 · PART 1 — Joy, Lights out, Day history, one-time seeds
 // ─────────────────────────────────────────────────────
 
-const P_FALLBACK_NAMES = { 'lights-out': 'Lights out', 'waking-ladder': 'Waking ladder' };
+const P_FALLBACK_NAMES = { 'lights-out': 'Lights out', 'waking-ladder': 'Waking ladder', 'what-now': 'What now?', 'idea-dump': 'Idea dump' };
 const pPracticeName = (pb, id) => pFindPractice(pb, id)?.name || P_FALLBACK_NAMES[id] || id;
 const pMonthKey = (d = new Date()) => `${d.getFullYear()}_${pTwo(d.getMonth() + 1)}`;
 const P_JOY_WHO = ['Corky', 'Bubbess', 'Flora', 'Dolly', 'Diah', 'Rob', 'Kristy'];
@@ -11999,6 +12002,8 @@ function pRepLines(e) {
   const lines = [];
   if (e.place) lines.push(`Place: ${e.place}`);
   if (e.sleepAt) lines.push(`Went back to sleep at ${pHM(e.sleepAt)}`);
+  if (e.actualMins) lines.push(`Took ${e.actualMins} min (planned ${e.plannedMins ?? '?'})${e.stepIndex ? ` · step ${e.stepIndex} of a What now? plan` : ''}`);
+  if (e.situation) lines.push(`Going on: ${e.situation}`);
   if (e.note) lines.push(String(e.note));
   if (e.myNote) lines.push(`My note: ${e.myNote}`);
   if (e.eyesOpen) lines.push(`Eyes first opened about ${pHM(e.eyesOpen.at)}${e.minutesEyesToUp != null ? ` · ${e.minutesEyesToUp} min from eyes open to up` : ''}`);
@@ -12042,7 +12047,10 @@ async function pDayItems(iso, playbook) {
 const pRampLines = (r) => {
   const lines = [];
   (r.result?.patterns || []).forEach(x => lines.push(`Pattern: ${x}`));
-  (r.result?.options || []).forEach((o, i) => lines.push(`Option ${i + 1}: ${(o.steps || []).map(s => s.step || s.action || '').join(' → ')}`));
+  (r.result?.options || []).forEach((o, i) => lines.push(`Option ${i + 1}: ${o.title} — ${(o.steps || []).map(s => `${s.start || ''} ${s.text}`.trim()).join(' → ')}`));
+  (r.result?.parked || []).forEach(x => lines.push(`Parked: ${x}`));
+  (r.result?.newTasks || []).forEach(x => lines.push(`New task mentioned: ${x}`));
+  if (r.feedback) lines.push(`These did not fit: ${r.feedback}`);
   return lines;
 };
 
@@ -12751,6 +12759,304 @@ window.addEventListener('online', () => {
   if (window.nwGoogle && window.nwGoogle.token() && nwCaptures().some(c => c.status !== 'sent')) nwDumpSendWaiting().catch(() => {});
 });
 window.NwLedgerSetup = NwLedgerSetup;
+// ─────────────────────────────────────────────────────
+// BUILD v3 · PART 3 — "What now?": everything in his head in, a few options for what to do next out
+// ─────────────────────────────────────────────────────
+
+// Voice rule for Coach me, Something else, Look outside and What now? (his Nov 2 note).
+const P_SYNTH = 'Before listing anything, synthesize across what he wrote and his record: name the patterns, then give only the few highest-leverage options. Get right to the meat of it by synthesizing, analyzing and finding multiple patterns and high-leverage interventions.';
+
+const P_NOW_TOOL = {
+  name: 'plan_next',
+  description: 'Give the patterns you see and 2 to 3 options for what to do next, as ordered chains of small steps.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      patterns: { type: 'array', items: { type: 'string' }, description: '1 to 3 short lines across what he wrote and the list, for example several items waiting on the same thing.' },
+      options: {
+        type: 'array', description: '2 to 3 options. Each is an ordered chain of next steps (a chain may cross tasks).',
+        items: { type: 'object', properties: {
+          title: { type: 'string', description: 'A plain name for this option.' },
+          steps: { type: 'array', items: { type: 'object', properties: {
+            text: { type: 'string', description: 'The smallest first physical action for this step, in literal words.' },
+            ledger_row: { type: ['integer', 'null'], description: 'The row number from the list when the step comes from the Ledger, else null.' },
+            minutes: { type: 'number', description: 'Minutes. Over 10 minutes: give 2 to 3 times your estimate and set est to true.' },
+            est: { type: 'boolean' },
+            start: { type: 'string', description: 'Clock start time, 24-hour HH:MM.' },
+            kind: { type: 'string', enum: ['academic', 'other', 'recovery'] },
+          }, required: ['text', 'minutes', 'start'] } },
+        }, required: ['title', 'steps'] },
+      },
+      parked: { type: 'array', items: { type: 'string' }, description: 'Worries he mentioned. Parked, not tasks.' },
+      new_tasks: { type: 'array', items: { type: 'string' }, description: 'Tasks he mentioned that are not in the list, in his words.' },
+      question: { type: ['string', 'null'], description: 'At most one question, only if something essential is missing.' },
+    },
+    required: ['patterns', 'options'],
+  },
+};
+
+const P_NOW_RULES = [
+  'You help Nikhil decide what to do next. He typed or dictated everything in his head. You get his open list (the Ledger), the Ledger rules, what he has logged today and the local time.',
+  'Rules:',
+  '- Use only what he wrote and the rows sent. Do not invent tasks, rows, deadlines or facts.',
+  '- Follow the Ledger rules text.',
+  '- Plain, literal words. No metaphors. Never use the word "vessel". No grades, scores or verdicts about him.',
+  '- Never ask whether he should move. Only say when.',
+  '- Rewards go first or during a step, never held until after.',
+  '- Each option covers an Academic step, an Other step and a Recovery step when the material allows (Dr. Shobha\'s daily rule).',
+  '- Over 10 minutes: give 2 to 3 times your estimate and set est to true.',
+  '- Each step: the smallest first physical action, minutes, a clock start time (24-hour HH:MM, starting from the local time), and its row number when it comes from the list.',
+  '- Worries he mentioned go in parked, not in options. Tasks he mentioned that are not in the list go in new_tasks, in his words.',
+  '- At most one question, and only if something essential is missing.',
+].join('\n');
+
+// The open rows sent to Claude: work rows were already left out when the Ledger was read.
+function pNowRowLines(rows) {
+  return rows.filter(r => !nwIsDone(r)).sort(nwByFlow).slice(0, 80).map(r => {
+    const bits = [`row ${r.row}`, r.Parent_Task, `step ${r.Step_Num || '?'}`, r.Step_Action];
+    if (r.Hands_On_Mins) bits.push(`${r.Hands_On_Mins} min hands-on`);
+    if (r.Deadline) bits.push(`due ${r.Deadline}`);
+    if (r.Bucket) bits.push(r.Bucket);
+    if (r.Waiting_Time) bits.push(`waiting: ${r.Waiting_Time}`);
+    return bits.join(' | ');
+  });
+}
+async function pNowText({ words, rows, rules, log, now = new Date() }) {
+  const lines = pNowRowLines(rows);
+  const pl = typeof pPredictionLine === 'function' ? await pPredictionLine().catch(() => '') : '';
+  return [
+    `What he wrote:\n${words.trim()}`,
+    `Open Ledger rows (row | task | step | action | ...):\n${lines.length ? lines.join('\n') : '(none read)'}`,
+    `Ledger rules:\n${rules.length ? rules.map(r => `- ${r}`).join('\n') : '(none read)'}`,
+    pContextLine(log),
+    pl,
+    `Local time now: ${pTimeHM(now)}.`,
+  ].filter(Boolean).join('\n\n');
+}
+// Checks and trims the reply in code: row refs must be rows that were sent; > 10 min is est.; max 3 patterns, 3 options.
+function pNowClean(input, rows) {
+  const byRow = new Map(rows.map(r => [r.row, r]));
+  const strs = (a) => (Array.isArray(a) ? a : []).map(x => (typeof x === 'string' ? x.trim() : '')).filter(Boolean);
+  const options = (Array.isArray(input?.options) ? input.options : []).slice(0, 3).map(o => ({
+    title: String(o?.title || '').trim() || 'Option',
+    steps: (Array.isArray(o?.steps) ? o.steps : []).filter(s => s && typeof s.text === 'string' && s.text.trim()).map(s => {
+      const r = Number.isInteger(s.ledger_row) ? byRow.get(s.ledger_row) : null;
+      const minutes = Math.max(1, Math.round(Number(s.minutes) || 1));
+      return { text: s.text.trim(), minutes, est: !!s.est || minutes > 10, start: /^\d{1,2}:\d\d$/.test(String(s.start || '')) ? String(s.start).padStart(5, '0') : '', kind: ['academic', 'other', 'recovery'].includes(s.kind) ? s.kind : null,
+        ...(r ? { ledger: { row: r.row, task: r.Parent_Task, stepNum: r.Step_Num, stepAction: r.Step_Action } } : {}) };
+    }),
+  })).filter(o => o.steps.length);
+  return { patterns: strs(input?.patterns).slice(0, 3), options, parked: strs(input?.parked), newTasks: strs(input?.new_tasks), question: typeof input?.question === 'string' && input.question.trim() ? input.question.trim() : null };
+}
+// Calls Claude with the forced tool. Returns { result, saved }. Needs internet.
+async function pWhatNow({ words, rows, rules, log, feedback }) {
+  const text0 = await pNowText({ words, rows, rules, log });
+  const text = feedback ? `${text0}\n\nThe last options did not fit. Why, in his words: ${feedback}` : text0;
+  const { data, saved } = await pCallClaude({ system: `${P_VOICE}\n\n${P_SYNTH}\n\n${P_NOW_RULES}`, text, tools: [P_NOW_TOOL], toolChoice: { type: 'tool', name: 'plan_next' }, ask: { kind: feedback ? 'what-now-again' : 'what-now', words: '', feedback: feedback ? '(in the ramp entry)' : undefined, redact: true }, screen: 'what-now' });
+  const block = (data?.content || []).find(b => b.type === 'tool_use' && b.name === 'plan_next');
+  if (!block) throw pAskError('Claude answered without a plan.', saved);
+  const result = pNowClean(block.input, rows);
+  if (!result.options.length) throw pAskError('Claude sent no usable options.', saved);
+  return { result, saved, usage: data?.usage || null };
+}
+// practice:ramp:<day>: his words and the result, append-only, merged by id.
+function pAddRamp({ words, result, usage, kind = 'what-now', feedback, of }) {
+  const now = new Date();
+  const id = `r_${now.getTime().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const entry = { id, at: now.toISOString(), time: pTimeHM(now), kind, words, ...(feedback ? { feedback } : {}), ...(of ? { of } : {}), result, ...(usage ? { usage } : {}) };
+  return pUpdate(P_KEYS.ramp(pDayKey(now)), () => ({ date: pLocalISO(now), entries: [] }), (doc) => { doc.entries = doc.entries || []; doc.entries.push(entry); return doc; }).then(doc => ({ doc, entry }));
+}
+// Tomorrow's first step, where the waking flow shows today's first item. A plan that is already there stays as it is.
+async function pSaveTomorrowFirst(step, clock) {
+  const t = new Date(); t.setDate(t.getDate() + 1);
+  const key = P_KEYS.today(pDayKey(t));
+  let refused = false;
+  const doc = await pUpdate(key, () => ({ date: pLocalISO(t), practices: [] }), (d) => {
+    if (Array.isArray(d.practices) && d.practices.length) { refused = true; return d; }
+    d.practices = [{ id: 'what-now', source: 'what-now', name: step, why: 'Saved from What now? last night', when: clock || undefined, firstStep: step }];
+    return d;
+  });
+  return { refused, doc, key };
+}
+// One tap to the Brain Dump: kept on this device, and sent now if online and signed in.
+async function pDumpQuick(text, tag) {
+  const c = window.nwBrainDump.add(text, tag);
+  if (nwGoogleOnline() && window.nwGoogle && window.nwGoogle.token()) { const r = await nwDumpSendWaiting(); return r.error ? { status: 'device', error: r.error } : { status: 'sent' }; }
+  return { status: 'device' };
+}
+const pAddMin = (hm, min) => { const m = /^(\d\d?):(\d\d)$/.exec(hm || ''); if (!m) return ''; const t = (+m[1] * 60 + +m[2] + min) % 1440; return `${pTwo(Math.floor(t / 60))}:${pTwo(t % 60)}`; };
+
+function StepClock({ planned, startedAt }) {
+  const [, tick] = useState(0);
+  useEffect(() => { const iv = setInterval(() => tick(x => x + 1), 1000); return () => clearInterval(iv); }, []);
+  const s = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  return <div aria-live="off" style={{ fontSize: 40, fontFamily: pMono, color: PC.text, textAlign: 'center', margin: '8px 0' }}>{pFmt(s)}<span style={{ fontSize: 14, color: PC.muted }}> of {planned} min</span></div>;
+}
+
+function WhatNow({ todayLog, onLog, feedbackWords }) {
+  const L = useLedger();
+  const [words, setWords, clearWords] = window.useDraft('practice', 'whatnow', '');
+  const [st, setSt] = useState({ busy: false, err: '', res: null, rampId: null, saved: null, whereSaved: null });
+  const [chosen, setChosen] = useState(null);
+  const [plan, setPlan] = useState([]);
+  const [planStart, setPlanStart] = useState('');
+  const [run, setRun] = useState(null);       // { i, startedAt, note, mins }
+  const [doneOp, setDoneOp] = useState(null); // a Ledger mark-done waiting for the tap
+  const [opErr, setOpErr] = useState('');
+  const [msg, setMsg] = useState('');
+  const [adding, setAdding] = useState(null);
+  const [misfit, setMisfit, clearMisfit] = window.useDraft('practice', 'whatnow-misfit', '');
+  const [busy2, wrap] = window.useBusy();
+  const online = pOnline();
+  const sentRows = L.rows;
+
+  const ask = async (feedback) => {
+    setSt(s => ({ ...s, busy: true, err: '' }));
+    try {
+      const { result, saved, usage } = await pWhatNow({ words, rows: sentRows, rules: L.rules, log: todayLog, feedback });
+      let where = null, rampId = null;
+      try { const { doc, entry } = await pAddRamp({ words, result, usage, kind: feedback ? 'what-now-again' : 'what-now', feedback, of: st.rampId || undefined }); where = pWhere.get(doc) || 'cloud'; rampId = entry.id; window.nwShowBar({ tab: 'practice', mode: 'saved', what: 'What now? result', where, ref: { what: 'What now? result' } }); }
+      catch (e) { setMsg(`❌ The result was not saved: ${e.message}`); }
+      setSt({ busy: false, err: '', res: result, rampId, saved, whereSaved: where });
+      setChosen(null); setPlan([]); setRun(null); setDoneOp(null);
+      if (!feedback) clearWords(); else clearMisfit();
+    } catch (e) { setSt(s => ({ ...s, busy: false, err: e.message, saved: e.saved })); }
+  };
+  const pick = (i) => { setChosen(i); setPlanStart(st.res.options[i].steps[0]?.start || ''); setPlan(st.res.options[i].steps.map(s => ({ ...s }))); setRun(null); setDoneOp(null); setMsg(''); };
+  const edit = (k, patch) => setPlan(p => p.map((s, j) => (j === k ? { ...s, ...patch } : s)));
+  const move = (k, d) => setPlan(p => { const q = p.slice(); const t = k + d; if (t < 0 || t >= q.length) return q; [q[k], q[t]] = [q[t], q[k]]; return q; });
+  const clocks = plan.map((s, k) => pAddMin(planStart, plan.slice(0, k).reduce((a, x) => a + (+x.minutes || 0), 0)) || s.start);
+  const startStep = (i) => { setRun({ i, startedAt: Date.now(), note: '', mins: '' }); setDoneOp(null); };
+  const finishStep = wrap(async () => {
+    const s = plan[run.i];
+    const actual = Math.max(1, Math.round((run.mins !== '' ? +run.mins * 60000 : Date.now() - run.startedAt) / 60000));
+    const ok = await onLog({ practiceId: 'what-now', source: 'app', rampId: st.rampId || undefined, stepIndex: run.i + 1, actualMins: actual, plannedMins: s.minutes, ...(s.ledger ? { ledgerStep: true } : { note: s.text }), ...(run.note.trim() ? { myNote: run.note.trim() } : {}) });
+    if (!ok) return;
+    if (s.ledger) setDoneOp({ kind: 'done', parent: s.ledger.task, stepNum: s.ledger.stepNum, stepAction: s.ledger.stepAction, row: s.ledger.row, completedAt: new Date().toISOString(), actualMins: `${actual} mins` });
+    setRun(null);
+    setPlan(p => p.map((x, j) => (j === run.i ? { ...x, done: true } : x)));
+  });
+  const sendDone = wrap(async () => {
+    const r = await nwLedgerSend(doneOp);
+    if (r.ok) { nwLedgerDoneBar(doneOp, r.where); setDoneOp(null); setOpErr(''); } else setOpErr(r.error);
+  });
+  const tomorrow = wrap(async (k) => {
+    try {
+      const r = await pSaveTomorrowFirst(plan[k].text, clocks[k]);
+      setMsg(r.refused ? "Tomorrow already has a plan. It was not changed." : (pWhere.get(r.doc) === 'device-only' ? "Saved on this device only, not in the cloud yet: tomorrow's first step." : "Saved as tomorrow's first step."));
+    } catch (e) { setMsg(`❌ ${e.message}`); }
+  });
+  const toDump = wrap(async (text, tag, key) => {
+    const r = await pDumpQuick(text, tag);
+    setMsg(r.status === 'sent' ? 'Sent to the Brain Dump.' : `Kept on this device for the Brain Dump${r.error ? ` (${r.error})` : ''}.`);
+  });
+  const res = st.res;
+  window.nwSetContext && window.nwSetContext('practice', { screen: 'Today · What now?' });
+
+  return (
+    <div data-pr-whatnow style={pCard()}>
+      <div style={pLabel}>What now?</div>
+      <textarea aria-label="What is in your head" rows={4} value={words} onChange={e => setWords(e.target.value)} placeholder="Type, or use the mic on your keyboard: everything that is in your head" style={{ ...pInput, minHeight: 90, marginBottom: 8, resize: 'vertical' }} />
+      <button style={pBtn('solid', { width: '100%' })} disabled={!online || st.busy || !words.trim()} onClick={() => ask()}>{st.busy ? 'Thinking…' : 'What now?'}</button>
+      {!online && <div style={{ fontSize: 12, color: PC.muted, marginTop: 6 }}>What now needs internet. Your words are kept in the box.</div>}
+      {st.err && <PNote msg={`❌ ${st.err}`} />}
+      {msg && <div role="status" style={{ fontSize: 13, color: PC.text, marginTop: 8 }}>{msg}</div>}
+      {res && (
+        <div style={{ marginTop: 12 }}>
+          {res.patterns.length > 0 && (
+            <div data-pr-now-patterns style={{ marginBottom: 12 }}>
+              <div style={pLabel}>Patterns</div>
+              {res.patterns.map((p, i) => <div key={i} style={{ fontSize: 15, color: PC.text, lineHeight: 1.5, marginBottom: 4 }}>{p}</div>)}
+            </div>
+          )}
+          <div style={pLabel}>Options (you choose)</div>
+          {res.options.map((o, i) => (
+            <button key={i} data-pr-now-option aria-pressed={chosen === i} onClick={() => pick(i)} style={{ ...pCard({ marginBottom: 8, borderColor: chosen === i ? PC.accent : PC.border }), width: '100%', textAlign: 'left', cursor: 'pointer', display: 'block', fontFamily: pFont, color: PC.text }}>
+              <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>{o.title}</div>
+              {o.steps.map((s, k) => (
+                <div key={k} style={{ fontSize: 14, lineHeight: 1.5 }}><span style={{ fontFamily: pMono, color: PC.muted }}>{s.start || '--:--'}</span> {s.text} <span style={{ color: PC.muted }}>· {s.minutes} min{s.est ? ' est.' : ''}{s.kind ? ` · ${s.kind}` : ''}</span></div>
+              ))}
+            </button>
+          ))}
+          {chosen != null && (
+            <div data-pr-now-plan style={pCard({ borderLeft: `3px solid ${PC.accent}` })}>
+              <div style={pLabel}>Your plan (change anything)</div>
+              {plan.map((s, k) => (
+                <div key={k} style={{ marginBottom: 10, opacity: s.done ? 0.5 : 1 }}>
+                  <div style={{ fontSize: 12, color: PC.muted, fontFamily: pMono }}>{clocks[k] || '--:--'}{s.done ? ' · done' : ''}</div>
+                  <input aria-label={`Step ${k + 1}`} value={s.text} onChange={e => edit(k, { text: e.target.value })} style={{ ...pInput, marginBottom: 4 }} />
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <input aria-label={`Minutes for step ${k + 1}`} type="number" min="1" value={s.minutes} onChange={e => edit(k, { minutes: Math.max(1, +e.target.value || 1), est: (+e.target.value || 1) > 10 })} style={{ ...pInput, width: 70, minHeight: 36 }} />
+                    <span style={{ fontSize: 13, color: PC.muted }}>min{s.est ? ' est.' : ''}</span>
+                    <button style={pBtn('ghost', { minHeight: 36, padding: '4px 10px' })} aria-label={`Move step ${k + 1} up`} onClick={() => move(k, -1)}>↑</button>
+                    <button style={pBtn('ghost', { minHeight: 36, padding: '4px 10px' })} aria-label={`Move step ${k + 1} down`} onClick={() => move(k, 1)}>↓</button>
+                    <button style={pBtn('ghost', { minHeight: 36, padding: '4px 10px' })} aria-label={`Remove step ${k + 1}`} onClick={() => setPlan(p => p.filter((_, j) => j !== k))}>Remove</button>
+                  </div>
+                  {k === plan.findIndex(x => !x.done) && !run && (
+                    <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                      <button style={pBtn('solid', { flex: 1 })} onClick={() => startStep(k)}>Start</button>
+                      <button style={pBtn('ghost', { flex: 1, fontSize: 13 })} disabled={busy2} onClick={() => tomorrow(k)}>Save as tomorrow's first step</button>
+                    </div>
+                  )}
+                </div>
+              ))}
+              {!plan.length && <div style={{ fontSize: 14, color: PC.muted }}>No steps left.</div>}
+            </div>
+          )}
+          {run && plan[run.i] && (
+            <div data-pr-now-run style={pCard({ borderLeft: `3px solid ${PC.warn}` })}>
+              <div style={pLabel}>Doing now</div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: PC.text, lineHeight: 1.4 }}>{plan[run.i].text}</div>
+              <StepClock planned={plan[run.i].minutes} startedAt={run.startedAt} />
+              <window.NwStepNote key={`ns${run.i}`} value={run.note} onChange={v => setRun(r => ({ ...r, note: v }))} />
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10 }}>
+                <label htmlFor="pr-now-mins" style={{ fontSize: 13, color: PC.muted }}>Minutes it took</label>
+                <input id="pr-now-mins" type="number" min="1" value={run.mins} placeholder="auto" onChange={e => setRun(r => ({ ...r, mins: e.target.value }))} style={{ ...pInput, width: 90, minHeight: 36 }} />
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                <button style={pBtn('solid', { flex: 2, minHeight: 56 })} disabled={busy2} onClick={finishStep}>Done</button>
+                <button style={pBtn('ghost', { flex: 1 })} onClick={() => setRun(null)}>Stop</button>
+              </div>
+            </div>
+          )}
+          {doneOp && <LedgerPreview op={doneOp} busy={busy2} error={opErr} onConfirm={sendDone} onCancel={() => { setDoneOp(null); setOpErr(''); }} />}
+          {res.parked.length > 0 && (
+            <details data-pr-now-parked style={{ marginTop: 10 }}>
+              <summary style={{ fontSize: 14, color: PC.muted, cursor: 'pointer' }}>Parked worries ({res.parked.length}) · not tasks</summary>
+              {res.parked.map((p, i) => (
+                <div key={i} style={{ fontSize: 14, color: PC.text, padding: '6px 0', borderBottom: `1px solid ${PC.border}` }}>
+                  {p} <button style={pBtn('ghost', { minHeight: 32, padding: '2px 8px', fontSize: 12 })} disabled={busy2} onClick={() => toDump(p, 'note:')}>To Brain Dump</button>
+                </div>
+              ))}
+            </details>
+          )}
+          {res.newTasks.length > 0 && (
+            <div data-pr-now-newtasks style={{ marginTop: 10 }}>
+              <div style={pLabel}>New tasks you mentioned</div>
+              {res.newTasks.map((t, i) => (
+                <div key={i} style={{ fontSize: 14, color: PC.text, padding: '6px 0', borderBottom: `1px solid ${PC.border}` }}>
+                  {t}
+                  <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+                    <button style={pBtn('ghost', { minHeight: 32, padding: '2px 8px', fontSize: 12 })} disabled={busy2} onClick={() => toDump(t, 'task:')}>To Brain Dump</button>
+                    <button style={pBtn('ghost', { minHeight: 32, padding: '2px 8px', fontSize: 12 })} onClick={() => setAdding(adding === i ? null : i)}>To Ledger</button>
+                  </div>
+                  {adding === i && <LedgerAddTask rows={L.rows} initialName={t} onOp={(o) => setDoneOp(o)} onClose={() => setAdding(null)} />}
+                </div>
+              ))}
+            </div>
+          )}
+          {res.question && <div data-pr-now-question style={{ fontSize: 15, color: PC.text, marginTop: 10 }}>Question: {res.question}</div>}
+          <PSaved saved={st.saved} />
+          <div data-pr-misfit style={{ marginTop: 12 }}>
+            <div style={pLabel}>These don't fit</div>
+            <input aria-label="Why these don't fit (optional)" value={misfit} onChange={e => setMisfit(e.target.value)} placeholder="Why (optional)" style={{ ...pInput, marginBottom: 6 }} />
+            <button style={pBtn('ghost', { width: '100%' })} disabled={!online || st.busy} onClick={() => ask(misfit.trim() || "these don't fit")}>These don't fit, ask again</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 const P_SCREENS = [
   { id: 'today',    label: 'Today' },
   { id: 'library',  label: 'Library' },
@@ -13568,7 +13874,7 @@ function NwAppInfo({ active }) {
 const NW_CLAUDE_PRICES_USD_PER_MTOK = { input: 2, output: 10, cacheWrite: 2 * 1.25, cacheRead: 2 * 0.1 };
 // The monthly spend limit set in the Anthropic Console.
 const MONTHLY_LIMIT_USD = 5;
-const NW_ASK_KIND_NAMES = { 'stuck': 'Ask Claude (Stuck)', 'stuck-else': 'Something else', 'coach-me': 'Coach me', 'outside': 'Look outside', 'draft-shobha': 'Draft for Dr. Shobha', 'kaizen-foci': 'Kaizen session patterns' };
+const NW_ASK_KIND_NAMES = { 'stuck': 'Ask Claude (Stuck)', 'stuck-else': 'Something else', 'coach-me': 'Coach me', 'outside': 'Look outside', 'draft-shobha': 'Draft for Dr. Shobha', 'kaizen-foci': 'Kaizen session patterns', 'what-now': 'What now?', 'what-now-again': 'What now? (again)', 'ask-step': 'Ask about a step' };
 
 // Every saved Claude answer this month (practice:asks:<YYYY_MM_DD>), counted by kind.
 function nwClaudeCost(records, prices = NW_CLAUDE_PRICES_USD_PER_MTOK) {

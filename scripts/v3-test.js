@@ -631,10 +631,185 @@ async function part2() {
   }
 }
 
+// ───────────────────────── Part 3 ─────────────────────────
+const NOW_PLAN = () => ({
+  patterns: ['Three things wait on the dentist page', 'The tax folder keeps coming up'],
+  options: [
+    { title: 'Short start', steps: [
+      { text: 'Put the tax folder on the desk', ledger_row: 2, minutes: 2, start: '08:15', kind: 'academic' },
+      { text: 'Walk to the mailbox', ledger_row: null, minutes: 10, start: '08:17', kind: 'recovery' },
+      { text: 'Fill in page one of the form', ledger_row: 3, minutes: 40, est: true, start: '08:27', kind: 'other' },
+      { text: 'Phone Maria Lopez', ledger_row: 8, minutes: 5, start: '09:07' },
+    ] },
+    { title: 'Dentist first', steps: [{ text: 'Open the dentist page on the phone', ledger_row: 5, minutes: 3, start: '08:15', kind: 'other' }] },
+  ],
+  parked: ['I worry about the lease'], new_tasks: ['Call Dana about the move'], question: 'What time is class?',
+});
+const nowProxy = (plan = NOW_PLAN()) => async () => ({ status: 200, json: { model: 'claude-sonnet-5-5', usage: { input_tokens: 900, output_tokens: 300 }, content: [{ type: 'tool_use', id: 't1', name: 'plan_next', input: plan }] } });
+const WORDS = 'The dentist page, the tax folder and the lease are all in my head and I do not know where to start.';
+
+async function part3() {
+  console.log('\n[3.1-3.4 What now?: request, forced tool, screen]');
+  {
+    const fake = newFake();
+    const ctx = await openLedger(fake, { proxy: nowProxy() });
+    const { page } = ctx;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('textarea[aria-label="What is in your head"]').fill(WORDS);
+    await clickName(page, 'What now?');
+    await page.waitForSelector('[data-pr-now-patterns]');
+    const call = ctx.proxyCalls[ctx.proxyCalls.length - 1];
+    const text = call.messages[0].content;
+    ok(call.tool_choice && call.tool_choice.type === 'tool' && call.tool_choice.name === 'plan_next' && call.tools.length === 1 && call.tools[0].name === 'plan_next', 'a forced tool call to plan_next');
+    ok(text.includes(WORDS) && text.includes('row 2 | File the tax form | step 1 | Put the tax folder on the desk') && text.includes('Homework help'), 'sends his words and the allowed Ledger rows (with row numbers)');
+    ok(text.includes('The first physical step is Step 1.') && text.includes('Park a worry'), "sends the Rules tab's rule texts");
+    ok(/Local time now: 08:1\d\./.test(text) && /Context: local time/.test(text), 'sends the local time and what he logged today');
+    ok(!/Maria|ASMP|STARR|VINE|participant/i.test(text), 'no work row reaches Claude');
+    ok(!/row 4 /.test(text), 'a done row is not sent');
+    const sys = call.system[0].text;
+    ok(/vessel/.test(sys) && /Never ask whether he should move/.test(sys) && /never held until after/.test(sys) && /Academic step, an Other step and a Recovery/.test(sys) && /2 to 3 times/.test(sys) && /Do not invent/.test(sys) && /synthesize/.test(sys), 'prompt rules are in the system text');
+    const t = await visibleText(page);
+    ok(t.includes('Three things wait on the dentist page') && t.includes('Short start') && t.includes('Dentist first'), 'patterns and options are shown');
+    ok(t.includes('· 40 min est.') && t.includes('· 10 min') && !t.includes('· 10 min est.'), 'over 10 minutes shows est.; 10 does not');
+    ok(t.includes('08:15') && t.includes('Put the tax folder on the desk'), 'each step has a clock start');
+    ok(await page.locator('[data-pr-now-parked]').getAttribute('open') === null, 'parked worries are collapsed');
+    ok(t.includes('Question: What time is class?'), 'one question shown');
+    ok(await page.locator('[data-pr-now-plan]').count() === 0, 'nothing is chosen for him');
+    // saved result
+    await wait(page, 600);
+    const ramp = await memJSON(page, 'practice:ramp:2026_11_03');
+    const e = ramp && ramp.entries[0];
+    ok(e && e.words === WORDS && e.result.patterns.length === 2 && e.result.options.length === 2 && e.result.parked[0] === 'I worry about the lease' && e.result.newTasks[0] === 'Call Dana about the move', 'dump and result saved append-only to practice:ramp:2026_11_03');
+    const s0 = e.result.options[0].steps;
+    ok(s0[0].ledger && s0[0].ledger.row === 2 && s0[0].ledger.task === 'File the tax form' && s0[3].ledger === undefined, 'Ledger row refs kept only for rows that were sent (the work row ref was dropped)');
+    ok(s0[2].est === true && s0[2].minutes === 40 && s0[1].est === false, 'est. set in code for steps over 10 minutes');
+    const asks = await mem(page, 'practice:asks:2026_11_03');
+    ok(asks && !/tax|dentist|lease/i.test(asks) && JSON.parse(asks).entries[0].kind === 'what-now', 'the ask record keeps kind and usage only, no Ledger text');
+    ok((await page.locator('textarea[aria-label="What is in your head"]').inputValue()) === '', 'the box is cleared after it is sent and saved');
+    // choose an option, edit, reorder, remove
+    await page.locator('[data-pr-now-option]').first().click();
+    ok(await page.locator('[data-pr-now-plan]').count() === 1, 'tapping an option opens its plan');
+    await page.locator('input[aria-label="Step 1"]').fill('Put the tax folder and a pen on the desk');
+    await clickName(page, 'Move step 2 up');
+    ok(await page.locator('input[aria-label="Step 1"]').inputValue() === 'Walk to the mailbox', 'steps can be reordered');
+    await clickName(page, 'Remove step 4');
+    ok(await page.locator('input[aria-label^="Step "]').count() === 3, 'a step can be removed');
+    ok((await page.locator('[data-pr-now-plan]').innerText()).includes('08:15') , 'clock starts follow the order');
+    await finish(ctx, 'what now');
+  }
+
+  console.log('\n[3.4 What now?: Start, timer, note, Done, mark done in the Ledger]');
+  {
+    const fake = newFake();
+    const ctx = await openLedger(fake, { proxy: nowProxy() });
+    const { page } = ctx;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('textarea[aria-label="What is in your head"]').fill(WORDS);
+    await clickName(page, 'What now?');
+    await page.waitForSelector('[data-pr-now-option]');
+    await page.locator('[data-pr-now-option]').first().click();
+    await page.locator('[data-pr-now-plan]').getByRole('button', { name: 'Start', exact: true }).click();
+    ok(await page.locator('[data-pr-now-run]').count() === 1 && (await page.locator('[data-pr-now-run]').innerText()).includes('Put the tax folder on the desk') && /0:0\d/.test(await page.locator('[data-pr-now-run]').innerText()), 'Start runs the first step with a timer');
+    ok(await page.locator('[data-pr-now-run] [data-nw-stepnote]').count() === 1, '+ Note on the step');
+    await page.locator('[data-pr-now-run]').getByRole('button', { name: '+ Note' }).click();
+    await page.locator('[data-pr-now-run] textarea[aria-label="Note for this step"]').fill('found it fast');
+    await page.locator('#pr-now-mins').fill('12');
+    await page.locator('[data-pr-now-run]').getByRole('button', { name: 'Done', exact: true }).click();
+    await wait(page, 700);
+    const lg = await todayLog(page, 'practice:log:2026_11_03');
+    const en = lg.entries.find(x => x.practiceId === 'what-now');
+    ok(en && en.actualMins === 12 && en.plannedMins === 2 && en.ledgerStep === true && en.note === undefined && en.myNote === 'found it fast' && en.stepIndex === 1, 'Done logs a practice entry with actual minutes (no Ledger text in it)');
+    const pv = await page.locator('[data-pr-ledger-preview]').innerText();
+    ok(pv.includes('Done → TRUE') && pv.includes('Actual_Mins → 12 mins'), 'a Ledger step offers the mark-done write with Actual_Mins "12 mins"');
+    ok(writes(fake).length === 0, 'nothing written until the tap');
+    await clickName(page, 'Confirm and send');
+    await wait(page, 800);
+    const w = writes(fake, 'update');
+    ok(w.length === 3 && w.some(x => x.range === 'Ledger!R2' && x.values[0][0] === '12 mins') && w.some(x => x.range === 'Ledger!A2' && x.values[0][0] === true), 'Done, Completed_At and Actual_Mins written');
+    ok(/Saved/.test(await page.locator('[data-nw-savedbar]').first().innerText()), 'the bar says Saved');
+    await finish(ctx, 'what now run');
+  }
+
+  console.log('\n[3.4/3.5 What now?: tomorrow, Brain Dump, Ledger, offline, these do not fit]');
+  {
+    const fake = newFake();
+    const proxy = nowProxy();
+    const ctx = await openLedger(fake, { proxy });
+    const { page } = ctx;
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('textarea[aria-label="What is in your head"]').fill(WORDS);
+    await clickName(page, 'What now?');
+    await page.waitForSelector('[data-pr-now-option]');
+    await page.locator('[data-pr-now-option]').first().click();
+    await clickName(page, "Save as tomorrow's first step");
+    await wait(page, 600);
+    let td = await memJSON(page, 'practice:today:2026_11_04');
+    ok(td && td.practices.length === 1 && td.practices[0].firstStep === 'Put the tax folder on the desk' && td.practices[0].source === 'what-now', "Save as tomorrow's first step → practice:today:2026_11_04");
+    ok((await visibleText(page)).includes("Saved as tomorrow's first step."), 'says so');
+    await clickName(page, "Save as tomorrow's first step");
+    await wait(page, 400);
+    td = await memJSON(page, 'practice:today:2026_11_04');
+    ok((await visibleText(page)).includes('Tomorrow already has a plan. It was not changed.') && td.practices.length === 1, 'a plan that is already there is not overwritten');
+    // parked → Brain Dump, new task → Brain Dump and Ledger
+    await page.locator('[data-pr-now-parked] summary').click();
+    await page.locator('[data-pr-now-parked]').getByRole('button', { name: 'To Brain Dump' }).click();
+    await wait(page, 1500);
+    ok(fake.doc.paras.some(p => /^note: I worry about the lease \(from Nikhil's World/.test(p.text)), 'a parked worry goes to the Brain Dump in one tap (note:)');
+    await page.locator('[data-pr-now-newtasks]').getByRole('button', { name: 'To Brain Dump' }).click();
+    await wait(page, 1500);
+    ok(fake.doc.paras.some(p => /^task: Call Dana about the move \(from Nikhil's World/.test(p.text)), 'a new task goes to the Brain Dump (task:)');
+    await page.locator('[data-pr-now-newtasks]').getByRole('button', { name: 'To Ledger' }).click();
+    ok(await page.locator('input[aria-label="Task name"]').inputValue() === 'Call Dana about the move', 'To Ledger opens the add-task form with his words');
+    await page.locator('input[aria-label="First physical step (Step 1)"]').fill('Open the phone contacts');
+    await page.locator('select[aria-label="Bucket"]').selectOption(G.WEEK);
+    await page.locator('select[aria-label="Domain"]').selectOption('Home');
+    await clickName(page, 'Review task');
+    ok((await page.locator('[data-pr-ledger-preview]').innerText()).includes('Step_Num 1 · Open the phone contacts'), 'preview, first physical step as Step 1');
+    await clickName(page, 'Confirm and send');
+    await wait(page, 800);
+    ok(fake.sheets.Ledger[fake.sheets.Ledger.length - 1][4] === 'Call Dana about the move', 'the task is in the Ledger');
+    // these don't fit
+    await page.locator('input[aria-label="Why these don\'t fit (optional)"]').fill('too much walking');
+    await clickName(page, "These don't fit, ask again");
+    await wait(page, 800);
+    const call = ctx.proxyCalls[ctx.proxyCalls.length - 1];
+    ok(call.messages[0].content.includes('did not fit') && call.messages[0].content.includes('too much walking'), "These don't fit asks again with the reason");
+    const ramp = await memJSON(page, 'practice:ramp:2026_11_03');
+    ok(ramp.entries.length === 2 && ramp.entries[1].kind === 'what-now-again' && ramp.entries[1].feedback === 'too much walking', 'and logs it (append-only: both results kept)');
+    await finish(ctx, 'what now actions');
+
+    // offline
+    const c2 = await openLedger(newFake(), { proxy: nowProxy(), offline: true });
+    await c2.page.locator('textarea[aria-label="What is in your head"]').fill('words kept');
+    ok(await c2.page.getByRole('button', { name: 'What now?', exact: true }).isDisabled() && (await visibleText(c2.page)).includes('What now needs internet'), 'offline: says What now needs internet');
+    ok(await c2.page.locator('textarea[aria-label="What is in your head"]').inputValue() === 'words kept' && c2.proxyCalls.length === 0, 'the words stay in the box; no call');
+    await c2.browser.close();
+  }
+
+  console.log('\n[3.6 What now? results from two devices are both kept]');
+  {
+    const ctx = await openPage({ fakeFirestore: {}, now: '2026-11-03T08:10:00' });
+    const { page } = ctx;
+    await page.waitForTimeout(3000);
+    await page.evaluate(() => {
+      window.__fakeBeforeCommit = (attempt) => {
+        if (attempt !== 1) return;
+        window.__fakeDocs.set('practice_ramp_2026_11_03', { key: 'practice:ramp:2026_11_03', value: JSON.stringify({ entries: [{ id: 'r_laptop', at: '2026-11-03T17:00:00.000Z', u: 5, words: 'from the laptop', result: { patterns: [], options: [] } }] }), updatedAt: new Date(Date.now() + 1000) });
+      };
+    });
+    await page.evaluate(() => pAddRamp({ words: 'from the phone', result: { patterns: ['p'], options: [] } }));
+    const doc = await page.evaluate(() => JSON.parse(window.__fakeDocs.get('practice_ramp_2026_11_03').value));
+    ok(doc.entries.length === 2 && doc.entries.some(x => x.id === 'r_laptop') && doc.entries.some(x => x.words === 'from the phone'), 'laptop and phone results are both in the cloud doc');
+    ok(!(await page.evaluate(() => [...window.__fakeDocs.keys()].some(k => /__conflict_/.test(k)))), 'no conflict copy');
+    await ctx.browser.close();
+  }
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
   if (which === 'all' || which === '1') await part1();
   if (which === 'all' || which === '2') await part2();
+  if (which === 'all' || which === '3') await part3();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });
