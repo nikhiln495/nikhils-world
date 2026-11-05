@@ -9719,6 +9719,8 @@ const P_KEYS = {
   ramp:  (dayKey) => `practice:ramp:${dayKey}`,   // What now? dumps and results (append-only, merged by id)
   joy:   (monthKey) => `practice:joy:${monthKey}`, // Joys, one doc per month (append-only, merged by id)
   seeds: 'practice:seeds',                          // which one-time seeds are done
+  three: (monthKey) => `practice:three:${monthKey}`, // Today's three (Dr. Shobha's 21 days), one doc per month (append-only)
+  threeStart: 'practice:three-start',               // { start: 'YYYY-MM-DD' }: the date Day 1 was
 };
 const P_STATUSES = ['homework','active','learning','reference','in-session','pending','open','setup','restart','new','not-working','paused'];
 const P_BY = 'Nikhil (app)';
@@ -10198,6 +10200,7 @@ function TodayScreen({ data, onLog, onStart, onWaking, onAddUpdate, onEditEntry,
       )}
 
       <LedgerStrip />
+      <ThreeCard />
       <WhatNow todayLog={todayLog} onLog={onLog} />
 
       {today && (
@@ -10498,7 +10501,7 @@ const pContextLine = (log) => {
     const r = (e.before != null || e.after != null) ? ` (before ${e.before ?? '-'}, after ${e.after ?? '-'})` : '';
     return `${e.practiceId}${r}`;
   });
-  return `Context: local time ${pClock()}; last waking level today: ${lvl == null ? 'none logged' : lvl}; logged today: ${reps.length ? reps.join(', ') : 'nothing yet'}.`;
+  return `Context: local time ${pClock()}; last waking level today: ${lvl == null ? 'none logged' : lvl}; logged today: ${reps.length ? reps.join(', ') : 'nothing yet'}.${typeof nwThreeLine === 'function' ? nwThreeLine() : ''}`;
 };
 
 const pOnline = () => (typeof navigator === 'undefined' || navigator.onLine !== false);
@@ -11322,6 +11325,7 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
               {first.id && <button style={pBtn('solid', { width: '100%' })} onClick={() => onStart(first.id, 'app')}>Start</button>}
             </div>
           ) : <div style={{ fontSize: 15, color: PC.muted, marginTop: 8 }}>No plan for today yet. Name the first thing you'll do, and do its first step.</div>}
+          <button data-pr-pick-three style={pBtn('solid', { width: '100%', marginTop: 8 })} onClick={() => { nwThreeAsk(); onClose(); }}>Pick today's three</button>
           <button style={pBtn('ghost', { width: '100%', marginTop: 8 })} onClick={onClose}>Back to Today</button>
         </div>
       )}
@@ -11404,6 +11408,7 @@ function EarlierAnswers({ playbook, tick }) {
 }
 
 function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onWaking, onSaveProposal, onClose }) {
+  useThree(); // loads today's three, which the one-line context for Claude includes
   const [open, setOpen] = useState(null);
   const [askText, setAskText, clearAsk] = window.useDraft('practice', 'ask', '');
   const [elseText, setElseText, clearElse] = window.useDraft('practice', 'else', '');
@@ -12101,6 +12106,7 @@ async function pDayItems(iso, playbook) {
     items.push({ t: pHM(n.at) || null, kind: 'Note', title: `${n.tab || ''}${n.screen ? ` · ${n.screen}` : ''}${n.practice ? ` · ${n.practice}` : ''}`.replace(/^ · /, ''), lines: [n.text] });
   });
   (await pReadJoys().catch(() => [])).filter(j => j.iso === iso).forEach(j => items.push({ t: j.time || null, kind: 'Joy', title: `${(j.who || []).join(', ') || 'Joy'}`, lines: [j.what] }));
+  (await pReadThree(iso).catch(() => [])).forEach(e => items.push({ t: pHM(e.at) || null, kind: "Today's three", title: nwThreeTitle(e), lines: e.ledger ? [`Ledger: ${e.ledger.task} · ${nwStepLabel(e.ledger.stepNum)}`] : [] }));
   (rp.data?.entries || []).forEach(r => {
     if (!r) return;
     items.push({ t: pHM(r.at) || null, kind: 'What now?', title: String(r.words || '').slice(0, 200), lines: pRampLines ? pRampLines(r) : [] });
@@ -12110,6 +12116,13 @@ async function pDayItems(iso, playbook) {
   const byTime = window.nwByTime(items, (x) => x.t);
   return { items: byTime, errors: [lg, ak, nt].filter(r => r.error).length };
 }
+// Today's three entries for one day (practice:three:<YYYY_MM>), for Day history.
+async function pReadThree(iso) {
+  const r = await pRead(P_KEYS.three(iso.slice(0, 7).replace('-', '_')));
+  return (r.data && Array.isArray(r.data.entries) ? r.data.entries : []).filter(e => e && e.date === iso);
+}
+const P_THREE_KIND = { checkin: 'Check-in', pick: 'Picked', done: 'Done', appreciate: 'I appreciate that I', park: 'Parked', ack: 'Acknowledged' };
+const nwThreeTitle = (e) => `${P_THREE_KIND[e.kind] || e.kind}${e.slot ? ` · ${(P_SLOTS.find(s => s.id === e.slot) || {}).label || e.slot}` : ''}: ${String(e.text || '').slice(0, 200)}`;
 const pRampLines = (r) => {
   const lines = [];
   (r.result?.patterns || []).forEach(x => lines.push(`Pattern: ${x}`));
@@ -13316,6 +13329,310 @@ function StepClock({ planned, startedAt }) {
   return <div aria-live="off" style={{ fontSize: 40, fontFamily: pMono, color: PC.text, textAlign: 'center', margin: '8px 0' }}>{pFmt(s)}<span style={{ fontSize: 14, color: PC.muted }}> of {planned} min</span></div>;
 }
 
+// ─────────────────────────────────────────────────────
+// BUILD v4-A · PART 4 — Today's three (Dr. Shobha's 21 days)
+// One Academic, one Other, one Self-nourishment step for the day. Calendar items are givens and are not part of the three.
+// practice:three:<YYYY_MM>: { month, entries: [{ id, at, date, kind, slot?, text, ledger? }] }, append-only. The start of the 21 days is
+// in practice:three-start: { start: 'YYYY-MM-DD', at }. Ledger text (ledger: { row, task, stepNum, stepAction }) is saved here only from
+// rows the work filter allows, as in practice:ramp. See docs/DATA-FORMAT.md.
+// ─────────────────────────────────────────────────────
+const P_SLOTS = [{ id: 'academic', label: 'Academic' }, { id: 'other', label: 'Other' }, { id: 'nourishment', label: 'Self-nourishment' }];
+const NW3 = { entries: [], start: undefined, loaded: false, offer: [], openAsk: false, subs: new Set() };
+const nw3Set = (patch) => { Object.assign(NW3, patch); NW3.subs.forEach(fn => fn()); };
+async function nwThreeLoad() {
+  try {
+    const r = await pRead(P_KEYS.three(pMonthKey()));
+    const s = await pRead(P_KEYS.threeStart);
+    nw3Set({ entries: r.data && Array.isArray(r.data.entries) ? r.data.entries : [], start: s.data && /^\d{4}-\d\d-\d\d$/.test(s.data.start || '') ? s.data.start : null });
+  } catch (_) { nw3Set({ start: NW3.start === undefined ? null : NW3.start }); }
+}
+function useThree() {
+  const [, setN] = useState(0);
+  useEffect(() => { const f = () => setN(n => n + 1); NW3.subs.add(f); if (!NW3.loaded) { NW3.loaded = true; nwThreeLoad(); } return () => { NW3.subs.delete(f); }; }, []);
+  return NW3;
+}
+const nwThreeToday = (d = new Date()) => NW3.entries.filter(e => e && e.date === pLocalISO(d));
+// The current pick for a slot and whether it is done: the last pick, and any done after it.
+function nwSlotState(mine, id) {
+  let at = -1;
+  mine.forEach((e, i) => { if (e.kind === 'pick' && e.slot === id) at = i; });
+  if (at < 0) return null;
+  return { pick: mine[at], done: mine.slice(at + 1).some(e => e.kind === 'done' && e.slot === id) };
+}
+function nwThreeAppend(entries) {
+  const now = new Date();
+  const made = entries.map((e, i) => ({ id: `t3_${(now.getTime() + i).toString(36)}${Math.random().toString(36).slice(2, 6)}`, at: new Date(now.getTime() + i).toISOString(), date: pLocalISO(now), ...e }));
+  return pUpdate(P_KEYS.three(pMonthKey(now)), () => ({ month: pMonthKey(now), entries: [] }), (doc) => {
+    doc.entries = Array.isArray(doc.entries) ? doc.entries : [];
+    made.forEach(m => doc.entries.push(m));
+    return doc;
+  }).then(doc => { nw3Set({ entries: doc.entries.slice() }); return { doc, made }; });
+}
+// One save with the shared Saved / Add note / Undo bar. Returns what nwLog returns, or null when it was not saved.
+function nwThreeLog(entries, what, setMsg) {
+  const first = entries[0];
+  return window.nwLog({
+    tab: 'practice', what, scope: `three:${first.kind}:${first.slot || ''}`, sig: JSON.stringify(entries.map(e => [e.kind, e.slot || '', e.text || ''])),
+    run: async () => {
+      try {
+        const { doc, made } = await nwThreeAppend(entries);
+        const ids = made.map(m => m.id), mk = pMonthKey(new Date(made[0].at));
+        return {
+          where: pWhere.get(doc) || 'cloud', ref: { id: ids[0], what },
+          undo: async () => { const d = await pUpdate(P_KEYS.three(mk), null, (x) => { x.entries = (x.entries || []).filter(q => !ids.includes(q.id)); return x; }); nw3Set({ entries: d.entries.slice() }); return pWhere.get(d) || 'cloud'; },
+        };
+      } catch (e) { setMsg && setMsg(`Not saved: ${e.message}`); return null; }
+    },
+  });
+}
+// The What now? options he can pick a slot from. Set when What now? answers.
+function nwThreeOffer(options) {
+  const steps = [];
+  (options || []).forEach(o => (o.steps || []).forEach(s => steps.push({ text: s.text, minutes: s.minutes, kind: s.kind || null, ledger: s.ledger || null })));
+  nw3Set({ offer: steps });
+}
+const nwThreePark = (text, setMsg) => nwThreeLog([{ kind: 'park', text: String(text).trim() }], `Parked: ${String(text).trim().slice(0, 40)}`, setMsg);
+// "Pick today's three" on the waking flow's last screen.
+function nwThreeAsk() { nw3Set({ openAsk: true }); }
+window.nwThreeAsk = nwThreeAsk; window.nwThreePark = nwThreePark;
+// The row behind a Ledger pick, when it is still open.
+const nwThreeRow = (rows, lg) => (lg ? (rows || []).find(r => r.row === lg.row && r.Parent_Task === lg.task) || null : null);
+const nwFirstStep = (r) => String(r.First_Physical_Step || '').trim() || String(r.Step_Action || '').trim();
+// One short line for Ask Claude, Something else, Coach me, Look outside (saved with the answer, so a Ledger step is not named) and What now?.
+function nwThreeLine() {
+  try {
+    const mine = nwThreeToday();
+    const parks = mine.filter(e => e.kind === 'park').length;
+    if (!mine.some(e => e.kind === 'pick') && !parks) return '';
+    const parts = P_SLOTS.map(s => {
+      const st = nwSlotState(mine, s.id);
+      if (!st) return `${s.label}: not picked`;
+      return `${s.label}: ${st.pick.ledger ? 'a Ledger step' : `"${String(st.pick.text || '').slice(0, 80)}"`}${st.done ? ' (done)' : ''}`;
+    });
+    return ` Today's three: ${parts.join('; ')}; parked thoughts: ${parks}.`;
+  } catch (_) { return ''; }
+}
+// The longer form for What now?: it is not saved, so a Ledger step is named, with its first physical step and minutes.
+function nwThreeText() {
+  try {
+    const mine = nwThreeToday();
+    const parks = mine.filter(e => e.kind === 'park').length;
+    if (!mine.some(e => e.kind === 'pick') && !parks) return '';
+    const lines = P_SLOTS.map(s => {
+      const st = nwSlotState(mine, s.id);
+      if (!st) return `- ${s.label}: not picked`;
+      const lg = st.pick.ledger, r = nwThreeRow(NWL.state.rows, lg);
+      const where = lg ? ` [Ledger row ${lg.row}: ${lg.task}${r ? `; first physical step: ${nwFirstStep(r)}${r.Hands_On_Mins ? `; ${nwMinsText(r.Hands_On_Mins)}` : ''}` : ''}]` : '';
+      return `- ${s.label}: ${st.pick.text}${where}${st.done ? ' — done' : ''}`;
+    });
+    return `Today's three (he picked these; start the options from the ones not done. Calendar events are givens and are not part of the three):\n${lines.join('\n')}\nParked thoughts today: ${parks} (not tasks).`;
+  } catch (_) { return ''; }
+}
+const nwThreeDayN = (start, now = new Date()) => {
+  const m = /^(\d{4})-(\d\d)-(\d\d)$/.exec(start || '');
+  if (!m) return null;
+  const a = new Date(+m[1], +m[2] - 1, +m[3]), b = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((b - a) / 86400000) + 1;
+};
+const nwMMSS = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+
+function ThreeCard() {
+  const T = useThree();
+  const L = useLedger();
+  const [busy, wrap] = window.useBusy();
+  const [msg, setMsg] = useState('');
+  const [chooser, setChooser] = useState(null);
+  const [doneSlot, setDoneSlot] = useState(null);
+  const [doneOp, setDoneOp] = useState(null);
+  const [opErr, setOpErr] = useState('');
+  const [parkOpen, setParkOpen] = useState(false);
+  const [startDate, setStartDate] = useState('');
+  const [ciStart, setCiStart] = useState(null);
+  const [, tick] = useState(0);
+  const [checkin, setCheckin, clearCheckin] = window.useDraft('practice', 'three-checkin', '');
+  const [parkText, setParkText, clearPark] = window.useDraft('practice', 'three-park', '');
+  const [ack, setAck, clearAck] = window.useDraft('practice', 'three-ack', '');
+  const [typed, setTyped, clearTyped] = window.useDraft('practice', 'three-typed', '');
+  const [appr, setAppr, clearAppr] = window.useDraft('practice', 'three-appreciate', '');
+  const ref = useRef(null);
+  const mine = nwThreeToday();
+  const g = nwLedgerGroups(L.rows);
+  const ledgerPicks = [...g.spark, ...g.week, ...g.soon].map(x => x.rows[0]).filter(r => r && !nwIsDone(r)).slice(0, 10);
+  useEffect(() => { if (!ciStart) return undefined; const iv = setInterval(() => tick(x => x + 1), 500); return () => clearInterval(iv); }, [ciStart]);
+  useEffect(() => {
+    const open = () => { if (!NW3.openAsk) return; NW3.openAsk = false; const first = P_SLOTS.find(s => !nwSlotState(nwThreeToday(), s.id)); setChooser((first || P_SLOTS[0]).id); try { ref.current && ref.current.scrollIntoView({ block: 'start', behavior: 'smooth' }); } catch (_) {} };
+    open(); NW3.subs.add(open);
+    return () => { NW3.subs.delete(open); };
+  }, []);
+  const total = Number(window.NW_CHECKIN_SECS) || 120;
+  const left = ciStart ? Math.max(0, total - Math.floor((Date.now() - ciStart) / 1000)) : total;
+  const dayN = nwThreeDayN(T.start);
+
+  const pickSlot = wrap(async (slot, text, ledger) => {
+    const label = P_SLOTS.find(s => s.id === slot).label;
+    const r = await nwThreeLog([{ kind: 'pick', slot, text: String(text).trim(), ...(ledger ? { ledger } : {}) }], `${label}: ${String(text).trim().slice(0, 40)}`, setMsg);
+    if (r && r.where) { setChooser(null); clearTyped(); setMsg(''); }
+  });
+  const ledgerOf = (r) => ({ row: r.row, task: r.Parent_Task, stepNum: r.Step_Num, stepAction: r.Step_Action });
+  const saveDone = wrap(async (slot) => {
+    const st = nwSlotState(nwThreeToday(), slot);
+    if (!st) return;
+    const label = P_SLOTS.find(s => s.id === slot).label;
+    const list = [{ kind: 'done', slot, text: st.pick.text, ...(st.pick.ledger ? { ledger: st.pick.ledger } : {}) }];
+    if (appr.trim()) list.push({ kind: 'appreciate', slot, text: appr.trim() });
+    const r = await nwThreeLog(list, `${label} done`, setMsg);
+    if (!r || !r.where) return;
+    clearAppr(); setDoneSlot(null); setMsg('');
+    const lg = st.pick.ledger;
+    if (lg) {
+      const lr = nwThreeRow(L.rows, lg);
+      if (lr && nwIsDone(lr)) return;
+      setDoneOp(lr ? nwMakeDoneOp(L.rows, lr, {}) : { kind: 'done', parent: lg.task, stepNum: lg.stepNum, stepAction: lg.stepAction, row: lg.row, completedAt: nwLedgerStamp() });
+      setOpErr('');
+    }
+  });
+  const sendDone = wrap(async () => {
+    const r = await nwLedgerSend(doneOp);
+    if (r.ok) { nwLedgerDoneBar(doneOp, r.where); setDoneOp(null); setOpErr(''); } else setOpErr(r.error);
+  });
+  const saveCheckin = wrap(async () => {
+    if (!checkin.trim()) return;
+    const r = await nwThreeLog([{ kind: 'checkin', text: checkin.trim() }], 'Check-in', setMsg);
+    if (r && r.where) { clearCheckin(); setCiStart(null); setMsg(''); }
+  });
+  const savePark = wrap(async () => {
+    if (!parkText.trim()) return;
+    const r = await nwThreePark(parkText, setMsg);
+    if (r && r.where) { clearPark(); setParkOpen(false); setMsg(''); }
+  });
+  const saveAck = wrap(async () => {
+    if (!ack.trim()) return;
+    const r = await nwThreeLog([{ kind: 'ack', text: ack.trim() }], 'Acknowledged', setMsg);
+    if (r && r.where) { clearAck(); setMsg(''); }
+  });
+  const saveStart = wrap(async () => {
+    if (!/^\d{4}-\d\d-\d\d$/.test(startDate)) return;
+    try {
+      const d = await pUpdate(P_KEYS.threeStart, () => ({}), () => ({ start: startDate, at: new Date().toISOString() }));
+      nw3Set({ start: startDate });
+      setMsg(pWhere.get(d) === 'device-only' ? 'Saved on this device only, not in the cloud yet: the start date.' : 'Saved: the start date.');
+    } catch (e) { setMsg(`Not saved: ${e.message}`); }
+  });
+  const parks = mine.filter(e => e.kind === 'park');
+  const checkinToday = mine.filter(e => e.kind === 'checkin');
+
+  return (
+    <div ref={ref} data-pr-three style={pCard()}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }}>
+        <div style={{ ...pLabel, marginBottom: 0, flex: 1 }}>Today's three</div>
+        {dayN != null && <div data-pr-three-day style={{ fontSize: 13, color: PC.muted }}>{dayN > 21 ? 'Day 21 done.' : dayN < 1 ? `Day 1 is ${T.start}` : `Day ${dayN} of 21`}</div>}
+      </div>
+      {T.start === null && (
+        <div data-pr-three-start style={{ marginBottom: 10 }}>
+          <label htmlFor="pr-three-start" style={{ fontSize: 14, color: PC.text, display: 'block', marginBottom: 4 }}>Day 1 of Dr. Shobha's 21 days was:</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input id="pr-three-start" type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={{ ...pInput, flex: 1 }} />
+            <button style={pBtn('solid')} disabled={busy || !startDate} onClick={saveStart}>Save</button>
+          </div>
+        </div>
+      )}
+      <div style={{ fontSize: 12, color: PC.muted, marginBottom: 8 }}>Calendar items are givens. They are not part of the three.</div>
+
+      <details data-pr-three-checkin style={{ marginBottom: 10 }}>
+        <summary style={{ fontSize: 14, color: PC.text, cursor: 'pointer' }}>Check-in (optional){checkinToday.length ? ` · saved ${pHM(checkinToday[checkinToday.length - 1].at)}` : ''}</summary>
+        <div style={{ marginTop: 6 }}>
+          <label htmlFor="pr-three-checkin" style={{ fontSize: 14, color: PC.text, display: 'block', marginBottom: 4 }}>What got done from yesterday's three? Where are you now?</label>
+          <div data-pr-three-clock aria-live="off" style={{ fontSize: 28, fontFamily: pMono, color: ciStart && left === 0 ? PC.warn : PC.text, marginBottom: 4 }}>{nwMMSS(left)}</div>
+          {ciStart && left === 0 && <div role="status" style={{ fontSize: 14, color: PC.warn, marginBottom: 4 }}>Time. Save what you have.</div>}
+          <textarea id="pr-three-checkin" rows={3} value={checkin} onChange={e => { setCheckin(e.target.value); if (!ciStart && e.target.value.trim()) setCiStart(Date.now()); }} placeholder="The clock starts when you start typing" style={{ ...pInput, minHeight: 70, marginBottom: 6, resize: 'vertical' }} />
+          <button style={pBtn('solid', { width: '100%' })} disabled={busy || !checkin.trim()} onClick={saveCheckin}>Save check-in</button>
+        </div>
+      </details>
+
+      {P_SLOTS.map(sl => {
+        const st = nwSlotState(mine, sl.id);
+        const lg = st && st.pick.ledger, r = nwThreeRow(L.rows, lg);
+        return (
+          <div key={sl.id} data-pr-three-slot={sl.id} style={{ borderTop: `1px solid ${PC.border}`, padding: '8px 0' }}>
+            <div style={{ fontSize: 12, color: PC.muted, letterSpacing: 1, textTransform: 'uppercase' }}>{sl.label}</div>
+            {!st && <div style={{ fontSize: 14, color: PC.muted, margin: '2px 0 6px' }}>Not picked yet.</div>}
+            {st && (
+              <div style={{ margin: '2px 0 6px', opacity: st.done ? 0.6 : 1 }}>
+                <div style={{ fontSize: 16, color: PC.text, fontWeight: 600, lineHeight: 1.4, overflowWrap: 'anywhere' }}>{st.done ? '✓ ' : ''}{st.pick.text}</div>
+                {lg && <div style={{ fontSize: 13, color: PC.muted }}>{lg.task}{r ? ` · first step: ${nwFirstStep(r)}${r.Hands_On_Mins ? ` · ${nwMinsText(r.Hands_On_Mins)}` : ''}` : ''}</div>}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <button style={pBtn(st ? 'ghost' : 'solid', { flex: 1, minHeight: 44 })} onClick={() => { setChooser(chooser === sl.id ? null : sl.id); setDoneSlot(null); }}>{st ? 'Change' : 'Pick'}</button>
+              {st && !st.done && <button style={pBtn('solid', { flex: 1, minHeight: 44 })} onClick={() => { setDoneSlot(doneSlot === sl.id ? null : sl.id); setChooser(null); }}>Done</button>}
+            </div>
+            {doneSlot === sl.id && (
+              <div data-pr-three-done style={{ marginTop: 8 }}>
+                <label htmlFor={`pr-three-appr-${sl.id}`} style={{ fontSize: 13, color: PC.muted, display: 'block', marginBottom: 4 }}>I appreciate that I… (optional)</label>
+                <input id={`pr-three-appr-${sl.id}`} value={appr} onChange={e => setAppr(e.target.value)} style={{ ...pInput, marginBottom: 6 }} />
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button style={pBtn('solid', { flex: 2 })} disabled={busy} onClick={() => saveDone(sl.id)}>Done{lg ? ', then the Ledger' : ''}</button>
+                  <button style={pBtn('ghost', { flex: 1 })} onClick={() => setDoneSlot(null)}>Cancel</button>
+                </div>
+              </div>
+            )}
+            {chooser === sl.id && (
+              <div data-pr-three-chooser style={{ marginTop: 8 }}>
+                {ledgerPicks.length > 0 && <div style={pLabel}>From the Ledger</div>}
+                {ledgerPicks.map(r2 => (
+                  <button key={r2.row} data-pr-three-ledger style={pBtn('ghost', { width: '100%', textAlign: 'left', marginBottom: 4, display: 'block' })} disabled={busy} onClick={() => pickSlot(sl.id, nwFirstStep(r2), ledgerOf(r2))}>
+                    <div style={{ fontSize: 14, color: PC.text }}>{nwFirstStep(r2)}</div>
+                    <div style={{ fontSize: 12, color: PC.muted, fontWeight: 400 }}>{r2.Parent_Task}{r2.Hands_On_Mins ? ` · ${nwMinsText(r2.Hands_On_Mins)}` : ''}</div>
+                  </button>
+                ))}
+                {T.offer.length > 0 && <div style={pLabel}>From What now?</div>}
+                {T.offer.map((s, i) => (
+                  <button key={i} data-pr-three-offer style={pBtn('ghost', { width: '100%', textAlign: 'left', marginBottom: 4, display: 'block' })} disabled={busy} onClick={() => pickSlot(sl.id, s.text, s.ledger)}>
+                    <div style={{ fontSize: 14, color: PC.text }}>{s.text}</div>
+                    <div style={{ fontSize: 12, color: PC.muted, fontWeight: 400 }}>{s.minutes} min{s.kind ? ` · ${P_KIND_LABEL[s.kind] || s.kind}` : ''}</div>
+                  </button>
+                ))}
+                <div style={pLabel}>Or type your own</div>
+                <input aria-label={`${sl.label}: type your own`} value={typed} onChange={e => setTyped(e.target.value)} style={{ ...pInput, marginBottom: 6 }} />
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button style={pBtn('solid', { flex: 2 })} disabled={busy || !typed.trim()} onClick={() => pickSlot(sl.id, typed, null)}>Use this</button>
+                  <button style={pBtn('ghost', { flex: 1 })} onClick={() => setChooser(null)}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {doneOp && <LedgerPreview op={doneOp} busy={busy} error={opErr} onConfirm={sendDone} onCancel={() => { setDoneOp(null); setOpErr(''); }} />}
+
+      <div style={{ borderTop: `1px solid ${PC.border}`, paddingTop: 8 }}>
+        <button data-pr-three-park style={pBtn('ghost', { width: '100%', minHeight: 44 })} onClick={() => setParkOpen(o => !o)}>Park a thought</button>
+        {parkOpen && (
+          <div style={{ marginTop: 6 }}>
+            <input aria-label="Park a thought (one line)" value={parkText} onChange={e => setParkText(e.target.value)} placeholder="One line" style={{ ...pInput, marginBottom: 6 }} />
+            <button style={pBtn('solid', { width: '100%' })} disabled={busy || !parkText.trim()} onClick={savePark}>Park it</button>
+          </div>
+        )}
+        {parks.length > 0 && (
+          <details data-pr-three-parked style={{ marginTop: 6 }}>
+            <summary style={{ fontSize: 14, color: PC.muted, cursor: 'pointer' }}>Parked ({parks.length}) · not tasks</summary>
+            {parks.map(p => <div key={p.id} style={{ fontSize: 14, color: PC.text, padding: '4px 0', overflowWrap: 'anywhere' }}><span style={{ fontFamily: pMono, color: PC.muted }}>{pHM(p.at)}</span> {p.text}</div>)}
+          </details>
+        )}
+      </div>
+
+      <div style={{ borderTop: `1px solid ${PC.border}`, paddingTop: 8, marginTop: 8 }}>
+        <label htmlFor="pr-three-ack" style={pLabel}>Acknowledge</label>
+        <textarea id="pr-three-ack" rows={2} value={ack} onChange={e => setAck(e.target.value)} placeholder="One or two lines: what you did, and that you did it" style={{ ...pInput, minHeight: 56, marginBottom: 6, resize: 'vertical' }} />
+        <button style={pBtn('solid', { width: '100%' })} disabled={busy || !ack.trim()} onClick={saveAck}>Save</button>
+      </div>
+      {msg && <div role="status" style={{ fontSize: 13, color: PC.warn, marginTop: 8 }}>{msg}</div>}
+    </div>
+  );
+}
+
+// Words that tend to ride with all-or-nothing thinking: When they are in what he wrote, the Mirror (his own record) is one tap away.
+const P_ALL_OR_NOTHING = /\b(always|never|nothing|every time|wasted|ruined)\b/i;
 function WhatNow({ todayLog, onLog, feedbackWords }) {
   const L = useLedger();
   const [words, setWords, clearWords] = window.useDraft('practice', 'whatnow', '');
@@ -13337,11 +13654,12 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
     setSt(s => ({ ...s, busy: true, err: '' }));
     try {
       const past = feedback && st.past ? st.past : await pPastDumps(words);
-      const { result, saved, usage } = await pWhatNow({ words, rows: sentRows, rules: L.rules, log: todayLog, feedback, past, givens: nwGivensText() });
+      const { result, saved, usage } = await pWhatNow({ words, rows: sentRows, rules: L.rules, log: todayLog, feedback, past, givens: nwGivensText(), three: nwThreeText() });
       let where = null, rampId = null;
       try { const { doc, entry } = await pAddRamp({ words, result, usage, kind: feedback ? 'what-now-again' : 'what-now', feedback, of: st.rampId || undefined }); where = pWhere.get(doc) || 'cloud'; rampId = entry.id; window.nwShowBar({ tab: 'practice', mode: 'saved', what: 'What now? result', where, ref: { what: 'What now? result' } }); }
       catch (e) { setMsg(`❌ The result was not saved: ${e.message}`); }
-      setSt({ busy: false, err: '', res: result, rampId, saved, whereSaved: where, past });
+      nwThreeOffer(result.options);
+      setSt({ busy: false, err: '', res: result, rampId, saved, whereSaved: where, past, askedWords: words });
       setChosen(null); setPlan([]); setRun(null); setDoneOp(null);
       if (!feedback) clearWords(); else clearMisfit();
     } catch (e) { setSt(s => ({ ...s, busy: false, err: e.message, saved: e.saved, retryFb: feedback })); }
@@ -13383,6 +13701,9 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
       <textarea aria-label="What is in your head" rows={4} value={words} onChange={e => setWords(e.target.value)} placeholder="Type, or use the mic on your keyboard: everything that is in your head" style={{ ...pInput, minHeight: 90, marginBottom: 8, resize: 'vertical' }} />
       <button style={pBtn('solid', { width: '100%' })} disabled={!online || st.busy || !words.trim()} onClick={() => ask()}>{st.busy ? 'Thinking…' : 'What now?'}</button>
       {!online && <div style={{ fontSize: 12, color: PC.muted, marginTop: 6 }}>What now needs internet. Your words are kept in the box.</div>}
+      {P_ALL_OR_NOTHING.test(`${words} ${st.askedWords || ''}`) && NW_QUICK.some(q => q.id === 'mirror') && (
+        <button data-pr-now-mirror style={pBtn('ghost', { width: '100%', marginTop: 6 })} onClick={() => window.dispatchEvent(new CustomEvent('nw-open-quick', { detail: 'mirror' }))}>Compare with your record (Mirror)</button>
+      )}
       {st.err && <PNote msg={`❌ ${st.err}`} />}
       {st.err && <button data-pr-now-retry style={pBtn('ghost', { width: '100%', marginTop: 6 })} disabled={!online || st.busy || !words.trim()} onClick={() => ask(st.retryFb)}>Try again</button>}
       {msg && <div role="status" style={{ fontSize: 13, color: PC.text, marginTop: 8 }}>{msg}</div>}
@@ -13451,7 +13772,7 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
               <summary style={{ fontSize: 14, color: PC.muted, cursor: 'pointer' }}>Parked worries ({res.parked.length}) · not tasks</summary>
               {res.parked.map((p, i) => (
                 <div key={i} style={{ fontSize: 14, color: PC.text, padding: '6px 0', borderBottom: `1px solid ${PC.border}` }}>
-                  {p} <button style={pBtn('ghost', { minHeight: 32, padding: '2px 8px', fontSize: 12 })} disabled={busy2} onClick={() => toDump(p, 'note:')}>To Brain Dump</button>
+                  {p} <button data-pr-now-park style={pBtn('ghost', { minHeight: 32, padding: '2px 8px', fontSize: 12 })} disabled={busy2} onClick={() => nwThreePark(p, setMsg)}>Park</button> <button style={pBtn('ghost', { minHeight: 32, padding: '2px 8px', fontSize: 12 })} disabled={busy2} onClick={() => toDump(p, 'note:')}>To Brain Dump</button>
                 </div>
               ))}
             </details>
