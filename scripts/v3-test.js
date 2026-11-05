@@ -390,7 +390,7 @@ async function part2() {
     await page.locator('[data-pr-ledger-open]').first().click();
     await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Put the tax folder' }).getByRole('button', { name: 'Done', exact: true }).click();
     let pv = await page.locator('[data-pr-ledger-preview]').innerText();
-    ok(pv.includes('Done → TRUE') && /Completed_At → 2026-11-03T/.test(pv) && !pv.includes('Actual_Mins'), 'preview shows exactly what changes');
+    ok(pv.includes('Done → TRUE') && /Completed_At → 2026-11-03 08:\d\d$/m.test(pv) && !pv.includes('Actual_Mins'), 'preview shows exactly what changes');
     ok(writes(fake).length === 0, 'nothing is written before the tap');
     await clickName(page, 'Cancel');
     ok(writes(fake).length === 0 && await page.locator('[data-pr-ledger-preview]').count() === 0, 'Cancel writes nothing');
@@ -398,7 +398,7 @@ async function part2() {
     await clickName(page, 'Confirm and send');
     await wait(page, 800);
     let w = writes(fake, 'update');
-    ok(w.length === 2 && w.some(x => x.range === 'Ledger!A2' && x.values[0][0] === true) && w.some(x => x.range === 'Ledger!M2' && /^2026-11-03T/.test(x.values[0][0])), 'Done = TRUE and Completed_At = ISO time, only those two cells → ' + w.map(x => x.range).join(', '));
+    ok(w.length === 2 && w.some(x => x.range === 'Ledger!A2' && x.values[0][0] === true) && w.some(x => x.range === 'Ledger!M2' && /^2026-11-03 08:\d\d$/.test(x.values[0][0])), 'Done = TRUE and Completed_At = ISO time, only those two cells → ' + w.map(x => x.range).join(', '));
     ok(fake.sheets.Ledger[1][0] === true && fake.sheets.Ledger[1][12].startsWith('2026-11-03T'), 'the sheet has them');
     ok(/Saved/.test(await page.locator('[data-nw-savedbar]').first().innerText()), 'the Saved bar says Saved (the Ledger has it)');
     await finish(ctx, 'ledger done');

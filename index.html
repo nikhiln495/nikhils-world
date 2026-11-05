@@ -12387,9 +12387,23 @@ function nwMakeDoneOp(allRows, r, extra = {}) {
   const sib = allRows.filter(x => x.Parent_Task === r.Parent_Task);
   const lastOpen = sib.every(x => x.row === r.row || nwIsDone(x));
   const doneBucket = (allRows.find(x => /DONE LOG/i.test(x.Bucket || '')) || {}).Bucket || '';
-  return { kind: 'done', parent: r.Parent_Task, stepNum: r.Step_Num, stepAction: r.Step_Action, row: r.row, completedAt: new Date().toISOString(),
+  return { kind: 'done', parent: r.Parent_Task, stepNum: r.Step_Num, stepAction: r.Step_Action, row: r.row, completedAt: nwLedgerStamp(),
     ...(lastOpen && doneBucket && !/DONE LOG/i.test(r.Bucket || '') ? { moveTo: doneBucket, moveCount: sib.length } : {}), ...extra };
 }
+// The Ledger's own time format for Completed_At: "YYYY-MM-DD HH:mm" in this device's local time (its cells read "2026-10-31 16:18").
+function nwLedgerStamp(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+// Reads a Completed_At cell in either form: "2026-10-31 16:18" (local time) or an ISO time such as "2026-10-31T20:18:00.000Z". Returns a Date or null.
+function nwParseCompleted(v) {
+  const t = String(v == null ? '' : v).trim();
+  let m = t.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/);
+  if (m) return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+  if (/^\d{4}-\d{2}-\d{2}T/.test(t)) { const d = new Date(t); return isNaN(d) ? null : d; }
+  return null;
+}
+window.nwLedgerStamp = nwLedgerStamp; window.nwParseCompleted = nwParseCompleted;
 function nwOpPreview(op) {
   if (op.kind === 'done') return { title: `Mark done: ${op.parent} · ${nwStepLabel(op.stepNum)}`, lines: [`Done → TRUE`, `Completed_At → ${op.completedAt}`, ...(op.actualMins ? [`Actual_Mins → ${op.actualMins}`] : []), ...(op.moveTo ? [`Bucket → ${op.moveTo} (all ${op.moveCount} step${op.moveCount === 1 ? '' : 's'} of this task: it was the last open step)`] : [])] };
   if (op.kind === 'comment') return { title: `Add a comment: ${op.parent} · ${nwStepLabel(op.stepNum)}`, lines: [`Comments → add a new line at the end: ${op.line}`] };
@@ -12509,13 +12523,74 @@ async function nwLedgerSend(op) {
 }
 const nwLedgerDoneBar = (op, where) => window.nwShowBar({ tab: 'practice', mode: 'saved', what: `Ledger: ${nwOpSummary(op)}`, where: where === 'cloud' ? 'cloud' : 'device-only', ref: { what: `Ledger: ${nwOpSummary(op)}` } });
 
+// ── Part 2 (v4-A): the Ledger found in Drive by its name, so a new device needs no pasted link ──
+// The link stays on this device only (NW_DEV.link); how it was found is kept beside it, also device-only (name starts with __nw).
+const NW_LEDGER_HOW = '__nw_ledger_how';
+const NW_LEDGER_NAME = '⚡ Universal Spark Ledger — Work, Academic & Personal';
+// Spreadsheets he owns, not in the trash, newest first: first the exact name, then any name that contains "Universal Spark Ledger".
+async function nwLedgerFind() {
+  const base = "mimeType='application/vnd.google-apps.spreadsheet' and 'me' in owners and trashed=false";
+  const list = async (cond) => ((await nwGFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(`${base} and ${cond}`)}&orderBy=${encodeURIComponent('modifiedTime desc')}&pageSize=10&fields=files(id,name,modifiedTime)`)).files || []);
+  let files = await list(`name='${NW_LEDGER_NAME.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`), how = 'name';
+  if (!files.length) { files = await list("name contains 'Universal Spark Ledger'"); how = 'contains'; }
+  return { files, how };
+}
+function nwLedgerUse(f, how) {
+  nwDev.set(NW_DEV.link, `https://docs.google.com/spreadsheets/d/${f.id}`);
+  nwDev.set(NW_LEDGER_HOW, { how, name: f.name, at: new Date().toISOString() });
+  nwLSession.formulaCols = null;
+  return nwLedgerLoad({ force: true });
+}
+// Runs after Connect Google (or from the Find button) when this device has no link. One match: used. Several: a list. None: says so.
+async function nwLedgerAutoFind({ force } = {}) {
+  if (nwDev.get(NW_DEV.link, '') && !force) return 'has-link';
+  nwLSet({ finding: true, pick: null, findMsg: '' });
+  try {
+    const { files, how } = await nwLedgerFind();
+    if (files.length === 1) { nwLSet({ finding: false, findMsg: `Found "${files[0].name}" in your Drive and linked it on this device.` }); await nwLedgerUse(files[0], how); return 'found'; }
+    if (files.length > 1) { nwLSet({ finding: false, pick: { files, how } }); return 'several'; }
+    nwLSet({ finding: false, findMsg: 'No Ledger spreadsheet found in your Drive. Paste its link on the System tab.' });
+    return 'none';
+  } catch (e) { nwLSet({ finding: false, findMsg: nwGErr(e, 'Drive') }); return 'error'; }
+}
+const nwLedgerHowText = () => {
+  const link = nwDev.get(NW_DEV.link, ''), h = nwDev.get(NW_LEDGER_HOW, null);
+  if (!link) return '';
+  const id = `…${nwSheetId(link).slice(-6)}`;
+  if (!h) return `Sheet in use: ${id}. Its link was already on this device.`;
+  const how = { name: 'found in your Drive by its exact name', contains: 'found in your Drive by part of its name', picked: 'picked by you from a list', pasted: 'a link you pasted' }[h.how] || h.how;
+  return `Sheet in use: ${h.name ? `"${h.name}" ` : ''}${id}. How it was found: ${how}.`;
+};
+// The one-tap list when Drive has several matching spreadsheets; also the "finding" and "none found" lines.
+function LedgerFind() {
+  const L = useLedger();
+  if (!L.finding && !L.pick && !L.findMsg) return null;
+  return (
+    <div data-pr-ledger-find style={{ marginBottom: 8 }}>
+      {L.finding && <div role="status" style={{ fontSize: 13, color: PC.muted }}>Looking for the Ledger in your Drive…</div>}
+      {L.findMsg && <div role="status" style={{ fontSize: 13, color: PC.text }}>{L.findMsg}</div>}
+      {L.pick && (
+        <div>
+          <div style={{ fontSize: 13, color: PC.text, marginBottom: 6 }}>More than one spreadsheet matches. Tap the one to use:</div>
+          {L.pick.files.map(f => (
+            <button key={f.id} data-pr-ledger-pick style={pBtn('ghost', { width: '100%', textAlign: 'left', marginBottom: 4, display: 'block' })} onClick={() => { nwLSet({ pick: null, findMsg: `Using "${f.name}" on this device.` }); nwLedgerUse(f, 'picked'); }}>
+              <div style={{ fontSize: 14, color: PC.text }}>{f.name}</div>
+              <div style={{ fontSize: 12, color: PC.muted, fontWeight: 400 }}>Changed {f.modifiedTime ? new Date(f.modifiedTime).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'unknown'}</div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConnectGoogle({ onDone }) {
   const [err, setErr] = useState('');
   return (
     <div>
       <button data-pr-connect style={pBtn('solid', { width: '100%' })} onClick={async () => {
         setErr('');
-        try { await window.nwGoogle.connect(); onDone && onDone(); }
+        try { await window.nwGoogle.connect(); if (!nwDev.get(NW_DEV.link, '')) nwLedgerAutoFind(); onDone && onDone(); }
         catch (e) { setErr(/popup_closed|access_denied/.test(String(e.message || e)) ? 'Google sign-in was closed. Try again.' : `Google sign-in failed: ${e.message || e}`); }
       }}>Connect Google</button>
       {err && <div role="alert" style={{ fontSize: 13, color: PC.bad, marginTop: 6 }}>{err}</div>}
@@ -12619,7 +12694,7 @@ function LedgerStrip() {
     setSendMsg(failed ? `Sent ${sent}. ${failed}` : `Sent ${sent} to the Ledger.`);
     await nwLedgerLoad();
   });
-  const need = L.error && /Not signed in/.test(L.error);
+  const need = (L.error && /Not signed in/.test(L.error)) || (!L.linked && !(window.nwGoogle && window.nwGoogle.token()));
   const total = g.spark.length + g.week.length + g.soon.length;
   const sec = (title, list) => !list.length ? null : (
     <div style={{ marginBottom: 8 }}>
@@ -12644,7 +12719,15 @@ function LedgerStrip() {
       </div>
       {L.error && <div data-pr-ledger-error role="status" style={{ fontSize: 13, color: PC.warn, marginBottom: 6 }}>{L.error}</div>}
       {need && <div style={{ marginBottom: 8 }}><ConnectGoogle onDone={() => nwLedgerLoad({ force: true })} /></div>}
+      <LedgerFind />
+      {!L.linked && !need && !L.finding && !L.pick && window.nwGoogle && window.nwGoogle.token() && <div style={{ marginBottom: 8 }}><button data-pr-ledger-findbtn style={pBtn('solid', { width: '100%' })} onClick={() => nwLedgerAutoFind()}>Find the Ledger in my Drive</button></div>}
       {L.readAt && <div style={{ fontSize: 12, color: PC.muted, marginBottom: 6 }}>{L.fromCache ? 'From this device, read' : 'Read'} {pTimeHM(new Date(L.readAt))}{L.hidden ? ` · ${L.hidden} work rows kept out` : ''}</div>}
+      {L.readAt && L.hidden > 0 && (
+        <details data-pr-ledger-hidden style={{ fontSize: 12, color: PC.muted, marginBottom: 6 }}>
+          <summary style={{ cursor: 'pointer' }}>Which rows are kept out, and why</summary>
+          <div style={{ lineHeight: 1.5, marginTop: 4 }}>A row is kept out when its Bucket, Domain or Trello_Board names VINE, ASMP, STARR, RTI or Work, or when another step of the same task does. They are dropped on this phone as soon as the sheet is read, so they are never shown here and never sent to Claude. They are not meant to be brought in; open the sheet itself to see them. Google's Sheets service does the reading, signed in as you. Claude only sees the open rows that remain.</div>
+        </details>
+      )}
       {L.readAt && !total && <div style={{ fontSize: 14, color: PC.muted }}>Nothing open in Today Spark, This Week, or due in 14 days.</div>}
       {sec('Today Spark', g.spark)}
       {sec('This week', g.week)}
@@ -12670,23 +12753,27 @@ function NwLedgerSetup({ active }) {
   const [text, setText] = useState('');
   const [msg, setMsg] = useState('');
   const L = useLedger();
-  useEffect(() => { if (active) setLink(nwDev.get(NW_DEV.link, '')); }, [active]);
+  useEffect(() => { if (active) setLink(nwDev.get(NW_DEV.link, '')); }, [active, L.linked, L.readAt]);
   const save = () => {
     const id = nwSheetId(text);
     if (!id) { setMsg('That is not a Google Sheets link.'); return; }
-    nwDev.set(NW_DEV.link, text.trim()); setLink(text.trim()); setText(''); setMsg('Link saved on this device only.');
+    nwDev.set(NW_DEV.link, text.trim()); nwDev.set(NW_LEDGER_HOW, { how: 'pasted', name: '', at: new Date().toISOString() }); setLink(text.trim()); setText(''); setMsg('Link saved on this device only.');
+    nwLSet({ pick: null, findMsg: '' });
     nwLSession.formulaCols = null;
     nwLedgerLoad({ force: true });
   };
-  const remove = () => { nwDev.del(NW_DEV.link); nwDev.del(NW_DEV.cache); setLink(''); setMsg('Link and the stored Ledger copy removed from this device.'); nwLSet({ rows: [], rules: [], readAt: null, linked: false, error: nwGErr({ code: 'no-link' }) }); };
+  const remove = () => { nwDev.del(NW_DEV.link); nwDev.del(NW_DEV.cache); nwDev.del(NW_LEDGER_HOW); setLink(''); setMsg('Link and the stored Ledger copy removed from this device.'); nwLSet({ rows: [], rules: [], readAt: null, linked: false, pick: null, findMsg: '', error: nwGErr({ code: 'no-link' }) }); };
   const signedIn = !!(window.nwGoogle && window.nwGoogle.token());
   const lab = { fontSize: 11, color: '#aaa', letterSpacing: 1, marginBottom: 8 };
   return (
     <div data-nw-ledger-setup style={{ background: '#1a1a1a', padding: 16, borderRadius: 12, border: '1px solid #333', marginBottom: 16 }}>
       <div style={lab}>LEDGER (GOOGLE SHEET)</div>
-      <div style={{ fontSize: 13, color: '#ccc', lineHeight: 1.5, marginBottom: 8 }}>
-        {link ? `Linked on this device: …${nwSheetId(link).slice(-6)}` : 'Paste the Ledger link once on each device. It stays on this device only: never in the repo or the database.'}
+      <div data-nw-ledger-how style={{ fontSize: 13, color: '#ccc', lineHeight: 1.5, marginBottom: 8 }}>
+        {link ? nwLedgerHowText() : 'Connect Google and the Ledger is found in your Drive by its name. The link stays on this device only: never in the repo or the database.'}
       </div>
+      {!link && signedIn && !L.finding && <button data-pr-ledger-findbtn onClick={() => nwLedgerAutoFind()} style={{ width: '100%', padding: 12, background: '#4ECDC4', color: '#0f0f0f', border: 'none', borderRadius: 8, fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer', marginBottom: 8 }}>Find the Ledger in my Drive</button>}
+      <LedgerFind />
+      <div style={{ fontSize: 12, color: '#aaa', marginBottom: 4 }}>Use a different sheet: paste its link</div>
       {/* Not a draft: a draft would be saved to the database; this link must stay on this device. */}
       <input aria-label="Ledger link" value={text} onChange={e => { setText(e.target.value); setMsg(''); }} placeholder="https://docs.google.com/spreadsheets/d/…" style={{ width: '100%', boxSizing: 'border-box', padding: 10, background: '#0a0a0a', color: '#eee', border: '1px solid #444', borderRadius: 6, fontFamily: 'inherit', fontSize: 13, marginBottom: 8 }} />
       <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
@@ -13104,7 +13191,7 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
     const actual = Math.max(1, Math.round((run.mins !== '' ? +run.mins * 60000 : Date.now() - run.startedAt) / 60000));
     const ok = await onLog({ practiceId: 'what-now', source: 'app', rampId: st.rampId || undefined, stepIndex: run.i + 1, actualMins: actual, plannedMins: s.minutes, ...(s.ledger ? { ledgerStep: true } : { note: s.text }), ...(run.note.trim() ? { myNote: run.note.trim() } : {}) });
     if (!ok) return;
-    if (s.ledger) { const lr = L.rows.find(x => x.row === s.ledger.row); setDoneOp(lr ? nwMakeDoneOp(L.rows, lr, { actualMins: `${actual} mins` }) : { kind: 'done', parent: s.ledger.task, stepNum: s.ledger.stepNum, stepAction: s.ledger.stepAction, row: s.ledger.row, completedAt: new Date().toISOString(), actualMins: `${actual} mins` }); }
+    if (s.ledger) { const lr = L.rows.find(x => x.row === s.ledger.row); setDoneOp(lr ? nwMakeDoneOp(L.rows, lr, { actualMins: `${actual} mins` }) : { kind: 'done', parent: s.ledger.task, stepNum: s.ledger.stepNum, stepAction: s.ledger.stepAction, row: s.ledger.row, completedAt: nwLedgerStamp(), actualMins: `${actual} mins` }); }
     setRun(null);
     setPlan(p => p.map((x, j) => (j === run.i ? { ...x, done: true } : x)));
   });

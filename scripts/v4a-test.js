@@ -153,9 +153,108 @@ async function part1() {
   }
 }
 
+// ───────────────────────── Part 2 ─────────────────────────
+const LEDGER_NAME = '⚡ Universal Spark Ledger — Work, Academic & Personal';
+const driveCalls = (fake) => fake.calls.filter(c => /\/drive\/v3\/files/.test(c.url));
+async function openNoLink(fake) {
+  const ctx = await openPractice({ seed: baseSeed(), now: '2026-11-03T08:10:00', google: fake.handler, googleStub: true });
+  await wait(ctx.page, 600);
+  return ctx;
+}
+async function part2() {
+  console.log('\n[2.1 Connect Google finds the Ledger by its exact name]');
+  {
+    const fake = newFake({ driveFiles: [
+      { id: G.SHEET_ID, name: LEDGER_NAME, modifiedTime: '2026-11-03T10:00:00Z' },
+      { id: 'OTHER_SHEET_ID_00000001', name: 'Budget 2026', modifiedTime: '2026-11-04T10:00:00Z' },
+    ] });
+    const ctx = await openNoLink(fake);
+    const { page } = ctx;
+    ok((await stripText(page)).includes('No Ledger link yet'), 'a device with no link says so');
+    await page.locator('[data-pr-ledger] [data-pr-connect]').click().catch(async () => { await page.locator('[data-pr-ledger] [data-pr-connect]').click(); });
+    await page.waitForSelector('[data-pr-ledger-open]');
+    ok((await stripText(page)).includes('File the tax form') && /Found .*Universal Spark Ledger.* linked it on this device/.test(await stripText(page)), 'one match: used at once, and the Ledger reads');
+    const q = decodeURIComponent(driveCalls(fake)[0].url);
+    ok(q.includes("name='" + LEDGER_NAME + "'") && q.includes("'me' in owners") && q.includes('trashed=false') && q.includes('application/vnd.google-apps.spreadsheet') && q.includes('orderBy=modifiedTime desc'), 'the search asks for the exact name, owned by him, not trashed, newest first');
+    const stored = await page.evaluate(() => localStorage.getItem('__nw_ledger_link'));
+    const inDb = await page.evaluate(() => JSON.stringify([...window.__mem.entries()]));
+    ok(stored && stored.includes(G.SHEET_ID) && !inDb.includes(G.SHEET_ID), 'the link is kept in the device-only key, not in the database');
+    ok(!HTML.includes(G.SHEET_ID) && !/docs\.google\.com\/spreadsheets\/d\/[A-Za-z0-9_-]{25,}/.test(HTML), 'no sheet link or id is in index.html');
+    await page.getByRole('button', { name: 'System', exact: true }).click();
+    const how = await page.locator('[data-nw-ledger-how]').innerText();
+    ok(how.includes(LEDGER_NAME) && /found in your Drive by its exact name/.test(how), 'the System tab names the sheet and how it was found');
+    ok((await page.locator('[data-nw-ledger-setup]').innerText()).includes('Use a different sheet'), 'the paste box is "Use a different sheet"');
+    await finish(ctx, 'found by name');
+  }
+
+  console.log('\n[2.1 several matches: a one-tap list]');
+  {
+    const fake = newFake({ driveFiles: [
+      { id: 'OLDER_LEDGER_ID_0000001', name: LEDGER_NAME, modifiedTime: '2026-09-10T10:00:00Z' },
+      { id: G.SHEET_ID, name: LEDGER_NAME, modifiedTime: '2026-11-03T10:00:00Z' },
+    ] });
+    const ctx = await openNoLink(fake);
+    const { page } = ctx;
+    await page.locator('[data-pr-ledger] [data-pr-connect]').click();
+    await page.waitForSelector('[data-pr-ledger-pick]');
+    const items = await page.locator('[data-pr-ledger] [data-pr-ledger-pick]').allInnerTexts();
+    ok(items.length === 2 && items.every(t => t.includes(LEDGER_NAME)) && /Nov 3, 2026/.test(items[0]) && /Sep 10, 2026/.test(items[1]), 'names and modified dates, newest first');
+    ok(await page.evaluate(() => localStorage.getItem('__nw_ledger_link')) === null, 'nothing is chosen for him');
+    await page.locator('[data-pr-ledger] [data-pr-ledger-pick]').first().click();
+    await page.waitForSelector('[data-pr-ledger-open]');
+    ok((await page.evaluate(() => localStorage.getItem('__nw_ledger_link'))).includes(G.SHEET_ID), 'one tap uses that sheet');
+    await page.getByRole('button', { name: 'System', exact: true }).click();
+    ok(/picked by you from a list/.test(await page.locator('[data-nw-ledger-how]').innerText()), 'the System tab says it was picked from a list');
+    await finish(ctx, 'picker');
+  }
+
+  console.log('\n[2.1 fallback by part of the name; none found → the paste box]');
+  {
+    const fake = newFake({ driveFiles: [{ id: G.SHEET_ID, name: 'Universal Spark Ledger (new)', modifiedTime: '2026-11-03T10:00:00Z' }] });
+    const ctx = await openNoLink(fake);
+    await ctx.page.locator('[data-pr-ledger] [data-pr-connect]').click();
+    await ctx.page.waitForSelector('[data-pr-ledger-open]');
+    const urls = driveCalls(fake).map(c => decodeURIComponent(c.url));
+    ok(urls.length === 2 && /name contains 'Universal Spark Ledger'/.test(urls[1]), 'no exact match → the second search looks for part of the name');
+    await ctx.page.getByRole('button', { name: 'System', exact: true }).click();
+    ok(/by part of its name/.test(await ctx.page.locator('[data-nw-ledger-how]').innerText()), 'the System tab says it was found by part of its name');
+    await ctx.browser.close();
+
+    const none = newFake({ driveFiles: [{ id: 'X_SHEET_ID_000000000001', name: 'Budget', modifiedTime: '2026-11-03T10:00:00Z' }] });
+    const c2 = await openNoLink(none);
+    await c2.page.locator('[data-pr-ledger] [data-pr-connect]').click();
+    await c2.page.waitForSelector('[data-pr-ledger-find]');
+    ok(/No Ledger spreadsheet found in your Drive\. Paste its link on the System tab\./.test(await stripText(c2.page)) && await c2.page.evaluate(() => localStorage.getItem('__nw_ledger_link')) === null, 'none found: says so and sets no link');
+    await c2.page.getByRole('button', { name: 'System', exact: true }).click();
+    await c2.page.locator('input[aria-label="Ledger link"]').fill(SHEET_URL);
+    await clickName(c2.page, 'Save link');
+    await wait(c2.page, 600);
+    ok(/a link you pasted/.test(await c2.page.locator('[data-nw-ledger-how]').innerText()), 'paste still works and the System tab says "a link you pasted"');
+    await c2.browser.close();
+
+    const had = newFake({ driveFiles: [{ id: G.SHEET_ID, name: LEDGER_NAME, modifiedTime: '2026-11-03T10:00:00Z' }] });
+    const c3 = await openPractice({ seed: baseSeed(), now: '2026-11-03T08:10:00', google: had.handler, googleStub: true, device: dev() });
+    await wait(c3.page, 600);
+    await c3.page.locator('[data-pr-ledger] [data-pr-connect]').click();
+    await wait(c3.page, 800);
+    ok(driveCalls(had).length === 0, 'a device that already has a link is not searched');
+    await c3.browser.close();
+  }
+
+  console.log('\n[Completed_At: the Ledger\'s own format]');
+  {
+    const ctx = await openLedger(newFake(), {});
+    const r = await ctx.page.evaluate(() => ({ s: nwLedgerStamp(new Date(2026, 9, 31, 16, 18)), a: nwParseCompleted('2026-10-31 16:18').getHours(), b: nwParseCompleted('2026-10-31T20:18:00.000Z').getTime(), c: nwParseCompleted('nonsense') }));
+    ok(r.s === '2026-10-31 16:18', 'written as YYYY-MM-DD HH:mm in local time');
+    ok(r.a === 16 && r.b === Date.UTC(2026, 9, 31, 20, 18) && r.c === null, 'both forms are accepted when reading');
+    await ctx.browser.close();
+  }
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
   if (which === 'all' || which === '1') await part1();
+  if (which === 'all' || which === '2') await part2();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });
