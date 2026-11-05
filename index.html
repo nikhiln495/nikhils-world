@@ -506,6 +506,7 @@
         loaded = start().catch((e) => { lastErr = e; if (backend === 'loading') backend = 'localstorage'; });
         return api;
       })();
+      window.__nwDevStore = dev; // the same store as window.storage.dev (a test's stand-in window.storage points its `dev` here)
 
       // ── State ──
       const load = (k, dflt) => { try { const v = JSON.parse(dev.getItem(k) || 'null'); return v == null ? dflt : v; } catch (_) { return dflt; } };
@@ -14434,9 +14435,11 @@ async function nwGatherBackup() {
   } else {
     source = 'this-device';
     const keys = [];
-    try { window.storage.dev.keys().forEach(k => keys.push(k)); } catch (_) {}
+    // This device's copy (window.storage.dev); a page without it (a test's stand-in storage) falls back to localStorage.
+    const dv = window.storage && window.storage.dev;
+    try { if (dv) dv.keys().forEach(k => keys.push(k)); else for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i)); } catch (_) {}
     keys.filter(k => typeof k === 'string' && !NW_BACKUP_SKIP.test(k)).sort().forEach(k => {
-      entries.push(Object.assign({ key: k }, nwAsValue(window.storage.dev.getItem(k)), { updatedAt: null }));
+      entries.push(Object.assign({ key: k }, nwAsValue(dv ? dv.getItem(k) : localStorage.getItem(k)), { updatedAt: null }));
     });
   }
   const fingerprint = await nwHash(JSON.stringify({ entries, conflictCopies, unreadable }));
