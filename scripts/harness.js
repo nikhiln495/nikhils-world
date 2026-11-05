@@ -10,7 +10,9 @@
 //                             doneAt, two-device merges, the Claude cost tracker, room on this device, offline
 // 8. v3-test.js all          — build v3 (Nov 2026): waking step record, count attempts, Joy, Lights out, Day history,
 //                             the Ledger and Brain Dump (Google requests faked), What now?, predictions, small fixes
-// Plus: index.html must not call api.anthropic.com directly (everything goes through the AI proxy).
+// 9. v4a-test.js all         — build v4-A (Nov 2026): What now? structured output, Ledger found by name, calendar givens, Today's three
+// Plus: index.html must not call api.anthropic.com directly (everything goes through the AI proxy), and must never
+// send tool_choice of type 'tool' or 'any'.
 // The live Firestore is never touched: every run uses an in-memory mock or fake Firestore.
 const { spawnSync } = require('child_process');
 const fs = require('fs');
@@ -26,11 +28,15 @@ const steps = [
   ['offline (service worker)', ['sw-test.js']],
   ['drafts, notes, saved bar, cost, device room', ['notes-test.js', 'all']],
   ['build v3: waking record, counts, joy, Ledger, Brain Dump, What now, predictions', ['v3-test.js', 'all']],
+  ['build v4-A: What now fix, Ledger on any device, calendar givens, Today\'s three', ['v4a-test.js', 'all']],
 ];
 const results = [];
 const html = fs.readFileSync(path.join(dir, '..', 'index.html'), 'utf8');
 const direct = (html.match(/api\.anthropic\.com/g) || []).length;
 results.push(['no direct api.anthropic.com calls', direct === 0, `${direct} found`]);
+// The current models answer 400 to a forced tool choice ({ type: 'tool' } or { type: 'any' }); use output_config.format instead.
+const forced = (html.match(/(tool_choice|toolChoice)\s*:\s*\{\s*type\s*:\s*['"](tool|any)['"]/g) || []).length;
+results.push(['no forced tool_choice (type tool or any)', forced === 0, `${forced} found`]);
 for (const [label, args] of steps) {
   console.log(`\n══ ${label}: node scripts/${args.join(' ')}`);
   const r = spawnSync(process.execPath, args.map((a, i) => (i === 0 ? path.join(dir, a) : a)), { stdio: ['ignore', 'pipe', 'inherit'], env: process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
