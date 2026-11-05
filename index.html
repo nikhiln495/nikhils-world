@@ -12669,6 +12669,152 @@ function LedgerAddTask({ rows, onOp, onClose, initialName }) {
   );
 }
 
+// ── Part 3 (v4-A): calendar givens ──
+// Calendar items are fixed. Read-only (scope calendar.readonly), asked for only when "Connect Calendar" is tapped, with its own
+// short-lived token. The token and the last read stay on this device (titles can hold other people's names); nothing goes to Firestore.
+// Work events (a title or calendar name with VINE, ASMP, STARR, RTI or Work) are kept as "Work event" with times only, so a work title never
+// reaches this phone's copy, the screen or Claude.
+const NW_CAL_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
+const NW_CAL_KEYS = { token: '__nw_cal_token', cache: '__nw_cal_cache' };
+const NW_GOOGLE_CLIENT_ID = '55888993304-0c622stmifqg6k77goim4rn4bkhi3r1s.apps.googleusercontent.com'; // the same public sign-in client as the Drive sign-in
+const nwCalToken = () => { const t = nwDev.get(NW_CAL_KEYS.token, null); return t && t.token && Date.now() < (t.expiresAt || 0) - 60000 ? t.token : null; };
+const NWCAL = { state: { events: [], readAt: null, fromCache: false, error: '', loading: false, connected: false }, subs: new Set(), loaded: false };
+const nwCSet = (patch) => { NWCAL.state = { ...NWCAL.state, ...patch }; NWCAL.subs.forEach(fn => fn(NWCAL.state)); };
+function useCal() {
+  const [st, setSt] = useState(NWCAL.state);
+  useEffect(() => { NWCAL.subs.add(setSt); setSt(NWCAL.state); return () => { NWCAL.subs.delete(setSt); }; }, []);
+  useEffect(() => { if (!NWCAL.loaded) { NWCAL.loaded = true; nwCalLoad(); } }, []);
+  return st;
+}
+// Today (local midnight) until tomorrow at noon (local), as Dates.
+function nwCalWindow(now = new Date()) {
+  return { start: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0), end: new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 12, 0, 0) };
+}
+async function nwCalFetch(url) {
+  const tok = nwCalToken();
+  if (!tok) throw Object.assign(new Error('Calendar sign-in ended.'), { code: 'no-token' });
+  let r;
+  try { r = await fetch(url, { headers: { Authorization: `Bearer ${tok}` } }); }
+  catch (e) { throw Object.assign(new Error('No internet.'), { code: 'offline' }); }
+  let body = null;
+  try { body = await r.json(); } catch (_) {}
+  if (r.status === 401) { nwDev.del(NW_CAL_KEYS.token); throw Object.assign(new Error('Calendar sign-in ended.'), { code: 'no-token' }); }
+  if (!r.ok) throw Object.assign(new Error(body?.error?.message || `Google answered ${r.status}.`), { status: r.status, body });
+  return body;
+}
+const nwCalErr = (e) => {
+  if (!e) return '';
+  if (e.code === 'no-token') return 'Calendar sign-in ended. Tap Connect Calendar.';
+  if (e.code === 'offline') return 'No internet.';
+  if (e.status === 403 && /has not been used|is disabled|not enabled|SERVICE_DISABLED/i.test(`${e.message} ${JSON.stringify(e.body || {})}`)) return 'The Google Calendar API is not turned on for the project that owns the Drive sign-in.';
+  if (e.status === 403) return 'Google would not let this account read the calendar.';
+  return e.message || 'Calendar read failed.';
+};
+// One API event → { title, start, end, allDay, calendar, work } or null (cancelled, declined, or no start).
+function nwCalEvent(ev, calName) {
+  if (!ev || ev.status === 'cancelled') return null;
+  if ((ev.attendees || []).some(a => a && a.self && a.responseStatus === 'declined')) return null;
+  const allDay = !!(ev.start && ev.start.date && !ev.start.dateTime);
+  const d = (x) => { if (!x) return null; if (x.dateTime) return new Date(x.dateTime); if (x.date) { const m = x.date.match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; } return null; };
+  const a = d(ev.start), b = d(ev.end) || a;
+  if (!a || isNaN(a)) return null;
+  const title = String(ev.summary || '').trim() || '(no title)';
+  const work = L_WORK.test(`${title}\n${calName}`);
+  return { title: work ? 'Work event' : title, start: a.toISOString(), end: b.toISOString(), allDay, calendar: work ? '' : calName, work };
+}
+// Same title + same start is one event (he has duplicate series); their calendar names are joined.
+function nwCalMerge(list) {
+  const by = new Map();
+  list.filter(Boolean).forEach(e => {
+    const k = `${e.title.toLowerCase()}|${e.start}|${e.allDay ? 'd' : 't'}`;
+    const o = by.get(k);
+    if (!o) by.set(k, { ...e });
+    else { if (e.end > o.end) o.end = e.end; if (e.calendar && !o.calendar.split(', ').includes(e.calendar)) o.calendar = o.calendar ? `${o.calendar}, ${e.calendar}` : e.calendar; }
+  });
+  return [...by.values()].sort((x, y) => x.start.localeCompare(y.start) || x.title.localeCompare(y.title));
+}
+async function nwCalLoad() {
+  const cache = nwDev.get(NW_CAL_KEYS.cache, null);
+  nwCSet({ connected: !!nwCalToken(), events: cache && Array.isArray(cache.events) ? cache.events : [], readAt: cache ? cache.at : null, fromCache: !!cache });
+  if (!nwCalToken()) { if (nwDev.get(NW_CAL_KEYS.token, null)) nwCSet({ error: nwCalErr({ code: 'no-token' }) }); return; }
+  if (!nwGoogleOnline()) { nwCSet({ error: '', loading: false }); return; }
+  nwCSet({ loading: true, error: '' });
+  try {
+    const { start, end } = nwCalWindow();
+    const lst = await nwCalFetch('https://www.googleapis.com/calendar/v3/users/me/calendarList?minAccessRole=reader&maxResults=250');
+    const cals = (lst.items || []).filter(c => c && c.selected);
+    const all = [];
+    for (const c of cals) {
+      const name = String(c.summaryOverride || c.summary || '').trim();
+      const q = `singleEvents=true&orderBy=startTime&maxResults=100&timeMin=${encodeURIComponent(start.toISOString())}&timeMax=${encodeURIComponent(end.toISOString())}`;
+      const r = await nwCalFetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(c.id)}/events?${q}`);
+      (r.items || []).forEach(ev => all.push(nwCalEvent(ev, name)));
+    }
+    const events = nwCalMerge(all);
+    const at = new Date().toISOString();
+    nwDev.set(NW_CAL_KEYS.cache, { at, events });
+    nwCSet({ events, readAt: at, fromCache: false, error: '', loading: false, connected: true });
+  } catch (e) { nwCSet({ error: nwCalErr(e), loading: false, connected: !!nwCalToken() }); }
+}
+// Asks Google for calendar.readonly, only when tapped. The consent screen shows the one new permission.
+function nwCalConnect() {
+  return new Promise((resolve, reject) => {
+    try {
+      const client = google.accounts.oauth2.initTokenClient({
+        client_id: NW_GOOGLE_CLIENT_ID, scope: NW_CAL_SCOPE, include_granted_scopes: true,
+        callback: (r) => { if (r.error) { reject(new Error(r.error)); return; } nwDev.set(NW_CAL_KEYS.token, { token: r.access_token, expiresAt: Date.now() + (r.expires_in || 3600) * 1000 }); resolve(r.access_token); },
+      });
+      client.requestAccessToken();
+    } catch (e) { reject(e); }
+  });
+}
+// The events inside today-until-tomorrow-noon, as they are shown.
+const nwCalShown = (events, now = new Date()) => { const w = nwCalWindow(now); return (events || []).filter(e => new Date(e.end) > w.start && new Date(e.start) < w.end); };
+const nwCalWhen = (e) => (e.allDay ? 'All day' : `${pTimeHM(new Date(e.start))}–${pTimeHM(new Date(e.end))}`);
+// What Claude is told: fixed events with times. A work event is only "Work event, busy" (no title, no calendar name).
+function nwGivensText(st = NWCAL.state, now = new Date()) {
+  if (!st || !(st.connected || st.readAt)) return '';
+  const today = pLocalISO(now);
+  const ev = nwCalShown(st.events, now);
+  const timed = ev.filter(e => !e.allDay), allDay = ev.filter(e => e.allDay);
+  const line = (e) => `- ${pLocalISO(new Date(e.start)) === today ? '' : 'tomorrow '}${pTimeHM(new Date(e.start))}–${pTimeHM(new Date(e.end))} | ${e.work ? 'Work event, busy' : e.title}${!e.work && e.calendar ? ` (${e.calendar})` : ''}`;
+  const out = ['Fixed events today, and tomorrow until noon (his calendar; they are fixed, plan steps in the gaps):', ...(timed.length ? timed.map(line) : ['- none'])];
+  if (allDay.length) out.push('All-day items (context, they do not block the day): ' + allDay.map(e => (e.work ? 'Work event' : e.title)).join('; '));
+  return out.join('\n');
+}
+function CalGivens() {
+  const C = useCal();
+  const [err, setErr] = useState('');
+  const [, tick] = useState(0);
+  useEffect(() => { const on = () => tick(x => x + 1); window.addEventListener('online', on); window.addEventListener('offline', on); return () => { window.removeEventListener('online', on); window.removeEventListener('offline', on); }; }, []);
+  const shown = nwCalShown(C.events);
+  const today = pLocalISO(new Date());
+  const connect = async () => {
+    setErr('');
+    try { await nwCalConnect(); await nwCalLoad(); }
+    catch (e) { setErr(/popup_closed|access_denied/.test(String(e.message || e)) ? 'Calendar sign-in was closed. Try again.' : `Calendar sign-in failed: ${e.message || e}`); }
+  };
+  return (
+    <div data-pr-givens style={{ marginBottom: 8, paddingBottom: 8, borderBottom: `1px solid ${PC.border}` }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        <div style={{ ...pLabel, marginBottom: 0, flex: 1 }}>Givens today</div>
+        {C.connected && <button data-pr-givens-refresh style={pBtn('ghost', { fontSize: 12, minHeight: 32, padding: '2px 10px' })} disabled={C.loading || !nwGoogleOnline()} onClick={() => nwCalLoad()}>{C.loading ? 'Reading…' : 'Refresh'}</button>}
+        {!C.connected && <button data-pr-cal-connect style={pBtn('ghost', { fontSize: 12, minHeight: 32, padding: '2px 10px' })} onClick={connect}>Connect Calendar</button>}
+      </div>
+      {C.error && <div data-pr-givens-error role="status" style={{ fontSize: 13, color: PC.warn, marginBottom: 4 }}>{C.error}</div>}
+      {err && <div role="alert" style={{ fontSize: 13, color: PC.bad, marginBottom: 4 }}>{err}</div>}
+      {!C.connected && !C.readAt && <div style={{ fontSize: 13, color: PC.muted }}>Connect Calendar to see fixed events here and to plan around them. Read only.</div>}
+      {C.readAt && !shown.length && <div style={{ fontSize: 14, color: PC.muted }}>Nothing on the calendar until tomorrow noon.</div>}
+      {shown.map((e, i) => (
+        <div key={i} data-pr-given style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, overflowWrap: 'anywhere' }}>
+          <span style={{ fontFamily: pMono, color: PC.muted }}>{pLocalISO(new Date(e.start)) !== today && !e.allDay ? 'tomorrow ' : ''}{nwCalWhen(e)}</span> {e.title}{e.calendar ? <span style={{ color: PC.muted }}> · {e.calendar}</span> : null}
+        </div>
+      ))}
+      {C.readAt && <div style={{ fontSize: 12, color: PC.muted, marginTop: 2 }}>{C.fromCache ? (nwGoogleOnline() ? 'From this device, read' : 'Offline. From this device, read') : 'Read'} {pTimeHM(new Date(C.readAt))}</div>}
+    </div>
+  );
+}
+
 function LedgerStrip() {
   const L = useLedger();
   const pending = usePending();
@@ -12712,6 +12858,7 @@ function LedgerStrip() {
   );
   return (
     <div data-pr-ledger style={pCard({ padding: 12 })}>
+      <CalGivens />
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
         <div style={{ ...pLabel, marginBottom: 0, flex: 1 }}>Ledger</div>
         <button style={pBtn('ghost', { fontSize: 12, minHeight: 32, padding: '2px 10px' })} disabled={L.loading} onClick={() => nwLedgerLoad({ force: true })}>{L.loading ? 'Reading…' : 'Refresh'}</button>
@@ -12748,6 +12895,23 @@ function LedgerStrip() {
 }
 
 // ── System tab: the Ledger link (this device only) and the Google sign-in ──
+function SystemCalendar() {
+  const C = useCal();
+  const [err, setErr] = useState('');
+  const connect = async () => {
+    setErr('');
+    try { await nwCalConnect(); await nwCalLoad(); }
+    catch (e) { setErr(/popup_closed|access_denied/.test(String(e.message || e)) ? 'Calendar sign-in was closed. Try again.' : `Calendar sign-in failed: ${e.message || e}`); }
+  };
+  return (
+    <div data-nw-calendar-setup style={{ borderTop: '1px solid #333', paddingTop: 8, marginBottom: 8 }}>
+      <div style={{ fontSize: 13, color: '#ccc', lineHeight: 1.5, marginBottom: 6 }}>Calendar: {C.connected ? 'connected (read only)' : 'not connected'}{C.readAt ? ` · last read ${pTimeHM(new Date(C.readAt))}` : ''}. {C.connected ? '' : 'It adds one permission: read your calendar. Nothing is written.'}</div>
+      {C.error && <div role="status" style={{ fontSize: 13, color: '#fbbf24', marginBottom: 6 }}>{C.error}</div>}
+      {err && <div role="alert" style={{ fontSize: 13, color: '#f87171', marginBottom: 6 }}>{err}</div>}
+      {!C.connected && <button data-nw-cal-connect onClick={connect} style={{ width: '100%', padding: 12, background: 'transparent', color: '#eee', border: '1px solid #555', borderRadius: 8, fontFamily: 'inherit', cursor: 'pointer' }}>Connect Calendar</button>}
+    </div>
+  );
+}
 function NwLedgerSetup({ active }) {
   const [link, setLink] = useState(nwDev.get(NW_DEV.link, ''));
   const [text, setText] = useState('');
@@ -12781,6 +12945,7 @@ function NwLedgerSetup({ active }) {
         {link && <button onClick={remove} style={{ padding: 12, background: 'transparent', color: '#ccc', border: '1px solid #555', borderRadius: 8, fontFamily: 'inherit', cursor: 'pointer' }}>Remove</button>}
       </div>
       {msg && <div role="status" style={{ fontSize: 13, color: '#86efac', marginBottom: 6 }}>{msg}</div>}
+      <SystemCalendar />
       <div style={{ fontSize: 13, color: '#ccc', marginBottom: 6 }}>Google: {signedIn ? 'signed in' : 'not signed in'}{L.readAt ? ` · last read ${pTimeHM(new Date(L.readAt))}` : ''}</div>
       {!signedIn && <ConnectGoogle onDone={() => { nwLedgerLoad({ force: true }); }} />}
     </div>
@@ -13172,7 +13337,7 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
     setSt(s => ({ ...s, busy: true, err: '' }));
     try {
       const past = feedback && st.past ? st.past : await pPastDumps(words);
-      const { result, saved, usage } = await pWhatNow({ words, rows: sentRows, rules: L.rules, log: todayLog, feedback, past });
+      const { result, saved, usage } = await pWhatNow({ words, rows: sentRows, rules: L.rules, log: todayLog, feedback, past, givens: nwGivensText() });
       let where = null, rampId = null;
       try { const { doc, entry } = await pAddRamp({ words, result, usage, kind: feedback ? 'what-now-again' : 'what-now', feedback, of: st.rampId || undefined }); where = pWhere.get(doc) || 'cloud'; rampId = entry.id; window.nwShowBar({ tab: 'practice', mode: 'saved', what: 'What now? result', where, ref: { what: 'What now? result' } }); }
       catch (e) { setMsg(`❌ The result was not saved: ${e.message}`); }
