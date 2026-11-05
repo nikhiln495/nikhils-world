@@ -56,8 +56,8 @@ async function part1() {
     ok(t.includes('Logged: Waking ladder · level 2 — on this device only, not in the cloud yet') && !t.includes('✅ Logged'), 'Practice: the rep message says "on this device only, not in the cloud yet", not "✅ Logged"');
     let b = await bannerTexts(page, 'device-only');
     ok(b.length === 1 && b[0] === 'Practice log for 2026-10-04 saved on this device only, not in the cloud. Reason: the cloud rejected it (invalid-argument: Document exceeds the maximum size).', 'banner: "<what> saved on this device only, not in the cloud. Reason: <reason>." → ' + JSON.stringify(b));
-    const dev = await page.evaluate(() => ({ local: JSON.parse(localStorage.getItem('practice:log:2026_10_04') || 'null'), cloud: window.__fakeDocs.has('practice_log_2026_10_04') }));
-    ok(dev.local && dev.local.entries.length === 1 && dev.local.entries[0].level === 2 && !dev.cloud, 'the rep is kept on this device (localStorage), not in the cloud');
+    const dev = await page.evaluate(() => ({ local: JSON.parse(window.storage.dev.getItem('practice:log:2026_10_04') || 'null'), cloud: window.__fakeDocs.has('practice_log_2026_10_04') }));
+    ok(dev.local && dev.local.entries.length === 1 && dev.local.entries[0].level === 2 && !dev.cloud, 'the rep is kept on this device, not in the cloud');
     ok((await statusLine(page)) === '1 waiting to upload', 'status line: "1 waiting to upload"');
 
     await nav(page, 'Kaizen');
@@ -81,7 +81,7 @@ async function part1() {
       window.__fakeFail = () => 'reject';
       const r = await window.storage.set('test:direct', 'x');
       window.__fakeFail = null;
-      return { r, local: localStorage.getItem('test:direct') };
+      return { r, local: window.storage.dev.getItem('test:direct') };
     });
     ok(direct.r === 'device-only' && direct.local === 'x', "window.storage.set returns 'device-only' (not true) when the cloud rejects and the device copy worked");
     const good = await page.evaluate(async () => window.storage.set('test:good', 'y'));
@@ -137,19 +137,22 @@ async function part1() {
       const dt = Date.now() - t0;
       const offBanner = window.storage.status().banners.find(b => b.kind === 'device-only').text;
       window.__online = true;
-      // localStorage full for test:full, and the cloud rejects it → nothing stored anywhere.
-      const real = Storage.prototype.setItem;
-      Storage.prototype.setItem = function (k, v) { if (k === 'test:full' || k === 'test:full2') throw new DOMException('full', 'QuotaExceededError'); return real.call(this, k, v); };
-      localStorage.removeItem('test:full2');
+      // This device is full for test:full (IndexedDB refuses the write), and the cloud rejects it → nothing stored anywhere.
+      const real = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (v, k) { if (k === 'test:full' || k === 'test:full2') throw new DOMException('full', 'QuotaExceededError'); return real.apply(this, arguments); };
+      window.storage.dev.removeItem('test:full2');
       window.__fakeFail = (op, id) => (op === 'set' && id === 'test_full' ? 'reject' : null);
       const both = await window.storage.set('test:full', 'new');
       window.__fakeFail = null;
       const failedBanner = (window.storage.status().banners.find(b => b.kind === 'failed') || {}).text;
       // localStorage full but the cloud takes it → 'cloud', no banner about the device.
-      real.call(localStorage, 'test:full2', 'stale');
+      IDBObjectStore.prototype.put = real;
+      window.storage.dev.setItem('test:full2', 'stale');
+      await window.storage.dev.flushed();
+      IDBObjectStore.prototype.put = function (v, k) { if (k === 'test:full' || k === 'test:full2') throw new DOMException('full', 'QuotaExceededError'); return real.apply(this, arguments); };
       const cloudOnly = await window.storage.set('test:full2', 'fresh');
-      Storage.prototype.setItem = real;
-      return { off, dt, offBanner, both, failedBanner, cloud: window.__fakeDocs.get('test_full').value, cloudOnly, stale: localStorage.getItem('test:full2'), banners: window.storage.status().banners.map(b => b.kind) };
+      IDBObjectStore.prototype.put = real;
+      return { off, dt, offBanner, both, failedBanner, cloud: window.__fakeDocs.get('test_full').value, cloudOnly, stale: window.storage.dev.getItem('test:full2'), banners: window.storage.status().banners.map(b => b.kind) };
     });
     ok(r.off === 'device-only' && r.dt < 1000 && r.offBanner === '"test:offline" saved on this device only, not in the cloud. Reason: the device is offline.', 'offline → device-only straight away, reason "the device is offline"');
     ok(r.both === false && r.cloud === 'old' && r.failedBanner === `"test:full" was not saved, not in the cloud and not on this device. Reason: the cloud rejected it (invalid-argument: Document exceeds the maximum size), and this device's storage is full.`, 'cloud rejected + this device full → false, and a banner says so → ' + JSON.stringify(r.failedBanner));
@@ -414,7 +417,7 @@ async function part5() {
     const main = window.__fakeDocs.get('big_blob');
     const order = window.__fakeOrder.slice(m);
     const pieces = main.split ? main.split.pieces : [];
-    localStorage.removeItem('big:blob'); // read it back like a fresh device would
+    window.storage.dev.removeItem('big:blob'); // read it back like a fresh device would
     const back = (await window.storage.get('big:blob')).value;
     return { w, bytes: new TextEncoder().encode(v1).length, valueNull: main.value === null, gen: main.split && main.split.gen, pieces, order,
       pieceBytes: pieces.map(id => window.storage.docBytes(id, window.__fakeDocs.get(id))), exact: back === v1 };
@@ -803,31 +806,17 @@ async function part11() {
     return window.storage.status().banners.filter(b => b.kind === 'big').length;
   });
   ok(small === 1, 'the banner goes when the key is small again');
-  // This device's saved data: the System tab meter matches a count of localStorage at 2 bytes per character.
+  // This device's saved data: with IndexedDB the System tab shows the browser's own numbers; the banner waits for 85%.
   await nav(page, 'Kaizen'); await nav(page, 'System');
   await page.waitForTimeout(300);
-  const meter = await page.evaluate(() => {
-    let chars = 0;
-    for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); chars += k.length + localStorage.getItem(k).length; }
-    return { expect: `${(chars * 2 / 1048576).toFixed(2)} MB of about 5 MB (${Math.round(chars * 2 / (5 * 1048576) * 100)}%)`, shown: document.querySelector('[data-nw-device-usage]').textContent };
+  const meter = await page.evaluate(async () => {
+    const e = await navigator.storage.estimate();
+    await window.storage.dev.refreshEstimate();
+    return { e, shown: document.querySelector('[data-nw-device-usage]').textContent, u: window.storage.deviceUsage() };
   });
-  ok(meter.shown === meter.expect, `the System tab shows this device's saved data → "${meter.shown}"`);
-  const before70 = await page.evaluate(() => window.storage.status().banners.filter(b => b.kind === 'device-full').length);
-  const at = await page.evaluate(async () => {
-    let chars = 0;
-    for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); chars += k.length + localStorage.getItem(k).length; }
-    const need = Math.ceil(0.71 * 5 * 1048576 / 2) - chars; // a fixture that takes this device to 71%
-    localStorage.setItem('fixture:filler', 'f'.repeat(Math.max(0, need - 'fixture:filler'.length)));
-    await window.storage.set('meter:poke', '1');
-    await new Promise(r => setTimeout(r, 600));
-    return { banner: (window.storage.status().banners.find(b => b.kind === 'device-full') || {}).text, usage: window.storage.deviceUsage() };
-  });
-  await nav(page, 'Kaizen'); await nav(page, 'System');
-  await page.waitForTimeout(300);
-  const shown = await page.locator('[data-nw-device-usage]').textContent();
-  ok(before70 === 0 && /^This device's saved data is 3\.\d\d MB of about 5 MB \(7[01]%\)\. When it is full, saves made offline can't be kept on this device\.$/.test(at.banner || ''), 'at 70% a banner says so → ' + JSON.stringify(at.banner));
-  ok(/^3\.\d\d MB of about 5 MB \(7[01]%\)$/.test(shown) && await page.locator('[data-nw-banner="device-full"]').isVisible(), 'the meter shows it and the banner is on screen → ' + shown);
-  await page.evaluate(() => localStorage.removeItem('fixture:filler'));
+  ok(meter.u.real && meter.u.limit === meter.e.quota && /^\d+(\.\d\d)? MB of \d+(\.\d)? (MB|GB) \((under 1|\d+)%\)$/.test(meter.shown), `the System tab shows the browser's own numbers → "${meter.shown}"`);
+  const banners = (page) => page.evaluate(() => window.storage.status().banners.filter(b => b.kind === 'device-full').map(b => b.text));
+  ok((await banners(page)).length === 0, 'well under 85%: no message (a device at 78% no longer warns)');
   await done(ctx, '11');
 }
 
@@ -846,7 +835,7 @@ async function part12() {
   const { page } = ctx;
   await offlineSwitch(page);
   await reloaded(page);
-  await page.evaluate(async () => { await window.storage.get('q:other'); await window.storage.getAll('kaizen4:logs'); localStorage.removeItem('q:never'); });
+  await page.evaluate(async () => { await window.storage.get('q:other'); await window.storage.getAll('kaizen4:logs'); window.storage.dev.removeItem('q:never'); await window.storage.dev.flushed(); });
   await setOnline(page, false);
   await reloaded(page);
   const r = await page.evaluate(async () => {
@@ -905,6 +894,292 @@ function part7() {
   ok(nomark.length >= 1, 'a missing marker fails the check');
 }
 
+// ── 13. Caches out of the way: the device cache lives in IndexedDB; caches can be cleared, pending sends never ──
+const idbDump = (page) => page.evaluate(() => new Promise((resolve) => {
+  const r = indexedDB.open('nw-device');
+  r.onerror = () => resolve(null);
+  r.onsuccess = () => {
+    const db = r.result;
+    try {
+      const tx = db.transaction('kv', 'readonly'), s = tx.objectStore('kv'), out = {};
+      const c = s.openCursor();
+      c.onsuccess = () => { const cur = c.result; if (cur) { out[cur.key] = cur.value; cur.continue(); } else { db.close(); resolve(out); } };
+      c.onerror = () => resolve(null);
+    } catch (e) { resolve(null); }
+  };
+}));
+const lsKeys = (page) => page.evaluate(() => Object.keys(localStorage));
+async function part13() {
+  console.log('\n[13. Device cache in IndexedDB: moved once, caches cleared, pending sends kept, persist answer shown]');
+  const hist = JSON.stringify({ docs: { d1: { paragraphs: 'p'.repeat(40000) } } });
+  const device = {
+    '__nw_dump_hist': hist, '__nw_ledger_cache': JSON.stringify({ at: 1, rows: [], rules: [], head: [], idx: {}, hidden: 0, pad: 'c'.repeat(1000) }),
+    '__nw_ledger_pending': JSON.stringify([{ id: 'lp_1', at: '2026-10-04T10:00:00Z', op: { kind: 'comment', parent: 'T', stepNum: 1, line: 'send me' } }]),
+    '__nw_dump_queue': JSON.stringify([{ id: 'd_1', at: '2026-10-04T10:00:00Z', text: 'capture', tag: '', status: 'device' }]),
+    '__nw_dev_draft:note1': JSON.stringify('half a thought'), '__nw_ledger_link': JSON.stringify('https://docs.google.com/spreadsheets/d/abcdefghijklmnopqrstuvwxyz/edit'),
+    'gdrive_token_v1': JSON.stringify({ token: 'T', expiresAt: Date.now() + 3600000 }),
+  };
+  const ctx = await open({ ...asDocs(F.base()) }, { device, html: (h) => h });
+  const { page } = ctx;
+  const idb = await idbDump(page);
+  const left = await lsKeys(page);
+  ok(idb && Object.keys(device).filter(k => k !== 'gdrive_token_v1').every(k => idb[k] === device[k]), 'every Ledger / Brain Dump key was copied into IndexedDB with the same text');
+  ok(!left.some(k => k.startsWith('__nw_') && k !== '__nw_upload_queue') || left.every(k => !/^__nw_(dump_hist|ledger_|dump_queue|dev_draft)/.test(k)), 'and removed from localStorage after it read back the same → ' + left.join(','));
+  ok(left.includes('gdrive_token_v1') && !(idb && idb.gdrive_token_v1), 'the Drive token cache was never moved');
+  const r1 = await page.evaluate(() => ({ b: window.storage.dev.backend, v: window.storage.dev.getItem('__nw_ledger_link'), m: window.storage.dev.info().migration }));
+  ok(r1.b === 'indexeddb' && /^"https:/.test(r1.v) && r1.m && r1.m.moved === 6 && r1.m.kept === 0, 'reads answer from memory right away; the move is recorded (6 moved, 0 kept)');
+
+  const bd = await page.evaluate(() => window.storage.deviceBreakdown());
+  const sz = (k) => (k.length + device[k].length) * 2;
+  ok(bd.caches === sz('__nw_dump_hist') + sz('__nw_ledger_cache') && bd.cacheKeys.length === 2, 'caches = Brain Dump history + last Ledger read');
+  ok(bd.pending === sz('__nw_ledger_pending') + sz('__nw_dump_queue') + sz('__nw_dev_draft:note1'), 'waiting = pending Ledger sends + Brain Dump captures + device drafts');
+  ok(bd.offline >= sz('__nw_ledger_link'), 'offline copy holds the Ledger link and the data copies');
+
+  await nav(page, 'System');
+  await page.waitForSelector('[data-nw-meter]');
+  const rows = await page.evaluate(() => ['offline', 'caches', 'pending'].map(n => document.querySelector(`[data-nw-meter-${n}]`).textContent));
+  ok(rows.every(t => /^\d+\.\d\d MB$/.test(t)) && rows[1] === `${(bd.caches / 1048576).toFixed(2)} MB`, 'the System tab shows three numbers → ' + rows.join(' / '));
+  await page.locator('[data-nw-clear-caches]').click();
+  const say = await page.locator('[data-nw-clear-confirm]').innerText();
+  ok(/Brain Dump history/.test(say) && /Last Ledger read/.test(say) && /Nothing waiting to upload/.test(say), 'Clear caches says what it removes first → ' + say.split('\n')[0].slice(0, 160));
+  const still = await page.evaluate(() => window.storage.dev.getItem('__nw_dump_hist') !== null);
+  ok(still, 'nothing is removed until the second tap');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  ok(await page.evaluate(() => window.storage.dev.getItem('__nw_dump_hist') !== null) && !(await page.locator('[data-nw-clear-confirm]').count()), 'Cancel keeps everything');
+  await page.locator('[data-nw-clear-caches]').click();
+  await page.locator('[data-nw-clear-go]').click();
+  await page.waitForTimeout(300);
+  const after = await page.evaluate(() => ({ g: window.storage.dev.getItem('__nw_dump_hist'), c: window.storage.dev.getItem('__nw_ledger_cache'), p: window.storage.dev.getItem('__nw_ledger_pending'), q: window.storage.dev.getItem('__nw_dump_queue'), d: window.storage.dev.getItem('__nw_dev_draft:note1'), l: window.storage.dev.getItem('__nw_ledger_link'), msg: document.querySelector('[data-nw-clear-msg]').textContent }));
+  ok(after.g === null && after.c === null && after.p && after.q && after.d && after.l && /^Cleared \d+\.\d\d MB\.$/.test(after.msg), 'caches cleared; pending sends, captures, drafts and the link stay → ' + after.msg);
+  await page.evaluate(() => window.storage.dev.flushed());
+  const idb2 = await idbDump(page);
+  ok(idb2 && !('__nw_dump_hist' in idb2) && !('__nw_ledger_cache' in idb2) && '__nw_ledger_pending' in idb2 && '__nw_dump_queue' in idb2 && '__nw_dev_draft:note1' in idb2, 'IndexedDB agrees: caches gone, pending kept');
+  const afterBd = await page.evaluate(() => window.storage.deviceBreakdown());
+  ok(afterBd.caches === 0 && afterBd.pending === bd.pending, 'the meter: caches 0, waiting unchanged');
+  await done(ctx, '13');
+
+  // The device copy of a key waiting to upload is "waiting", not "offline copy".
+  {
+    const c2 = await open({ ...asDocs(F.base()) });
+    await c2.page.evaluate(() => { window.__fakeFail = (op) => (op === 'set' ? 'reject' : null); });
+    await c2.page.evaluate(async () => { await window.storage.set('notes:2026_10_04', JSON.stringify({ notes: [{ id: 'n1', at: '2026-10-04T10:00:00Z', u: 1, text: 'waiting' }] })); });
+    const b = await c2.page.evaluate(() => window.storage.deviceBreakdown());
+    ok(b.pending > 0 && b.pending >= ('notes:2026_10_04'.length + 60) * 2, 'the device copy of a key waiting to upload counts as waiting to upload');
+    await c2.page.evaluate(() => window.storage.clearCaches());
+    ok(await c2.page.evaluate(() => window.storage.dev.getItem('notes:2026_10_04') !== null || localStorage.getItem('notes:2026_10_04') !== null), 'Clear caches leaves it');
+    await done(c2, '13 waiting copy');
+  }
+
+  // The browser's answer to "keep this" is shown.
+  for (const answer of [true, false]) {
+    const c3 = await open({ ...asDocs(F.base()) }, { html: (h) => h.replace('<head>', `<head><script>try{Object.defineProperty(navigator,'storage',{value:{persisted:async()=>false,persist:async()=>${answer},estimate:async()=>({usage:1048576,quota:1073741824})},configurable:true});}catch(e){}</script>`) });
+    await nav(c3.page, 'System');
+    await c3.page.waitForSelector('[data-nw-persisted]');
+    const t = await c3.page.locator('[data-nw-persisted]').textContent();
+    ok(answer ? t === 'yes' : /^no/.test(t), `persist() answered ${answer} → System tab says "${t.slice(0, 40)}"`);
+    await done(c3, '13 persist');
+  }
+}
+
+// ── 14. The offline copy of every key in IndexedDB ──────────────────
+const estStub = (h) => h.replace('<head>', '<head><script>try{Object.defineProperty(navigator,"storage",{value:{persisted:async()=>true,persist:async()=>true,estimate:async()=>(window.__est||{usage:3145728,quota:2147483648})},configurable:true});}catch(e){}</script>');
+const noIdb = (h) => h.replace('<head>', '<head><script>try{if(!sessionStorage.getItem("__idbok")){sessionStorage.setItem("__idbok","1");indexedDB.open=function(){throw new Error("IndexedDB is not available (private browsing)");};}}catch(e){}</script>');
+async function part14() {
+  console.log('\n[14. Offline copy in IndexedDB: move, writes during the move, full device, fallback, banner, two tabs]');
+  const J = JSON.stringify;
+  const day = J({ entries: [{ id: 'e1', at: '2026-10-04T09:00:00.000Z', u: 1, level: 1 }] });
+  const copyOfQueued = J({ notes: [{ id: 'n9', at: '2026-10-04T10:00:00.000Z', u: 9, text: 'still waiting' }] });
+  const queueDoc = J([{ key: 'notes:2026_10_03', id: 'notes_2026_10_03', at: 1, firstAt: 1, reason: 'test', what: 'Notes for 2026-10-03', base: null }]);
+  const device = { 'fixture:during': 'old copy', 'fixture:gone': 'old copy', 'practice:log:2026_10_04': day, 'kaizen3:tasks': J([{ id: 't1' }]), 'notes:2026_10_03': copyOfQueued, '__nw_upload_queue': queueDoc, 'gdrive_token_v1': J({ token: 'T', expiresAt: Date.now() + 3600000 }), 'firebase:authUser': 'fb-internal' };
+
+  // 1. Move: copy, read back, compare, remove. Reads are synchronous right after start; the same keys are there offline.
+  {
+    const ctx = await open({ ...asDocs(F.base()) }, { device, offline: true });
+    const { page } = ctx;
+    const idb = await idbDump(page);
+    const left = await lsKeys(page);
+    const moved = Object.keys(device).filter(k => k !== 'gdrive_token_v1' && k !== 'firebase:authUser');
+    // (the app itself rewrites kaizen3:tasks and adds to the upload queue while it starts)
+    const same = moved.filter(k => k !== 'kaizen3:tasks' && k !== '__nw_upload_queue');
+    ok(idb && same.every(k => idb[k] === device[k]) && 'kaizen3:tasks' in idb && JSON.parse(idb['__nw_upload_queue']).some(e => e.key === 'notes:2026_10_03'), 'every app key is in IndexedDB with the same text, the upload queue (with the waiting upload) and the copy of the key waiting in it included');
+    ok(moved.every(k => !left.includes(k)) && left.includes('gdrive_token_v1') && left.includes('firebase:authUser') && !(idb && ('gdrive_token_v1' in idb || 'firebase:authUser' in idb)), 'removed from localStorage only after reading back the same; the Drive token and Firebase keys stay put → ' + left.join(','));
+    const r = await page.evaluate(async () => {
+      const sync = window.storage.dev.getItem('practice:log:2026_10_04');
+      const offline = await window.storage.get('practice:log:2026_10_04');
+      return { sync, offline: offline && offline.value, waiting: window.storage.status().waiting, mig: window.storage.dev.info().migration };
+    });
+    ok(r.sync === day && r.offline === day, 'a read right after start answers from memory (sync) and window.storage.get answers offline');
+    const q = await page.evaluate(() => window.storage.status().queue.map(e => e.key));
+    ok(q.includes('notes:2026_10_03') && r.mig && r.mig.moved === moved.length && r.mig.kept === 0, 'the waiting upload is still waiting after the move; the move is recorded');
+    await nav(page, 'System');
+    const t = await page.locator('[data-nw-appinfo]').innerText();
+    ok(/Kind of storage\s*IndexedDB/.test(t) && /Moved to IndexedDB/.test(t) && /Waiting to upload/.test(t), 'the System tab says IndexedDB is in use and when the move ran');
+    await done(ctx, '14 move');
+  }
+
+  // 2. A write while the move is running is never overwritten by the older copy
+  {
+    const hook = (h) => h.replace('<head>', `<head><script>window.__nwDevHook=async function(why){if(why==='after-copy'){window.__hookRan=true;window.storage.dev.setItem('fixture:during','newer than the old copy');window.storage.dev.removeItem('fixture:gone');}};</script>`);
+    const ctx = await open({ ...asDocs(F.base()) }, { device, html: hook });
+    const { page } = ctx;
+    await page.evaluate(() => window.storage.dev.flushed());
+    const idb = await idbDump(page);
+    const left = await lsKeys(page);
+    const r = await page.evaluate(() => ({ ran: window.__hookRan, t: window.storage.dev.getItem('fixture:during'), d: window.storage.dev.getItem('fixture:gone'), n: window.storage.dev.getItem('notes:2026_10_03') }));
+    ok(r.ran && r.t === 'newer than the old copy' && idb['fixture:during'] === 'newer than the old copy', 'a key written during the move keeps its newer value in memory and in IndexedDB');
+    ok(r.d === null && !('fixture:gone' in idb) && !left.includes('fixture:gone'), 'a key removed during the move stays removed (not brought back from the old copy)');
+    ok(r.n === copyOfQueued && idb['notes:2026_10_03'] === copyOfQueued && !left.includes('fixture:during'), 'the other keys moved as usual');
+    await done(ctx, '14 during');
+  }
+
+  // 3. A write that does not fit: false (or put back), never silent
+  {
+    const ctx = await open({ ...asDocs(F.base()) }, { html: estStub });
+    const { page } = ctx;
+    const r = await page.evaluate(async () => {
+      const real = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (v, k) { if (/^test:(big|late)$|^__nw_cache:late$/.test(k)) throw new DOMException('full', 'QuotaExceededError'); return real.apply(this, arguments); };
+      window.__fakeFail = () => 'reject';
+      const set = await window.storage.set('test:big', 'x');
+      window.__fakeFail = null;
+      const banners1 = window.storage.status().banners.map(b => ({ kind: b.kind, text: b.text }));
+      // a write that returns true at once and fails later: the old value is put back
+      window.storage.dev.setItem('__nw_cache:late', 'old');
+      await window.storage.dev.flushed();
+      const first = window.storage.dev.getItem('__nw_cache:late');
+      IDBObjectStore.prototype.put = real;
+      window.storage.dev.setItem('__nw_cache:late', 'old');
+      await window.storage.dev.flushed();
+      IDBObjectStore.prototype.put = function (v, k) { if (k === '__nw_cache:late') throw new DOMException('full', 'QuotaExceededError'); return real.apply(this, arguments); };
+      const sync = window.storage.dev.setItem('__nw_cache:late', 'new');
+      await window.storage.dev.flushed();
+      IDBObjectStore.prototype.put = real;
+      const after = window.storage.dev.getItem('__nw_cache:late');
+      // less room than the value needs, as far as the browser says: false at once
+      window.__est = { usage: 2147483640, quota: 2147483648 };
+      await window.storage.dev.refreshEstimate();
+      const none = window.storage.dev.setItem('__nw_cache:huge', 'h'.repeat(100));
+      const hasHuge = window.storage.dev.getItem('__nw_cache:huge');
+      return { set, banners1, first, sync, after, none, hasHuge, banner: (window.storage.status().banners.find(b => b.kind === 'device-full') || {}).text };
+    });
+    ok(r.set === false && r.banners1.some(b => b.kind === 'failed' && /not on this device/.test(b.text)) && r.banners1.some(b => b.kind === 'device-full' && /^"test:big" did not fit on this device, so it was not stored here\./.test(b.text)), 'window.storage.set returns false when neither the cloud nor this device took it, and the screen says so');
+    ok(r.first === null, 'a refused first write leaves nothing behind');
+    ok(r.sync === true && r.after === 'old', 'a write that fails after returning true puts the old value back');
+    ok(r.none === false && r.hasHuge === null, 'when the browser says there is less room than the value needs, it returns false at once and stores nothing');
+    ok(/This does not clear when things upload\. To free room: System tab, then Clear caches\.$/.test(r.banner || ''), 'the message says it does not clear on upload and names the one thing to do → ' + (r.banner || '').slice(0, 90));
+    await done(ctx, '14 full');
+  }
+
+  // 4. No IndexedDB (private browsing): localStorage with the 5 MB estimate; a full localStorage is not silent; the System tab says so
+  {
+    const ctx = await open({ ...asDocs(F.base()) }, { html: noIdb });
+    const { page } = ctx;
+    const r = await page.evaluate(async () => {
+      const back = window.storage.dev.backend;
+      window.storage.dev.setItem('fb:key', 'v1');
+      const inLs = localStorage.getItem('fb:key');
+      const real = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (k, v) { if (k === 'fb:full') throw new DOMException('full', 'QuotaExceededError'); return real.call(this, k, v); };
+      const direct = window.storage.dev.setItem('fb:full', 'x');
+      window.__fakeFail = () => 'reject';
+      const set = await window.storage.set('fb:full', 'y');
+      window.__fakeFail = null;
+      Storage.prototype.setItem = real;
+      return { back, inLs, direct, set, banners: window.storage.status().banners.map(b => b.kind), u: window.storage.deviceUsage(), marker: localStorage.getItem('__nw_dev_fallback') };
+    });
+    ok(r.back === 'localstorage' && r.inLs === 'v1' && r.marker === '1', 'IndexedDB unavailable → localStorage is used, and marked');
+    ok(r.direct === false && r.set === false && r.banners.includes('failed') && r.banners.includes('device-full'), 'a full localStorage: the save returns false and the screen says nothing was stored');
+    ok(!r.u.real && r.u.limit === 5 * 1048576, 'the 5 MB estimate is used only here');
+    await nav(page, 'System');
+    const t = await page.locator('[data-nw-appinfo]').innerText();
+    ok(/older storage \(private browsing or blocked\)/.test(t) && /of about 5 MB/.test(t), 'the System tab says it is using the older storage');
+    // Next start, IndexedDB works: what was saved in localStorage wins over the older IndexedDB copy and moves
+    await page.evaluate(() => { window.storage.dev.setItem('fb:moveme', 'saved in the fallback'); });
+    await page.reload();
+    await page.waitForFunction(() => document.querySelector('nav button'), null, { timeout: 60000 });
+    await page.waitForTimeout(1500);
+    const r2 = await page.evaluate(() => ({ back: window.storage.dev.backend, v: window.storage.dev.getItem('fb:moveme'), ls: localStorage.getItem('fb:moveme'), marker: localStorage.getItem('__nw_dev_fallback') }));
+    ok(r2.back === 'indexeddb' && r2.v === 'saved in the fallback' && r2.ls === null && r2.marker === null, 'next start with IndexedDB: the fallback data moved over and the marker is gone');
+    await done(ctx, '14 fallback');
+  }
+
+  // 5. The banner: 85%, hide for 24 hours or until it rises 5 points
+  {
+    const ctx = await open({ ...asDocs(F.base()) }, { html: estStub });
+    const { page } = ctx;
+    const at = (usage, quota = 1000) => page.evaluate(async ([u, q]) => { window.__est = { usage: u, quota: q }; await window.storage.dev.refreshEstimate(); await new Promise(r => setTimeout(r, 450)); return window.storage.status().banners.filter(b => b.kind === 'device-full').map(b => b.text); }, [usage, quota]);
+    ok((await at(780)).length === 0 && (await at(849)).length === 0, '78% and 84.9%: no message');
+    const t85 = await at(850);
+    ok(t85.length === 1 && /^This device is running out of room for saved data \(85% of what the browser allows\)\. This does not clear when things upload\. To free room: System tab, then Clear caches\.$/.test(t85[0]), 'at 85% the message says what it is, that it does not clear on upload, and what to do → ' + (t85[0] || '').slice(0, 70));
+    ok(await page.locator('[data-nw-banner="device-full"]').isVisible(), 'and it is on screen');
+    await page.evaluate(() => window.storage.dismiss('device-full'));
+    ok((await at(850)).length === 0 && (await at(892)).length === 0, 'OK hides it, and a rise under 5 points does not bring it back');
+    ok((await at(900)).length === 1, 'a rise of 5 points brings it back');
+    await page.evaluate(() => window.storage.dismiss('device-full'));
+    ok((await at(900)).length === 0, 'hidden again');
+    await page.evaluate(() => window.storage.dev.setItem('__nw_room_dismiss', JSON.stringify({ at: Date.now() - 23 * 3600 * 1000, pct: 90 })));
+    ok((await at(900)).length === 0, 'still hidden after 23 hours');
+    await page.evaluate(() => window.storage.dev.setItem('__nw_room_dismiss', JSON.stringify({ at: Date.now() - 25 * 3600 * 1000, pct: 90 })));
+    ok((await at(900)).length === 1, 'back after 24 hours');
+    await page.evaluate(() => window.storage.dismiss('device-full'));
+    const afterFull = await page.evaluate(async () => { const real = IDBObjectStore.prototype.put; IDBObjectStore.prototype.put = function (v, k) { if (k === '__nw_cache:q') throw new DOMException('full', 'QuotaExceededError'); return real.apply(this, arguments); }; window.storage.dev.setItem('__nw_cache:q', 'x'); await window.storage.dev.flushed(); IDBObjectStore.prototype.put = real; await new Promise(r => setTimeout(r, 450)); return window.storage.status().banners.filter(b => b.kind === 'device-full').map(b => b.text); });
+    ok(afterFull.length === 1 && /did not fit on this device/.test(afterFull[0]), 'a save that does not fit shows it again even right after OK');
+    await done(ctx, '14 banner');
+  }
+
+  // 6. Two tabs on the same device
+  {
+    const ctx = await open({ ...asDocs(F.base()) });
+    const { page } = ctx;
+    const { pageInit, cdnFulfill, FONTS } = require('./p1-check');
+    const ORIGIN = 'https://nikhils-world.web.app';
+    const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+    const page2 = await page.context().newPage();
+    await page2.route('**/*', async (route) => {
+      const url = route.request().url();
+      if (url === ORIGIN + '/' || url === ORIGIN + '/index.html') return route.fulfill({ status: 200, contentType: 'text/html', body: html });
+      if (url.startsWith(ORIGIN + '/')) return route.fulfill({ status: 404, body: '' });
+      if ((/^https:\/\/unpkg\.com\//.test(url) || FONTS.test(url)) && route.request().method() === 'GET') return cdnFulfill(route);
+      return route.abort();
+    });
+    await page2.addInitScript(pageInit, { seed: {}, now: NOW, offline: false, noList: false, fakeFirestore: { ...asDocs(F.base()) } });
+    await page2.goto(ORIGIN + '/');
+    await page2.waitForFunction(() => document.querySelector('nav button'), null, { timeout: 60000 });
+    await page2.waitForTimeout(1500);
+    await page.evaluate(() => { window.storage.dev.setItem('__nw_cache:two', 'from tab A'); return window.storage.dev.flushed(); });
+    ok(await waitFor(page2, () => window.storage.dev.getItem('__nw_cache:two') === 'from tab A'), 'a write in one tab reaches the other tab');
+    await page2.evaluate(() => { window.storage.dev.removeItem('__nw_cache:two'); return window.storage.dev.flushed(); });
+    ok(await waitFor(page, () => window.storage.dev.getItem('__nw_cache:two') === null), 'and so does a removal');
+    const both = await Promise.all([page, page2].map(pg => pg.evaluate(() => window.storage.dev.backend)));
+    ok(both.every(b => b === 'indexeddb'), 'both tabs use IndexedDB');
+    await page2.close();
+    await done(ctx, '14 two tabs');
+  }
+
+  // 7. Startup on a 5 MB device copy
+  {
+    const ctx = await open({ ...asDocs(F.base()) });
+    const { page } = ctx;
+    const reloadAndTime = async () => {
+      const t0 = Date.now();
+      await page.reload();
+      await page.waitForFunction(() => document.querySelector('nav button'), null, { timeout: 60000 });
+      return Date.now() - t0;
+    };
+    const emptyScreen = await reloadAndTime();
+    await page.evaluate(async () => { const v = 'x'.repeat(250000); for (let i = 0; i < 11; i++) window.storage.dev.setItem('fixture:blob' + i, v); await window.storage.dev.flushed(); });
+    const bigScreen = await reloadAndTime();
+    const info = await page.evaluate(async () => {
+      const t0 = performance.now();
+      const n = await new Promise((resolve) => { const r = indexedDB.open('nw-device'); r.onsuccess = () => { const tx = r.result.transaction('kv', 'readonly'); const g = tx.objectStore('kv').getAll(); tx.oncomplete = () => { r.result.close(); resolve(g.result.length); }; }; });
+      return { gate: window.__nwGateMs, read: Math.round(performance.now() - t0), keys: n, bytes: window.storage.deviceBreakdown().total, sync: window.storage.dev.getItem('fixture:blob9').length };
+    });
+    console.log(`    startup with a ${(info.bytes / 1048576).toFixed(1)} MB device copy (${info.keys} keys): first screen waited ${info.gate} ms for the device copy; a plain read of it takes ${info.read} ms; page ready after ${bigScreen} ms (${emptyScreen} ms with an empty device copy)`);
+    ok(info.bytes >= 5 * 1048576 && info.gate < 1500 && info.sync === 250000, `the first screen waits ${info.gate} ms for a 5 MB device copy, and reads are then synchronous`);
+    await done(ctx, '14 startup');
+  }
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
   const run = (n) => which === 'all' || which === String(n);
@@ -920,6 +1195,8 @@ function part7() {
   if (run(10)) await part10();
   if (run(11)) await part11();
   if (run(12)) await part12();
+  if (run(13)) await part13();
+  if (run(14)) await part14();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });
