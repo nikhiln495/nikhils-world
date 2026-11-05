@@ -282,6 +282,231 @@
         return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
       };
 
+      // ── This device's copy: IndexedDB behind an in-memory copy ──
+      // Reads answer at once from memory (loaded before the first screen is drawn). Writes go through to
+      // IndexedDB. localStorage holds a key only for the keys in DEV_KEEP, or when IndexedDB isn't available
+      // (private browsing, blocked): then localStorage is used as before, with its 5 MB estimate.
+      // A write that doesn't fit is never silent: set()/setItem() return false when they can tell at once, and
+      // a failure that comes back later puts the old value back and raises the "device full" message.
+      // How it works, what is a cache and what is waiting to upload: docs/DEVICE-STORAGE.md.
+      const DEV_DB = 'nw-device', DEV_OS = 'kv';
+      const DEV_KEEP = /^(gdrive_token|firebase)/;      // stay in localStorage: the Drive token cache and Firebase's own keys
+      const DEV_FB_MARK = '__nw_dev_fallback';          // localStorage: this device ran without IndexedDB, so localStorage wins at the next move
+      const DEV_MIG_KEY = '__nw_dev_migrated';          // IndexedDB: when the move from localStorage ran and how much it moved
+      const DEV_DISMISS_KEY = '__nw_room_dismiss';      // IndexedDB: when the "device full" message was hidden, and at what percent
+      const DEV_PART1 = /^__nw_(dump_hist|ledger_|dump_queue|dev_draft:|dev_migrated|room_dismiss)/; // the keys nwDev uses
+      const DAY_MS = 86400000;
+      const isQuota = (e) => !!e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014 || /quota/i.test(String(e.message || '')));
+      const dev = (() => {
+        const mem = new Map();          // routed key → string: this device's copy, read at once
+        const touched = new Set();      // keys written or removed since the page started (the move never overwrites these)
+        const subs = new Set();
+        let backend = 'loading', idb = null, loadMs = null, migration = null, lastErr = null;
+        let quotaHit = null;            // { at, key, bytes }: the last write that did not fit
+        let est = null;                 // { usage, quota, at }: navigator.storage.estimate()
+        let persisted = null;           // true | false | null (can't ask)
+        let ops = new Map(), sched = false, chain = Promise.resolve(), bc = null;
+        let loaded = null;
+        const routed = (k) => !DEV_KEEP.test(k) && DEV_PART1.test(k);
+        const ls = (fn, dflt) => { try { return fn(window.localStorage); } catch (_) { return dflt; } };
+        const lsKeys = () => ls(s => { const out = []; for (let i = 0; i < s.length; i++) out.push(s.key(i)); return out; }, []);
+        const note = () => subs.forEach(fn => { try { fn(); } catch (_) {} });
+        const noteQuota = (key, v) => { quotaHit = { at: Date.now(), key, bytes: v ? String(v).length * 2 : 0 }; note(); };
+        const lsSet = (k, v) => { try { window.localStorage.setItem(k, v); return true; } catch (e) { if (isQuota(e)) noteQuota(k, v); lastErr = e; return false; } };
+
+        const idbOpen = () => new Promise((resolve, reject) => {
+          // Gives up after 4 seconds in which the page was free to answer: while the page itself is busy
+          // (the app's scripts are compiled in one block at start) IndexedDB can't answer, and that time doesn't count.
+          let idle = 0, last = Date.now();
+          const t = setInterval(() => { const now = Date.now(); idle += Math.min(now - last, 300); last = now; if (idle >= 4000) { clearInterval(t); reject(new Error('IndexedDB did not open within 4 seconds')); } }, 100);
+          let req;
+          try { req = indexedDB.open(DEV_DB, 1); } catch (e) { clearInterval(t); reject(e); return; }
+          req.onupgradeneeded = () => { try { req.result.createObjectStore(DEV_OS); } catch (_) {} };
+          req.onsuccess = () => { clearInterval(t); resolve(req.result); };
+          req.onerror = () => { clearInterval(t); reject(req.error || new Error('IndexedDB would not open')); };
+          req.onblocked = () => { clearInterval(t); reject(new Error('IndexedDB is blocked')); };
+        });
+        const idbAll = () => new Promise((resolve, reject) => {
+          const tx = idb.transaction(DEV_OS, 'readonly'), s = tx.objectStore(DEV_OS);
+          const keys = s.getAllKeys(), vals = s.getAll();
+          tx.oncomplete = () => { const m = new Map(); keys.result.forEach((k, i) => m.set(k, vals.result[i])); resolve(m); };
+          tx.onerror = tx.onabort = () => reject(tx.error || new Error('IndexedDB read failed'));
+        });
+        const idbGet = (list) => new Promise((resolve, reject) => {
+          const out = new Map();
+          const tx = idb.transaction(DEV_OS, 'readonly'), s = tx.objectStore(DEV_OS);
+          list.forEach(k => { const r = s.get(k); r.onsuccess = () => out.set(k, r.result); });
+          tx.oncomplete = () => resolve(out);
+          tx.onerror = tx.onabort = () => reject(tx.error || new Error('IndexedDB read failed'));
+        });
+        // pairs: [[key, string | null]]. One transaction; any failure (a quota error too) undoes all of it.
+        const idbTx = (pairs) => new Promise((resolve, reject) => {
+          let tx;
+          try {
+            tx = idb.transaction(DEV_OS, 'readwrite');
+            const s = tx.objectStore(DEV_OS);
+            pairs.forEach(([k, v]) => { if (v === null) s.delete(k); else s.put(v, k); });
+          } catch (e) { try { tx && tx.abort(); } catch (_) {} reject(e); return; }
+          tx.oncomplete = () => resolve();
+          tx.onabort = tx.onerror = () => reject(tx.error || new Error('IndexedDB write failed'));
+        });
+
+        // ── Writes: the newest value of each key goes up in one batch; every caller learns if it was stored ──
+        const enqueue = (k, v, prev) => {
+          const o = ops.get(k);
+          if (o) o.v = v; else ops.set(k, { v, prev, waiters: [] });
+          if (!sched) { sched = true; Promise.resolve().then(runOps); }
+        };
+        const settle = (k, o, ok, err) => {
+          if (!ok) {
+            lastErr = err || lastErr;
+            if (o.v !== null && mem.get(k) === o.v) { if (o.prev === undefined) mem.delete(k); else mem.set(k, o.prev); } // the old copy stays
+            if (isQuota(err)) noteQuota(k, o.v);
+          } else if (quotaHit && o.v !== null && String(o.v).length * 2 >= quotaHit.bytes) quotaHit = null;
+          o.waiters.forEach(r => r(ok));
+        };
+        const writeBatch = async (entries) => {
+          if (backend === 'localstorage' || !idb) {
+            entries.forEach(([k, o]) => { const ok = o.v === null ? (ls(s => (s.removeItem(k), true), false)) : lsSet(k, o.v); settle(k, o, ok); });
+            return;
+          }
+          try {
+            await idbTx(entries.map(([k, o]) => [k, o.v]));
+            entries.forEach(([k, o]) => settle(k, o, true));
+          } catch (e) {
+            if (entries.length === 1) settle(entries[0][0], entries[0][1], false, e);
+            else for (const en of entries) { // find the write that does not fit
+              try { await idbTx([[en[0], en[1].v]]); settle(en[0], en[1], true); } catch (e2) { settle(en[0], en[1], false, e2); }
+            }
+          }
+          try { if (bc) bc.postMessage({ keys: entries.map(([k]) => k) }); } catch (_) {}
+          note();
+        };
+        const runOps = () => {
+          sched = false;
+          const take = ops; ops = new Map();
+          const entries = [...take];
+          if (!entries.length) return;
+          chain = chain.then(() => loaded).then(() => writeBatch(entries)).catch(() => {});
+        };
+
+        const api = {
+          get backend() { return backend; },
+          get ready() { return loaded; },
+          routed,
+          subscribe: (fn) => { subs.add(fn); return () => subs.delete(fn); },
+          getItem(k) { return routed(k) ? (mem.has(k) ? mem.get(k) : null) : ls(s => s.getItem(k), null); },
+          // true if it was kept (or, for IndexedDB, is on its way and fits as far as can be told now); false if nothing was stored.
+          setItem(k, v) {
+            v = String(v);
+            if (!routed(k)) return lsSet(k, v);
+            if (backend === 'localstorage') { if (!lsSet(k, v)) return false; touched.add(k); mem.set(k, v); return true; }
+            const prev = mem.has(k) ? mem.get(k) : undefined;
+            const room = est && est.quota ? est.quota - est.usage : Infinity;
+            if ((v.length - (prev ? prev.length : 0)) * 2 > room) { noteQuota(k, v); return false; }
+            touched.add(k); mem.set(k, v); enqueue(k, v, prev);
+            return true;
+          },
+          // The same, but waits until IndexedDB has it: resolves true (stored) or false (nothing was stored).
+          put(k, v) {
+            const ok = api.setItem(k, v);
+            if (!ok || !routed(k) || backend === 'localstorage') return Promise.resolve(ok);
+            return new Promise(res => ops.get(k).waiters.push(res));
+          },
+          removeItem(k) {
+            if (!routed(k)) { ls(s => s.removeItem(k)); return; }
+            touched.add(k);
+            const prev = mem.has(k) ? mem.get(k) : undefined;
+            mem.delete(k);
+            if (backend === 'localstorage') { ls(s => s.removeItem(k)); return; }
+            enqueue(k, null, prev);
+          },
+          // Every key this device holds: the memory copy plus whatever localStorage still has.
+          entries() {
+            const out = [...mem.entries()];
+            lsKeys().forEach(k => { if (!mem.has(k) && !DEV_KEEP.test(k) && k !== DEV_FB_MARK) { const v = ls(s => s.getItem(k), null); if (v !== null) out.push([k, v]); } });
+            return out;
+          },
+          keys() { return api.entries().map(e => e[0]); },
+          flushed() { return chain.then(() => (ops.size ? api.flushed() : undefined)); },
+          info: () => ({ backend, loadMs, migration, quotaHit, est, persisted, lastError: lastErr ? String(lastErr.message || lastErr).slice(0, 120) : null }),
+          clearQuota: () => { quotaHit = null; },
+          async refreshEstimate() {
+            try { if (navigator.storage && navigator.storage.estimate) { const e = await navigator.storage.estimate(); est = { usage: Number(e.usage) || 0, quota: Number(e.quota) || 0, at: Date.now() }; } } catch (_) {}
+            note(); return est;
+          },
+          async askPersist() {
+            try {
+              if (navigator.storage && navigator.storage.persisted) persisted = (await navigator.storage.persisted()) ? true : (navigator.storage.persist ? !!(await navigator.storage.persist()) : false);
+            } catch (_) { persisted = null; }
+            note(); return persisted;
+          },
+        };
+
+        // ── Start: open IndexedDB, read everything into memory, move what localStorage still holds ──
+        const migrate = async (lsWins) => {
+          const keys = lsKeys().filter(k => routed(k));
+          if (!keys.length) return;
+          const want = new Map();
+          keys.forEach(k => { const v = ls(s => s.getItem(k), null); if (v !== null) want.set(k, v); });
+          // 1. copy: a key that IndexedDB already has is left alone (unless localStorage was used last), and a key written since the page started is never overwritten
+          const copy = (list) => new Promise((resolve, reject) => {
+            let tx;
+            try {
+              tx = idb.transaction(DEV_OS, 'readwrite');
+              const s = tx.objectStore(DEV_OS);
+              list.forEach(k => {
+                const r = s.get(k);
+                r.onsuccess = () => { if (!touched.has(k) && (lsWins || r.result === undefined)) s.put(want.get(k), k); };
+              });
+            } catch (e) { try { tx && tx.abort(); } catch (_) {} reject(e); return; }
+            tx.oncomplete = () => resolve();
+            tx.onabort = tx.onerror = () => reject(tx.error || new Error('IndexedDB write failed'));
+          });
+          const failedKeys = new Set();
+          try { await copy([...want.keys()]); }
+          catch (_) { for (const k of want.keys()) { try { await copy([k]); } catch (e) { failedKeys.add(k); if (isQuota(e)) noteQuota(k, want.get(k)); } } }
+          if (typeof window.__nwDevHook === 'function') { try { await window.__nwDevHook('after-copy'); } catch (_) {} }
+          // 2. read back and compare; 3. only then remove the localStorage copy
+          let back = new Map();
+          try { back = await idbGet([...want.keys()]); } catch (_) { want.forEach((v, k) => failedKeys.add(k)); }
+          let moved = 0, kept = 0, bytes = 0;
+          for (const [k, v] of want) {
+            const b = back.get(k);
+            const same = b === v || (touched.has(k)) || (!lsWins && b !== undefined);
+            if (failedKeys.has(k) || !same || (b === undefined && !touched.has(k))) { kept++; continue; }
+            if (ls(s => s.getItem(k), null) !== v) { kept++; continue; } // changed under us: leave it for the next start
+            ls(s => s.removeItem(k)); moved++; bytes += (k.length + v.length) * 2;
+          }
+          migration = { at: new Date().toISOString(), moved, kept, bytes };
+          if (!kept) ls(s => s.removeItem(DEV_FB_MARK));
+          if (moved) api.setItem(DEV_MIG_KEY, JSON.stringify(migration));
+        };
+        const start = async () => {
+          const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+          try { idb = await idbOpen(); backend = 'indexeddb'; } catch (e) { lastErr = e; backend = 'localstorage'; }
+          const lsWins = ls(s => s.getItem(DEV_FB_MARK), null) !== null;
+          if (backend === 'indexeddb') {
+            try { (await idbAll()).forEach((v, k) => { if (typeof v === 'string') mem.set(k, v); }); }
+            catch (e) { lastErr = e; backend = 'localstorage'; try { idb.close(); } catch (_) {} idb = null; }
+          }
+          if (backend === 'localstorage') ls(s => s.setItem(DEV_FB_MARK, '1'));
+          lsKeys().forEach(k => { if (routed(k) && (backend === 'localstorage' || lsWins || !mem.has(k))) { const v = ls(s => s.getItem(k), null); if (v !== null) mem.set(k, v); } });
+          if (backend === 'indexeddb') {
+            try { if (typeof BroadcastChannel !== 'undefined') { bc = new BroadcastChannel('nw-device'); bc.onmessage = async (ev) => {
+              const list = ((ev && ev.data && ev.data.keys) || []).filter(k => typeof k === 'string' && routed(k) && !ops.has(k));
+              if (!list.length || !idb) return;
+              try { (await idbGet(list)).forEach((v, k) => { if (ops.has(k)) return; if (typeof v === 'string') mem.set(k, v); else mem.delete(k); }); note(); } catch (_) {}
+            }; } } catch (_) {}
+            try { await migrate(lsWins); } catch (e) { lastErr = e; }
+          }
+          loadMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0);
+          api.refreshEstimate(); api.askPersist();
+        };
+        loaded = start().catch((e) => { lastErr = e; if (backend === 'loading') backend = 'localstorage'; });
+        return api;
+      })();
+
       // ── State ──
       const load = (k, dflt) => { try { const v = JSON.parse(localStorage.getItem(k) || 'null'); return v == null ? dflt : v; } catch (_) { return dflt; } };
       const keep = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} usageLater(); };
@@ -380,18 +605,41 @@
         usageLater();
       };
 
-      // ── This device's saved data (localStorage), counted at 2 bytes per character ──
+      // ── This device's saved data, counted at 2 bytes per character ──
       const measureDevice = () => {
         let chars = 0;
-        try {
-          for (let i = 0; i < localStorage.length; i++) {
-            const k = localStorage.key(i);
-            chars += (k ? k.length : 0) + ((k && localStorage.getItem(k)) || '').length;
-          }
-        } catch (_) {}
+        dev.entries().forEach(([k, v]) => { chars += k.length + v.length; });
         const bytes = chars * 2;
         usage = { bytes, limit: DEVICE_LIMIT, pct: bytes / DEVICE_LIMIT * 100 };
         return usage;
+      };
+      // What each thing on this device is, for the System tab meter:
+      //  cache   — can be thrown away and read again (the Ledger's last read, Brain Dump history). "Clear caches" removes only these.
+      //  pending — waiting to upload or to send, or a draft: never removed by the app (the upload queue, the device copy of a key
+      //            in it, pending Ledger sends, Brain Dump captures, device drafts).
+      //  offline — this device's copy of the data, so the app opens offline, plus this device's own settings.
+      // A key is a cache if it is listed here or starts with "__nw_cache:" (the way a new cache is marked).
+      const DEV_CACHES = { '__nw_dump_hist': 'Brain Dump history (read again from Google)', '__nw_ledger_cache': 'Last Ledger read (read again from Google)' };
+      const DEV_PENDING = /^(__nw_upload_queue$|__nw_ledger_pending$|__nw_dump_queue$|__nw_dev_draft:)/;
+      const devKind = (k, queued) => (DEV_PENDING.test(k) || (queued || new Set(queue.map(e => e.key))).has(k) ? 'pending' : (k in DEV_CACHES || k.startsWith('__nw_cache:')) ? 'cache' : 'offline');
+      const deviceBreakdown = () => {
+        const queued = new Set(queue.map(e => e.key));
+        const out = { offline: 0, caches: 0, pending: 0, cacheKeys: [] };
+        dev.entries().forEach(([k, v]) => {
+          const b = (k.length + v.length) * 2, kind = devKind(k, queued);
+          if (kind === 'cache') { out.caches += b; out.cacheKeys.push({ key: k, bytes: b, what: DEV_CACHES[k] || k }); }
+          else if (kind === 'pending') out.pending += b; else out.offline += b;
+        });
+        out.total = out.offline + out.caches + out.pending;
+        return Object.assign(out, dev.info());
+      };
+      // Removes the caches and nothing else. Pending sends, drafts and the offline copy of the data stay.
+      const clearCaches = () => {
+        const b = deviceBreakdown();
+        b.cacheKeys.forEach(c => dev.removeItem(c.key));
+        dev.clearQuota();
+        measureDevice(); emit();
+        return { removed: b.cacheKeys.map(c => c.key), bytes: b.caches };
       };
       function usageLater() {
         if (usageTimer) return;
@@ -1139,6 +1387,7 @@
       const roomLater = () => { if (usage.pct >= ROOM_AT && db && !isOffline()) makeRoom().catch(() => {}); };
 
       window.__dbReady.then(() => { measureDevice(); emit(); if (queue.length) flush(); roomLater(); });
+      dev.subscribe(() => { usageLater(); emit(); });
       window.addEventListener('online', () => { emit(); if (queue.length) flush(); roomLater(); });
       window.addEventListener('offline', () => emit());
 
@@ -1495,6 +1744,12 @@
 
         // This device's saved data, counted at 2 bytes per character, against a 5 MB estimate.
         deviceUsage: () => measureDevice(),
+        // The System tab meter: { offline, caches, pending, cacheKeys, total, backend, loadMs, migration, quotaHit, est, persisted }, in bytes (2 per character).
+        deviceBreakdown: () => deviceBreakdown(),
+        // Removes the caches only (see devKind). Returns { removed: [keys], bytes }.
+        clearCaches: () => clearCaches(),
+        // This device's copy as plain strings: dev.getItem / setItem / put / removeItem / entries / keys / ready / backend (nwDev uses it).
+        dev,
 
         // Lets the SaveStatusPill display "Local-only" mode distinctly
         isCloudReady: () => !!window.__dbAvailable,
@@ -12211,11 +12466,13 @@ function NwQuickActions({ tab }) {
 // ─────────────────────────────────────────────────────
 
 // ══ NW-DEVICE-CACHE START ══ (device only: the Ledger link, its last read, pending sends, Brain Dump captures)
+// Backed by IndexedDB behind an in-memory copy (window.storage.dev), so get/set/del stay synchronous. set() returns false when
+// nothing was stored. Caches (__nw_dump_hist, __nw_ledger_cache, keys starting __nw_cache:) can be cleared; pending sends never are.
 const NW_DEV = { hist: '__nw_dump_hist', link: '__nw_ledger_link', cache: '__nw_ledger_cache', pending: '__nw_ledger_pending', dump: '__nw_dump_queue', draft: '__nw_dev_draft:' };
 const nwDev = {
-  get(k, fallback = null) { try { const r = localStorage.getItem(k); return r == null ? fallback : JSON.parse(r); } catch (_) { return fallback; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (_) { return false; } },
-  del(k) { try { localStorage.removeItem(k); } catch (_) {} },
+  get(k, fallback = null) { try { const r = window.storage.dev.getItem(k); return r == null ? fallback : JSON.parse(r); } catch (_) { return fallback; } },
+  set(k, v) { try { return window.storage.dev.setItem(k, JSON.stringify(v)); } catch (_) { return false; } },
+  del(k) { try { window.storage.dev.removeItem(k); } catch (_) {} },
 };
 // ══ NW-DEVICE-CACHE END ══
 
@@ -14153,9 +14410,9 @@ async function nwGatherBackup() {
   } else {
     source = 'this-device';
     const keys = [];
-    try { for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i)); } catch (_) {}
+    try { window.storage.dev.keys().forEach(k => keys.push(k)); } catch (_) {}
     keys.filter(k => typeof k === 'string' && !NW_BACKUP_SKIP.test(k)).sort().forEach(k => {
-      entries.push(Object.assign({ key: k }, nwAsValue(localStorage.getItem(k)), { updatedAt: null }));
+      entries.push(Object.assign({ key: k }, nwAsValue(window.storage.dev.getItem(k)), { updatedAt: null }));
     });
   }
   const fingerprint = await nwHash(JSON.stringify({ entries, conflictCopies, unreadable }));
@@ -14361,6 +14618,9 @@ function NwAppInfo({ active }) {
   const [sw, setSw] = useState('');
   const [savedAt, setSavedAt] = useState(null);
   const [usage, setUsage] = useState(null);
+  const [bd, setBd] = useState(null);
+  const [confirm, setConfirm] = useState(false);
+  const [msg, setMsg] = useState('');
   useEffect(() => {
     if (!active) return undefined;
     let off = false;
@@ -14378,11 +14638,14 @@ function NwAppInfo({ active }) {
       } catch (_) { if (!off) setSw('none'); }
     })();
     setUsage(window.storage?.deviceUsage?.() || null);
-    const unsub = window.storage?.subscribe?.((s) => { if (!off && s && s.device && s.device.bytes) setUsage(s.device); });
+    setBd(window.storage?.deviceBreakdown?.() || null);
+    const unsub = window.storage?.subscribe?.((s) => { if (!off && s && s.device && s.device.bytes) setUsage(s.device); if (!off) setBd(window.storage?.deviceBreakdown?.() || null); });
     return () => { off = true; if (unsub) unsub(); };
   }, [active]);
   const offline = { yes: 'yes', next: 'after the next open', none: 'not set up yet', no: "this browser can't" }[sw] || 'checking…';
   const pct = usage ? usage.pct : 0;
+  const mb = (n) => `${((n || 0) / 1048576).toFixed(2)} MB`;
+  const btn = { background: '#2a2a2a', color: '#eee', border: '1px solid #444', borderRadius: 8, padding: '8px 12px', fontSize: 13, marginTop: 6, cursor: 'pointer' };
   const row = { display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 12, padding: '4px 0', color: '#ddd' };
   const when = savedAt && !isNaN(Date.parse(savedAt)) ? new Date(savedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : null;
   return (
@@ -14397,6 +14660,21 @@ function NwAppInfo({ active }) {
       <div style={{ height: 6, background: '#2a2a2a', borderRadius: 3, overflow: 'hidden', marginTop: 4 }}>
         <div style={{ width: `${Math.min(100, pct)}%`, height: '100%', background: pct >= 70 ? '#fbbf24' : '#4ECDC4' }} />
       </div>
+      {bd && <div data-nw-meter style={{ marginTop: 8 }}>
+        <div style={row}><span>Offline copy of your data</span><span data-nw-meter-offline>{mb(bd.offline)}</span></div>
+        <div style={row}><span>Caches (can be read again)</span><span data-nw-meter-caches>{mb(bd.caches)}</span></div>
+        <div style={row}><span>Waiting to upload</span><span data-nw-meter-pending>{mb(bd.pending)}</span></div>
+        <div style={row}><span>Kept by the browser</span><span data-nw-persisted>{bd.persisted === true ? 'yes' : bd.persisted === false ? "no (the browser may clear it if this device runs low on space)" : "can't ask"}</span></div>
+        {!confirm && <button data-nw-clear-caches disabled={!bd.caches} onClick={() => { setMsg(''); setConfirm(true); }} style={{ ...btn, opacity: bd.caches ? 1 : 0.5 }}>Clear caches</button>}
+        {confirm && <div data-nw-clear-confirm style={{ background: '#222', borderRadius: 8, padding: 10, marginTop: 6, fontSize: 12, color: '#ddd', lineHeight: 1.5 }}>
+          This removes only: {bd.cacheKeys.map(c => `${c.what} (${mb(c.bytes)})`).join('; ')}. They are read again from Google when you are online. Nothing waiting to upload and none of your data is removed.
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button data-nw-clear-go onClick={() => { const r = window.storage.clearCaches(); setConfirm(false); setMsg(`Cleared ${mb(r.bytes)}.`); setBd(window.storage.deviceBreakdown()); }} style={btn}>Clear now</button>
+            <button onClick={() => setConfirm(false)} style={btn}>Cancel</button>
+          </div>
+        </div>}
+        {msg && <div data-nw-clear-msg style={{ fontSize: 12, color: '#4ECDC4', marginTop: 6 }}>{msg}</div>}
+      </div>}
       <div style={{ fontSize: 11, color: '#888', marginTop: 6, lineHeight: 1.5 }}>Counted at 2 bytes per character. A message shows at the top at 70%.</div>
     </div>
   );
@@ -14919,11 +15197,12 @@ class ErrorBoundary extends React.Component {
 }
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(
+// The first screen is drawn after this device's copy is in memory (window.storage.dev), so every read answers at once.
+Promise.resolve(window.storage.dev.ready).catch(() => {}).then(() => root.render(
   <ErrorBoundary>
     <App />
   </ErrorBoundary>
-);
+));
 
   </script>
 

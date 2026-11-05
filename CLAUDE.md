@@ -66,9 +66,14 @@ The app opens and saves without internet (`sw.js`, registered at the end of `ind
    - **`NW-DEVICE-CACHE`** holds what must stay on one device and never reach Firestore (appdata is publicly
      readable): the Ledger link (`__nw_ledger_link`), the last Ledger read with its time (`__nw_ledger_cache`, work
      rows already left out), changes waiting to be sent to the Ledger (`__nw_ledger_pending`), Brain Dump captures
-     and their status (`__nw_dump_queue`), and drafts of text that is Ledger or Brain Dump text
-     (`useDeviceDraft`, `__nw_dev_draft:*`). Those inputs do **not** use `window.useDraft` (it saves to Firestore).
-     All keys start with `__nw`, so a fallback backup leaves them out.
+     and their status (`__nw_dump_queue`), the Brain Dump history (`__nw_dump_hist`) and drafts of text that is
+     Ledger or Brain Dump text (`useDeviceDraft`, `__nw_dev_draft:*`). Those inputs do **not** use `window.useDraft`
+     (it saves to Firestore). All keys start with `__nw`, so a fallback backup leaves them out. It is read and written
+     through `nwDev.get/set/del`, which stay synchronous: IndexedDB behind an in-memory copy loaded before the first
+     screen (`window.storage.dev`; `docs/DEVICE-STORAGE.md`). `nwDev.set` returns `false` when nothing was stored.
+     **A cache** (`__nw_dump_hist`, `__nw_ledger_cache`, or a new key named `__nw_cache:<name>`) can be thrown away and
+     read again; "Clear caches" on the System tab removes only those. **Pending sends** (`__nw_ledger_pending`,
+     `__nw_dump_queue`, device drafts, the upload queue) are never removed by the app.
    - `get(key)` → `{ value } | null` — the whole value (for a key in `SEALED_LOG_KEYS`: the active doc).
    - `getAll(key)` → the whole history (sealed parts + active, merged in order, deleted items left out).
      Use it on every screen that shows history.

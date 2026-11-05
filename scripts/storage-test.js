@@ -905,6 +905,93 @@ function part7() {
   ok(nomark.length >= 1, 'a missing marker fails the check');
 }
 
+// ── 13. Caches out of the way: the device cache lives in IndexedDB; caches can be cleared, pending sends never ──
+const idbDump = (page) => page.evaluate(() => new Promise((resolve) => {
+  const r = indexedDB.open('nw-device');
+  r.onerror = () => resolve(null);
+  r.onsuccess = () => {
+    const db = r.result;
+    try {
+      const tx = db.transaction('kv', 'readonly'), s = tx.objectStore('kv'), out = {};
+      const c = s.openCursor();
+      c.onsuccess = () => { const cur = c.result; if (cur) { out[cur.key] = cur.value; cur.continue(); } else { db.close(); resolve(out); } };
+      c.onerror = () => resolve(null);
+    } catch (e) { resolve(null); }
+  };
+}));
+const lsKeys = (page) => page.evaluate(() => Object.keys(localStorage));
+async function part13() {
+  console.log('\n[13. Device cache in IndexedDB: moved once, caches cleared, pending sends kept, persist answer shown]');
+  const hist = JSON.stringify({ docs: { d1: { paragraphs: 'p'.repeat(40000) } } });
+  const device = {
+    '__nw_dump_hist': hist, '__nw_ledger_cache': JSON.stringify({ at: 1, rows: [], rules: [], head: [], idx: {}, hidden: 0, pad: 'c'.repeat(1000) }),
+    '__nw_ledger_pending': JSON.stringify([{ id: 'lp_1', at: '2026-10-04T10:00:00Z', op: { kind: 'comment', parent: 'T', stepNum: 1, line: 'send me' } }]),
+    '__nw_dump_queue': JSON.stringify([{ id: 'd_1', at: '2026-10-04T10:00:00Z', text: 'capture', tag: '', status: 'device' }]),
+    '__nw_dev_draft:note1': JSON.stringify('half a thought'), '__nw_ledger_link': JSON.stringify('https://docs.google.com/spreadsheets/d/abcdefghijklmnopqrstuvwxyz/edit'),
+    'gdrive_token_v1': JSON.stringify({ token: 'T', expiresAt: Date.now() + 3600000 }),
+  };
+  const ctx = await open({ ...asDocs(F.base()) }, { device, html: (h) => h });
+  const { page } = ctx;
+  const idb = await idbDump(page);
+  const left = await lsKeys(page);
+  ok(idb && Object.keys(device).filter(k => k !== 'gdrive_token_v1').every(k => idb[k] === device[k]), 'every Ledger / Brain Dump key was copied into IndexedDB with the same text');
+  ok(!left.some(k => k.startsWith('__nw_') && k !== '__nw_upload_queue') || left.every(k => !/^__nw_(dump_hist|ledger_|dump_queue|dev_draft)/.test(k)), 'and removed from localStorage after it read back the same → ' + left.join(','));
+  ok(left.includes('gdrive_token_v1') && !(idb && idb.gdrive_token_v1), 'the Drive token cache was never moved');
+  const r1 = await page.evaluate(() => ({ b: window.storage.dev.backend, v: window.storage.dev.getItem('__nw_ledger_link'), m: window.storage.dev.info().migration }));
+  ok(r1.b === 'indexeddb' && /^"https:/.test(r1.v) && r1.m && r1.m.moved === 6 && r1.m.kept === 0, 'reads answer from memory right away; the move is recorded (6 moved, 0 kept)');
+
+  const bd = await page.evaluate(() => window.storage.deviceBreakdown());
+  const sz = (k) => (k.length + device[k].length) * 2;
+  ok(bd.caches === sz('__nw_dump_hist') + sz('__nw_ledger_cache') && bd.cacheKeys.length === 2, 'caches = Brain Dump history + last Ledger read');
+  ok(bd.pending === sz('__nw_ledger_pending') + sz('__nw_dump_queue') + sz('__nw_dev_draft:note1'), 'waiting = pending Ledger sends + Brain Dump captures + device drafts');
+  ok(bd.offline >= sz('__nw_ledger_link'), 'offline copy holds the Ledger link and the data copies');
+
+  await nav(page, 'System');
+  await page.waitForSelector('[data-nw-meter]');
+  const rows = await page.evaluate(() => ['offline', 'caches', 'pending'].map(n => document.querySelector(`[data-nw-meter-${n}]`).textContent));
+  ok(rows.every(t => /^\d+\.\d\d MB$/.test(t)) && rows[1] === `${(bd.caches / 1048576).toFixed(2)} MB`, 'the System tab shows three numbers → ' + rows.join(' / '));
+  await page.locator('[data-nw-clear-caches]').click();
+  const say = await page.locator('[data-nw-clear-confirm]').innerText();
+  ok(/Brain Dump history/.test(say) && /Last Ledger read/.test(say) && /Nothing waiting to upload/.test(say), 'Clear caches says what it removes first → ' + say.split('\n')[0].slice(0, 160));
+  const still = await page.evaluate(() => window.storage.dev.getItem('__nw_dump_hist') !== null);
+  ok(still, 'nothing is removed until the second tap');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  ok(await page.evaluate(() => window.storage.dev.getItem('__nw_dump_hist') !== null) && !(await page.locator('[data-nw-clear-confirm]').count()), 'Cancel keeps everything');
+  await page.locator('[data-nw-clear-caches]').click();
+  await page.locator('[data-nw-clear-go]').click();
+  await page.waitForTimeout(300);
+  const after = await page.evaluate(() => ({ g: window.storage.dev.getItem('__nw_dump_hist'), c: window.storage.dev.getItem('__nw_ledger_cache'), p: window.storage.dev.getItem('__nw_ledger_pending'), q: window.storage.dev.getItem('__nw_dump_queue'), d: window.storage.dev.getItem('__nw_dev_draft:note1'), l: window.storage.dev.getItem('__nw_ledger_link'), msg: document.querySelector('[data-nw-clear-msg]').textContent }));
+  ok(after.g === null && after.c === null && after.p && after.q && after.d && after.l && /^Cleared \d+\.\d\d MB\.$/.test(after.msg), 'caches cleared; pending sends, captures, drafts and the link stay → ' + after.msg);
+  await page.evaluate(() => window.storage.dev.flushed());
+  const idb2 = await idbDump(page);
+  ok(idb2 && !('__nw_dump_hist' in idb2) && !('__nw_ledger_cache' in idb2) && '__nw_ledger_pending' in idb2 && '__nw_dump_queue' in idb2 && '__nw_dev_draft:note1' in idb2, 'IndexedDB agrees: caches gone, pending kept');
+  const afterBd = await page.evaluate(() => window.storage.deviceBreakdown());
+  ok(afterBd.caches === 0 && afterBd.pending === bd.pending, 'the meter: caches 0, waiting unchanged');
+  await done(ctx, '13');
+
+  // The device copy of a key waiting to upload is "waiting", not "offline copy".
+  {
+    const c2 = await open({ ...asDocs(F.base()) });
+    await c2.page.evaluate(() => { window.__fakeFail = (op) => (op === 'set' ? 'reject' : null); });
+    await c2.page.evaluate(async () => { await window.storage.set('notes:2026_10_04', JSON.stringify({ notes: [{ id: 'n1', at: '2026-10-04T10:00:00Z', u: 1, text: 'waiting' }] })); });
+    const b = await c2.page.evaluate(() => window.storage.deviceBreakdown());
+    ok(b.pending > 0 && b.pending >= ('notes:2026_10_04'.length + 60) * 2, 'the device copy of a key waiting to upload counts as waiting to upload');
+    await c2.page.evaluate(() => window.storage.clearCaches());
+    ok(await c2.page.evaluate(() => window.storage.dev.getItem('notes:2026_10_04') !== null || localStorage.getItem('notes:2026_10_04') !== null), 'Clear caches leaves it');
+    await done(c2, '13 waiting copy');
+  }
+
+  // The browser's answer to "keep this" is shown.
+  for (const answer of [true, false]) {
+    const c3 = await open({ ...asDocs(F.base()) }, { html: (h) => h.replace('<head>', `<head><script>try{Object.defineProperty(navigator,'storage',{value:{persisted:async()=>false,persist:async()=>${answer},estimate:async()=>({usage:1048576,quota:1073741824})},configurable:true});}catch(e){}</script>`) });
+    await nav(c3.page, 'System');
+    await c3.page.waitForSelector('[data-nw-persisted]');
+    const t = await c3.page.locator('[data-nw-persisted]').textContent();
+    ok(answer ? t === 'yes' : /^no/.test(t), `persist() answered ${answer} → System tab says "${t.slice(0, 40)}"`);
+    await done(c3, '13 persist');
+  }
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
   const run = (n) => which === 'all' || which === String(n);
@@ -920,6 +1007,7 @@ function part7() {
   if (run(10)) await part10();
   if (run(11)) await part11();
   if (run(12)) await part12();
+  if (run(13)) await part13();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });
