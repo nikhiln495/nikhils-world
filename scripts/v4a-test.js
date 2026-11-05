@@ -424,7 +424,7 @@ async function part4() {
     await p3.waitForSelector('[data-pr-three-start]');
     ok(/Day 1 of Dr\. Shobha's 21 days was:/.test(await p3.locator('[data-pr-three-start]').innerText()) && await p3.locator('#pr-three-start').inputValue() === '', 'asks once, with a date picker that has no default');
     await p3.locator('#pr-three-start').fill('2026-11-01');
-    await p3.locator('[data-pr-three-start]').getByRole('button', { name: 'Save', exact: true }).click();
+    await p3.locator('[data-pr-three-start]').getByRole('button', { name: 'Save start date', exact: true }).click();
     await p3.waitForFunction(() => /Day 3 of 21/.test(document.body.innerText));
     ok(true, 'saving the date shows Day 3 of 21');
     const st = await memJSON(p3, 'practice:three-start');
@@ -571,7 +571,7 @@ async function part4() {
     ok(doc.entries.some(e => e.kind === 'park' && e.text === 'I worry about the lease'), "What now?'s parked worries have a Park button");
     await page.locator('textarea#pr-three-ack').fill('I did the tax folder.');
     await slot(page, 'academic').scrollIntoViewIfNeeded();
-    await page.locator('[data-pr-three]').getByRole('button', { name: 'Save', exact: true }).click();
+    await page.locator('[data-pr-three]').getByRole('button', { name: 'Save acknowledgement', exact: true }).click();
     await wait(page, 800);
     doc = await threeDoc(page);
     ok(doc.entries.some(e => e.kind === 'ack' && e.text === 'I did the tax folder.'), 'the Acknowledge box saves');

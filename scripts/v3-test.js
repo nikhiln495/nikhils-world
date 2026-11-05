@@ -398,7 +398,7 @@ async function part2() {
     await clickName(page, 'Confirm and send');
     await wait(page, 800);
     let w = writes(fake, 'update');
-    ok(w.length === 2 && w.some(x => x.range === 'Ledger!A2' && x.values[0][0] === true) && w.some(x => x.range === 'Ledger!M2' && /^2026-11-03 08:\d\d$/.test(x.values[0][0])), 'Done = TRUE and Completed_At = local time in the Ledger's format, only those two cells → ' + w.map(x => x.range).join(', '));
+    ok(w.length === 2 && w.some(x => x.range === 'Ledger!A2' && x.values[0][0] === true) && w.some(x => x.range === 'Ledger!M2' && /^2026-11-03 08:\d\d$/.test(x.values[0][0])), 'Done = TRUE and Completed_At = local time in the Ledger format, only those two cells → ' + w.map(x => x.range).join(', '));
     ok(fake.sheets.Ledger[1][0] === true && /^2026-11-03 08:\d\d$/.test(fake.sheets.Ledger[1][12]), 'the sheet has them');
     ok(/Saved/.test(await page.locator('[data-nw-savedbar]').first().innerText()), 'the Saved bar says Saved (the Ledger has it)');
     await finish(ctx, 'ledger done');

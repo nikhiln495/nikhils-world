@@ -13532,7 +13532,7 @@ function ThreeCard() {
           <label htmlFor="pr-three-start" style={{ fontSize: 14, color: PC.text, display: 'block', marginBottom: 4 }}>Day 1 of Dr. Shobha's 21 days was:</label>
           <div style={{ display: 'flex', gap: 8 }}>
             <input id="pr-three-start" type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={{ ...pInput, flex: 1 }} />
-            <button style={pBtn('solid')} disabled={busy || !startDate} onClick={saveStart}>Save</button>
+            <button style={pBtn('solid')} disabled={busy || !startDate} onClick={saveStart}>Save start date</button>
           </div>
         </div>
       )}
@@ -13624,7 +13624,7 @@ function ThreeCard() {
       <div style={{ borderTop: `1px solid ${PC.border}`, paddingTop: 8, marginTop: 8 }}>
         <label htmlFor="pr-three-ack" style={pLabel}>Acknowledge</label>
         <textarea id="pr-three-ack" rows={2} value={ack} onChange={e => setAck(e.target.value)} placeholder="One or two lines: what you did, and that you did it" style={{ ...pInput, minHeight: 56, marginBottom: 6, resize: 'vertical' }} />
-        <button style={pBtn('solid', { width: '100%' })} disabled={busy || !ack.trim()} onClick={saveAck}>Save</button>
+        <button style={pBtn('solid', { width: '100%' })} disabled={busy || !ack.trim()} onClick={saveAck}>Save acknowledgement</button>
       </div>
       {msg && <div role="status" style={{ fontSize: 13, color: PC.warn, marginTop: 8 }}>{msg}</div>}
     </div>
