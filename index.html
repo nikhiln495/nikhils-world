@@ -4388,7 +4388,7 @@ Return 3-5 foci. Focus on what's genuinely active, not historical.`,
           messages: [{ role: 'user', content: `Here are my recent sessions:\n\n${sessionDump}\n\nAnalyze my current foci.` }]
         })
       });
-      if (resp.status !== 200) throw new Error(`The AI proxy answered ${resp.status}.`);
+      if (resp.status !== 200) throw new Error(await window.nwProxyError(resp));
       const data = await resp.json();
       // Saved like every other Claude call (practice:asks:<today>, kind "kaizen-foci"), so the cost tracker counts it.
       if (window.pSaveAsk) await window.pSaveAsk({ kind: 'kaizen-foci', words: `${Math.min(summaries.length, 20)} sessions` }, `Here are my recent sessions:\n\n${sessionDump}\n\nAnalyze my current foci.`, data, AI_MODEL);
@@ -10546,7 +10546,17 @@ async function pSaveAsk(ask, prompt, data, model) {
 // previous ask on the same screen; a one-off ask would pay for a cache write that is never read.
 const P_LAST_ASK = {};
 const P_CACHE_WINDOW_MS = 5 * 60 * 1000;
-async function pCallClaude({ system, text, tools, toolChoice, ask, screen }) {
+// "The AI proxy answered 400: <the API's own message, first 200 characters>". The proxy sends { error: { message } } or { message }.
+async function pProxyError(resp) {
+  let msg = '';
+  try { const b = await resp.json(); msg = String((b && b.error && b.error.message) || (b && b.message) || ''); } catch (_) {}
+  msg = msg.replace(/\s+/g, ' ').trim().slice(0, 200);
+  return `The AI proxy answered ${resp.status}${msg ? ': ' + msg : '.'}`;
+}
+window.nwProxyError = pProxyError;
+// format: a structured-output format ({ type: 'json_schema', schema }) merged into output_config. Forced tool choice
+// ('tool' or 'any') is refused by the current models, so a fixed JSON shape comes through format instead.
+async function pCallClaude({ system, text, tools, toolChoice, format, ask, screen }) {
   if (!pOnline()) throw new Error('This device is offline.');
   const url = window.AI_PROXY_URL, model = window.AI_MODEL;
   if (!url || !model) throw new Error('AI proxy settings not found.');
@@ -10556,12 +10566,13 @@ async function pCallClaude({ system, text, tools, toolChoice, ask, screen }) {
   const body = { model, max_tokens: 16000, output_config: { effort: 'low' }, system: [{ type: 'text', text: system, ...(followUp ? { cache_control: { type: 'ephemeral' } } : {}) }] };
   if (tools) body.tools = tools;
   if (toolChoice) body.tool_choice = toolChoice;
+  if (format) body.output_config.format = format;
   body.messages = [{ role: 'user', content: text }];
   let resp;
   try {
     resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   } catch (e) { throw new Error(`Couldn't reach the AI proxy (${e?.message || 'network error'}).`); }
-  if (resp.status !== 200) throw new Error(`The AI proxy answered ${resp.status}.`);
+  if (resp.status !== 200) throw new Error(await pProxyError(resp));
   let data;
   try { data = await resp.json(); } catch (e) { throw new Error('The AI proxy sent something that is not JSON.'); }
   const saved = await pSaveAsk(ask, text, data, model);
@@ -12857,34 +12868,42 @@ window.NwLedgerSetup = NwLedgerSetup;
 // Voice rule for Coach me, Something else, Look outside and What now? (his Nov 2 note).
 const P_SYNTH = 'Before listing anything, synthesize across what he wrote and his record: name the patterns, then give only the few highest-leverage options. Get right to the meat of it by synthesizing, analyzing and finding multiple patterns and high-leverage interventions.';
 
+// Step kinds. An older saved result may say 'recovery'; it shows as Self-nourishment.
+const P_KIND_LABEL = { academic: 'Academic', other: 'Other', nourishment: 'Self-nourishment', recovery: 'Self-nourishment' };
+const P_NOW_NULL = { type: 'null' };
+// The reply shape for What now?, sent as a structured-output format (output_config.format). Rules for that format:
+// additionalProperties false on every object, nullable as anyOf with null, no minimum/maximum/minLength/maxLength,
+// minItems only 0 or 1, and no property that asks for reasoning.
 const P_NOW_TOOL = {
   name: 'plan_next',
   description: 'Give the patterns you see and 2 to 3 options for what to do next, as ordered chains of small steps.',
   input_schema: {
     type: 'object',
+    additionalProperties: false,
     properties: {
       patterns: { type: 'array', items: { type: 'string' }, description: '1 to 3 short lines across what he wrote and the list, for example several items waiting on the same thing.' },
       options: {
-        type: 'array', description: '2 to 3 options. Each is an ordered chain of next steps (a chain may cross tasks).',
-        items: { type: 'object', properties: {
+        type: 'array', minItems: 1, description: '2 to 3 options. Each is an ordered chain of next steps (a chain may cross tasks).',
+        items: { type: 'object', additionalProperties: false, properties: {
           title: { type: 'string', description: 'A plain name for this option.' },
-          steps: { type: 'array', items: { type: 'object', properties: {
+          steps: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
             text: { type: 'string', description: 'The smallest first physical action for this step, in literal words.' },
-            ledger_row: { type: ['integer', 'null'], description: 'The row number from the list when the step comes from the Ledger, else null.' },
+            ledger_row: { anyOf: [{ type: 'integer' }, P_NOW_NULL], description: 'The row number from the list when the step comes from the Ledger, else null.' },
             minutes: { type: 'number', description: 'Minutes. Over 10 minutes: give 2 to 3 times your estimate and set est to true.' },
             est: { type: 'boolean' },
             start: { type: 'string', description: 'Clock start time, 24-hour HH:MM.' },
-            kind: { type: 'string', enum: ['academic', 'other', 'recovery'] },
-          }, required: ['text', 'minutes', 'start'] } },
+            kind: { anyOf: [{ type: 'string', enum: ['academic', 'other', 'nourishment'] }, P_NOW_NULL], description: 'academic, other, or nourishment (Self-nourishment), else null.' },
+          }, required: ['text', 'ledger_row', 'minutes', 'est', 'start', 'kind'] } },
         }, required: ['title', 'steps'] },
       },
       parked: { type: 'array', items: { type: 'string' }, description: 'Worries he mentioned. Parked, not tasks.' },
       new_tasks: { type: 'array', items: { type: 'string' }, description: 'Tasks he mentioned that are not in the list, in his words.' },
-      question: { type: ['string', 'null'], description: 'At most one question, only if something essential is missing.' },
+      question: { anyOf: [{ type: 'string' }, P_NOW_NULL], description: 'At most one question, only if something essential is missing.' },
     },
-    required: ['patterns', 'options'],
+    required: ['patterns', 'options', 'parked', 'new_tasks', 'question'],
   },
 };
+const P_NOW_FORMAT = { type: 'json_schema', schema: P_NOW_TOOL.input_schema };
 
 const P_NOW_RULES = [
   'You help Nikhil decide what to do next. He typed or dictated everything in his head. You get his open list (the Ledger), the Ledger rules, what he has logged today and the local time.',
@@ -12894,11 +12913,13 @@ const P_NOW_RULES = [
   '- Plain, literal words. No metaphors. Never use the word "vessel". No grades, scores or verdicts about him.',
   '- Never ask whether he should move. Only say when.',
   '- Rewards go first or during a step, never held until after.',
-  '- Each option covers an Academic step, an Other step and a Recovery step when the material allows (Dr. Shobha\'s daily rule).',
+  '- Each option covers an Academic step, an Other step and a Self-nourishment step (kind "nourishment") when the material allows (Dr. Shobha\'s daily rule).',
   '- Over 10 minutes: give 2 to 3 times your estimate and set est to true.',
   '- Each step: the smallest first physical action, minutes, a clock start time (24-hour HH:MM, starting from the local time), and its row number when it comes from the list.',
   '- Worries he mentioned go in parked, not in options. Tasks he mentioned that are not in the list go in new_tasks, in his words.',
   '- At most one question, and only if something essential is missing.',
+  '- Calendar events ("Fixed events today") are fixed. Plan steps in the gaps between them. No step starts inside an event, and no step runs into the start of one.',
+  '- If "Today\'s three" are listed, build the options from them first: the picked Academic, Other and Self-nourishment steps.',
 ].join('\n');
 
 // The open rows sent to Claude: work rows were already left out when the Ledger was read.
@@ -12912,7 +12933,7 @@ function pNowRowLines(rows) {
     return bits.join(' | ');
   });
 }
-async function pNowText({ words, rows, rules, log, past, now = new Date() }) {
+async function pNowText({ words, rows, rules, log, past, three, givens, now = new Date() }) {
   const lines = pNowRowLines(rows);
   const pl = typeof pPredictionLine === 'function' ? await pPredictionLine().catch(() => '') : '';
   return [
@@ -12920,6 +12941,8 @@ async function pNowText({ words, rows, rules, log, past, now = new Date() }) {
     `Open Ledger rows (row | task | step | action | ...):\n${lines.length ? lines.join('\n') : '(none read)'}`,
     `Ledger rules:\n${rules.length ? rules.map(r => `- ${r}`).join('\n') : '(none read)'}`,
     past && past.lines && past.lines.length ? `Older Brain Dump lines that match (his own earlier notes, found by the app; context only. Do not turn them into tasks or options unless what he wrote now says the same):\n${past.lines.map(l => `- ${l}`).join('\n')}` : '',
+    givens || '',
+    three || '',
     pContextLine(log),
     pl,
     `Local time now: ${pTimeHM(now)}.`,
@@ -12934,21 +12957,25 @@ function pNowClean(input, rows) {
     steps: (Array.isArray(o?.steps) ? o.steps : []).filter(s => s && typeof s.text === 'string' && s.text.trim()).map(s => {
       const r = Number.isInteger(s.ledger_row) ? byRow.get(s.ledger_row) : null;
       const minutes = Math.max(1, Math.round(Number(s.minutes) || 1));
-      return { text: s.text.trim(), minutes, est: !!s.est || minutes > 10, start: /^\d{1,2}:\d\d$/.test(String(s.start || '')) ? String(s.start).padStart(5, '0') : '', kind: ['academic', 'other', 'recovery'].includes(s.kind) ? s.kind : null,
+      return { text: s.text.trim(), minutes, est: !!s.est || minutes > 10, start: /^\d{1,2}:\d\d$/.test(String(s.start || '')) ? String(s.start).padStart(5, '0') : '', kind: s.kind === 'recovery' ? 'nourishment' : ['academic', 'other', 'nourishment'].includes(s.kind) ? s.kind : null,
         ...(r ? { ledger: { row: r.row, task: r.Parent_Task, stepNum: r.Step_Num, stepAction: r.Step_Action } } : {}) };
     }),
   })).filter(o => o.steps.length);
   return { patterns: strs(input?.patterns).slice(0, 3), options, parked: strs(input?.parked), newTasks: strs(input?.new_tasks), question: typeof input?.question === 'string' && input.question.trim() ? input.question.trim() : null };
 }
-// Calls Claude with the forced tool. Returns { result, saved }. Needs internet.
-async function pWhatNow({ words, rows, rules, log, feedback, past }) {
-  const text0 = await pNowText({ words, rows, rules, log, past });
+// Calls Claude with a structured-output format (no forced tool). Returns { result, saved }. Needs internet.
+// A refusal, or JSON that does not parse, is one plain line; his words stay in the box.
+async function pWhatNow({ words, rows, rules, log, feedback, past, three, givens }) {
+  const text0 = await pNowText({ words, rows, rules, log, past, three, givens });
   const text = feedback ? `${text0}\n\nThe last options did not fit. Why, in his words: ${feedback}` : text0;
-  const { data, saved } = await pCallClaude({ system: `${P_VOICE}\n\n${P_SYNTH}\n\n${P_NOW_RULES}`, text, tools: [P_NOW_TOOL], toolChoice: { type: 'tool', name: 'plan_next' }, ask: { kind: feedback ? 'what-now-again' : 'what-now', words: '', feedback: feedback ? '(in the ramp entry)' : undefined, redact: true }, screen: 'what-now' });
-  const block = (data?.content || []).find(b => b.type === 'tool_use' && b.name === 'plan_next');
-  if (!block) throw pAskError('Claude answered without a plan.', saved);
-  const result = pNowClean(block.input, rows);
-  if (!result.options.length) throw pAskError('Claude sent no usable options.', saved);
+  const { data, saved } = await pCallClaude({ system: `${P_VOICE}\n\n${P_SYNTH}\n\n${P_NOW_RULES}`, text, format: P_NOW_FORMAT, ask: { kind: feedback ? 'what-now-again' : 'what-now', words: '', feedback: feedback ? '(in the ramp entry)' : undefined, redact: true }, screen: 'what-now' });
+  const texts = (data?.content || []).filter(b => b && b.type === 'text' && typeof b.text === 'string');
+  if (data?.stop_reason === 'refusal' || !texts.length) throw pAskError('Claude did not answer that one. Your words are still in the box. Try again.', saved);
+  let input = null;
+  try { input = JSON.parse(texts.map(b => b.text).join('').trim()); } catch (_) {}
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw pAskError("Claude's answer could not be read. Your words are still in the box. Try again.", saved);
+  const result = pNowClean(input, rows);
+  if (!result.options.length) throw pAskError('Claude sent no usable options. Your words are still in the box. Try again.', saved);
   return { result, saved, usage: data?.usage || null };
 }
 // practice:ramp:<day>: his words and the result, append-only, merged by id.
@@ -13065,7 +13092,7 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
       setSt({ busy: false, err: '', res: result, rampId, saved, whereSaved: where, past });
       setChosen(null); setPlan([]); setRun(null); setDoneOp(null);
       if (!feedback) clearWords(); else clearMisfit();
-    } catch (e) { setSt(s => ({ ...s, busy: false, err: e.message, saved: e.saved })); }
+    } catch (e) { setSt(s => ({ ...s, busy: false, err: e.message, saved: e.saved, retryFb: feedback })); }
   };
   const pick = (i) => { setChosen(i); setPlanStart(st.res.options[i].steps[0]?.start || ''); setPlan(st.res.options[i].steps.map(s => ({ ...s }))); setRun(null); setDoneOp(null); setMsg(''); };
   const edit = (k, patch) => setPlan(p => p.map((s, j) => (j === k ? { ...s, ...patch } : s)));
@@ -13105,6 +13132,7 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
       <button style={pBtn('solid', { width: '100%' })} disabled={!online || st.busy || !words.trim()} onClick={() => ask()}>{st.busy ? 'Thinking…' : 'What now?'}</button>
       {!online && <div style={{ fontSize: 12, color: PC.muted, marginTop: 6 }}>What now needs internet. Your words are kept in the box.</div>}
       {st.err && <PNote msg={`❌ ${st.err}`} />}
+      {st.err && <button data-pr-now-retry style={pBtn('ghost', { width: '100%', marginTop: 6 })} disabled={!online || st.busy || !words.trim()} onClick={() => ask(st.retryFb)}>Try again</button>}
       {msg && <div role="status" style={{ fontSize: 13, color: PC.text, marginTop: 8 }}>{msg}</div>}
       {res && (
         <div style={{ marginTop: 12 }}>
@@ -13120,7 +13148,7 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
             <button key={i} data-pr-now-option aria-pressed={chosen === i} onClick={() => pick(i)} style={{ ...pCard({ marginBottom: 8, borderColor: chosen === i ? PC.accent : PC.border }), width: '100%', textAlign: 'left', cursor: 'pointer', display: 'block', fontFamily: pFont, color: PC.text }}>
               <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>{o.title}</div>
               {o.steps.map((s, k) => (
-                <div key={k} style={{ fontSize: 14, lineHeight: 1.5 }}><span style={{ fontFamily: pMono, color: PC.muted }}>{s.start || '--:--'}</span> {s.text} <span style={{ color: PC.muted }}>· {s.minutes} min{s.est ? ' est.' : ''}{s.kind ? ` · ${s.kind}` : ''}</span></div>
+                <div key={k} style={{ fontSize: 14, lineHeight: 1.5 }}><span style={{ fontFamily: pMono, color: PC.muted }}>{s.start || '--:--'}</span> {s.text} <span style={{ color: PC.muted }}>· {s.minutes} min{s.est ? ' est.' : ''}{s.kind ? ` · ${P_KIND_LABEL[s.kind] || s.kind}` : ''}</span></div>
               ))}
             </button>
           ))}
