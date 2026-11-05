@@ -45,7 +45,7 @@ Keys and ids live only here. Nothing secret is in the repo.
 ## 5. iPhone
 1. In Voice Memos, open a recording → tap **⋯** or the share icon → **Save to Files** → **Google Drive** → **Nikhil's World Voice Inbox** → **Save**.
 2. Within about 15 minutes the text appears in "Transcripts of Voice Recordings" and the audio moves to **Done**. If it fails 3 times it moves to **Problem** with the error in the file's description.
-3. Optional Shortcut: Shortcuts app → **+** → add **Get Latest Voice Memo**... if your iOS has no such action, use **Find Files** (Voice Memos folder, sorted newest) → **Save File** → Google Drive → the Inbox folder, ask where to save off. Add it to the Home Screen.
+3. Optional Shortcut (Shortcuts app): **+** → **Find Files** (the folder your Voice Memos are saved in, sort by newest, limit 1) → **Save File** → Google Drive → Nikhil's World Voice Inbox, with **Ask Where to Save** off. Add it to the Home Screen.
 
 Notes: the memo's date and time come from the Voice Memos file name (`20261103 091400-…`) when it has one, otherwise from the file's modified time. Your own text above the first date heading is never read or changed.
 
