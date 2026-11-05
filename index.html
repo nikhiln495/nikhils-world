@@ -153,8 +153,8 @@
       const WARN_AT = Math.round(SAFE * 0.85);
       const MB = 1024 * 1024;
       const BIG_AT = 1.5 * MB;        // a key outside SEALED_LOG_KEYS this big in total gets a banner
-      const DEVICE_LIMIT = 5 * MB;    // estimate of what this device's localStorage holds (2 bytes per character)
-      const DEVICE_WARN_PCT = 70;
+      const DEVICE_LIMIT = 5 * MB;    // estimate of what localStorage holds (2 bytes per character): used only when IndexedDB isn't available, and to time the old Kaizen tidy
+      const DEVICE_WARN_PCT = 85;     // the "device full" message shows at this percent of the room the browser allows (or when a save did not fit)
       const CLOUD_TIMEOUT_MS = 15000; // a cloud write not settled by then counts as device-only
       const Q_KEY = '__nw_upload_queue';
       const LAST_KEY = '__nw_last_cloud_save';
@@ -294,7 +294,6 @@
       const DEV_FB_MARK = '__nw_dev_fallback';          // localStorage: this device ran without IndexedDB, so localStorage wins at the next move
       const DEV_MIG_KEY = '__nw_dev_migrated';          // IndexedDB: when the move from localStorage ran and how much it moved
       const DEV_DISMISS_KEY = '__nw_room_dismiss';      // IndexedDB: when the "device full" message was hidden, and at what percent
-      const DEV_PART1 = /^__nw_(dump_hist|ledger_|dump_queue|dev_draft:|dev_migrated|room_dismiss)/; // the keys nwDev uses
       const DAY_MS = 86400000;
       const isQuota = (e) => !!e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014 || /quota/i.test(String(e.message || '')));
       const dev = (() => {
@@ -307,11 +306,11 @@
         let persisted = null;           // true | false | null (can't ask)
         let ops = new Map(), sched = false, chain = Promise.resolve(), bc = null;
         let loaded = null;
-        const routed = (k) => !DEV_KEEP.test(k) && DEV_PART1.test(k);
+        const routed = (k) => !DEV_KEEP.test(k);
         const ls = (fn, dflt) => { try { return fn(window.localStorage); } catch (_) { return dflt; } };
         const lsKeys = () => ls(s => { const out = []; for (let i = 0; i < s.length; i++) out.push(s.key(i)); return out; }, []);
-        const note = () => subs.forEach(fn => { try { fn(); } catch (_) {} });
-        const noteQuota = (key, v) => { quotaHit = { at: Date.now(), key, bytes: v ? String(v).length * 2 : 0 }; note(); };
+        const note = (why) => subs.forEach(fn => { try { fn(why); } catch (_) {} });
+        const noteQuota = (key, v) => { quotaHit = { at: Date.now(), key, bytes: v ? String(v).length * 2 : 0 }; note('write'); };
         const lsSet = (k, v) => { try { window.localStorage.setItem(k, v); return true; } catch (e) { if (isQuota(e)) noteQuota(k, v); lastErr = e; return false; } };
 
         const idbOpen = () => new Promise((resolve, reject) => {
@@ -380,7 +379,7 @@
             }
           }
           try { if (bc) bc.postMessage({ keys: entries.map(([k]) => k) }); } catch (_) {}
-          note();
+          note('write');
         };
         const runOps = () => {
           sched = false;
@@ -428,18 +427,19 @@
             return out;
           },
           keys() { return api.entries().map(e => e[0]); },
-          flushed() { return chain.then(() => (ops.size ? api.flushed() : undefined)); },
+          // Resolves when every write made so far has been tried (tests and backups use it).
+          async flushed() { for (;;) { const c = chain; await c; if (c === chain && !ops.size && !sched) return; } },
           info: () => ({ backend, loadMs, migration, quotaHit, est, persisted, lastError: lastErr ? String(lastErr.message || lastErr).slice(0, 120) : null }),
           clearQuota: () => { quotaHit = null; },
           async refreshEstimate() {
             try { if (navigator.storage && navigator.storage.estimate) { const e = await navigator.storage.estimate(); est = { usage: Number(e.usage) || 0, quota: Number(e.quota) || 0, at: Date.now() }; } } catch (_) {}
-            note(); return est;
+            note('estimate'); return est;
           },
           async askPersist() {
             try {
               if (navigator.storage && navigator.storage.persisted) persisted = (await navigator.storage.persisted()) ? true : (navigator.storage.persist ? !!(await navigator.storage.persist()) : false);
             } catch (_) { persisted = null; }
-            note(); return persisted;
+            note('estimate'); return persisted;
           },
         };
 
@@ -496,7 +496,7 @@
             try { if (typeof BroadcastChannel !== 'undefined') { bc = new BroadcastChannel('nw-device'); bc.onmessage = async (ev) => {
               const list = ((ev && ev.data && ev.data.keys) || []).filter(k => typeof k === 'string' && routed(k) && !ops.has(k));
               if (!list.length || !idb) return;
-              try { (await idbGet(list)).forEach((v, k) => { if (ops.has(k)) return; if (typeof v === 'string') mem.set(k, v); else mem.delete(k); }); note(); } catch (_) {}
+              try { (await idbGet(list)).forEach((v, k) => { if (ops.has(k)) return; if (typeof v === 'string') mem.set(k, v); else mem.delete(k); }); note('write'); } catch (_) {}
             }; } } catch (_) {}
             try { await migrate(lsWins); } catch (e) { lastErr = e; }
           }
@@ -508,14 +508,10 @@
       })();
 
       // ── State ──
-      const load = (k, dflt) => { try { const v = JSON.parse(localStorage.getItem(k) || 'null'); return v == null ? dflt : v; } catch (_) { return dflt; } };
-      const keep = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} usageLater(); };
-      let queue = load(Q_KEY, []).filter(e => e && typeof e.key === 'string' && typeof e.id === 'string');
-      let lastCloud = Number(load(LAST_KEY, 0)) || null;
-      let conflicts = load(CONFLICTS_KEY, []).filter(c => c && typeof c.id === 'string');
-      const dismissedSizes = load(DISMISSED_KEY, {});
-      const seen = load(SEEN_KEY, {});
-      const devMarks = load(MARKS_KEY, {});
+      const load = (k, dflt) => { try { const v = JSON.parse(dev.getItem(k) || 'null'); return v == null ? dflt : v; } catch (_) { return dflt; } };
+      const keep = (k, v) => { dev.setItem(k, JSON.stringify(v)); usageLater(); };
+      // Read from this device's copy once it is loaded (initState, below); everything async waits for that.
+      let queue = [], lastCloud = null, conflicts = [], dismissedSizes = {}, seen = {}, devMarks = {};
       // A short name for this device ("Mac Chrome k3f9"), made once and kept here. It goes on the practice
       // entries this device saves, so the entries of two devices can be told apart.
       const DEVICE_KEY = '__nw_device';
@@ -531,7 +527,7 @@
       };
       const ROOM_AT = 60;                  // % of the device estimate at which the old Kaizen device copy is tidied
       const ROOM_KEY = '__nw_room_notes';  // conflict copies made when tidying it (one banner each)
-      let roomNotes = load(ROOM_KEY, []).filter(n => n && typeof n.id === 'string');
+      let roomNotes = [];
       const failed = new Map();     // id → { what, reason }: saved neither in the cloud nor on this device
       const sizeWarn = new Map();   // id → { what, bytes, note }
       const bigKeys = new Map();    // key → total bytes, for keys outside SEALED_LOG_KEYS at or over BIG_AT
@@ -548,13 +544,26 @@
       const listeners = new Set();
       let flushing = null, flushAgain = false;
       let usage = { bytes: 0, limit: DEVICE_LIMIT, pct: 0 };
-      let usageTimer = null, usageDismissed = null;
+      let usageTimer = null, estTimer = null;
+      const initState = () => {
+        queue = load(Q_KEY, []).filter(e => e && typeof e.key === 'string' && typeof e.id === 'string');
+        lastCloud = Number(load(LAST_KEY, 0)) || null;
+        conflicts = load(CONFLICTS_KEY, []).filter(c => c && typeof c.id === 'string');
+        dismissedSizes = load(DISMISSED_KEY, {});
+        seen = load(SEEN_KEY, {});
+        devMarks = load(MARKS_KEY, {});
+        roomNotes = load(ROOM_KEY, []).filter(n => n && typeof n.id === 'string');
+        measureDevice();
+      };
+      // Every async call waits for the Firebase start AND for this device's copy (window.__dbReady covers both).
+      const devReady = Promise.resolve(dev.ready).then(initState);
+      window.__dbReady = window.__dbReady.then((v) => devReady.then(() => v));
 
       const ready = async () => { try { await window.__dbReady; } catch (_) {} };
       const isOffline = () => typeof navigator !== 'undefined' && navigator.onLine === false;
       const nwErr = (reason) => Object.assign(new Error(reason), { nwReason: reason });
       const inQueue = (id) => queue.some(e => e.id === id);
-      const localGet = (key) => { try { return localStorage.getItem(key); } catch (_) { return null; } };
+      const localGet = (key) => dev.getItem(key);
       const saveQueue = () => keep(Q_KEY, queue);
       const serial = (id, fn) => {
         const run = (chains.get(id) || Promise.resolve()).then(fn, fn);
@@ -595,22 +604,27 @@
       // (an old copy that looks current could be edited offline and overwrite newer data).
       const refreshDevice = (key, id, value, f) => {
         if (inQueue(id) || isReadOnlyId(id) || typeof value !== 'string') return;
-        try {
-          if (localStorage.getItem(key) !== value) localStorage.setItem(key, value);
-          seenSet(id, msOf(f && f.updatedAt) || 0, f && Array.isArray(f.parts) ? f.parts.length : 0);
-        } catch (_) {
-          try { localStorage.removeItem(key); } catch (__) {}
-          seenDrop(id);
+        const before = dev.getItem(key);
+        if (before !== value) {
+          // If the write fails later, the old copy is put back; then it is dropped so a stale copy never looks current.
+          dev.put(key, value).then(ok => { if (!ok && dev.getItem(key) === before) { dev.removeItem(key); seenDrop(id); } });
         }
+        seenSet(id, msOf(f && f.updatedAt) || 0, f && Array.isArray(f.parts) ? f.parts.length : 0);
         usageLater();
       };
 
-      // ── This device's saved data, counted at 2 bytes per character ──
+      // ── This device's saved data ──
+      // bytes: what this app keeps on the device, counted at 2 bytes per character. With IndexedDB the room is
+      // what navigator.storage.estimate() says (used / quota, real numbers); with the localStorage fallback it is
+      // bytes against an estimate of 5 MB. ownPct is bytes against 5 MB, only to time the old Kaizen tidy.
       const measureDevice = () => {
         let chars = 0;
         dev.entries().forEach(([k, v]) => { chars += k.length + v.length; });
         const bytes = chars * 2;
-        usage = { bytes, limit: DEVICE_LIMIT, pct: bytes / DEVICE_LIMIT * 100 };
+        const info = dev.info();
+        const real = info.backend === 'indexeddb' && !!info.est && info.est.quota > 0;
+        const limit = real ? info.est.quota : DEVICE_LIMIT, used = real ? info.est.usage : bytes;
+        usage = { bytes, used, limit, pct: used / limit * 100, real, backend: info.backend, ownPct: bytes / DEVICE_LIMIT * 100 };
         return usage;
       };
       // What each thing on this device is, for the System tab meter:
@@ -643,8 +657,10 @@
       };
       function usageLater() {
         if (usageTimer) return;
-        usageTimer = setTimeout(() => { usageTimer = null; const before = usage.pct >= DEVICE_WARN_PCT; measureDevice(); if (before !== (usage.pct >= DEVICE_WARN_PCT) || before) emit(); roomLater(); }, 300);
+        usageTimer = setTimeout(() => { usageTimer = null; measureDevice(); emit(); roomLater(); }, 300);
       }
+      // After writes, ask the browser for its numbers again (at most every 3 seconds).
+      const estimateLater = () => { if (estTimer) return; estTimer = setTimeout(() => { estTimer = null; dev.refreshEstimate(); }, 3000); };
 
       // ── What a key is, in words (for banners) ──
       const WHAT = [
@@ -700,8 +716,18 @@
           const name = whatOf(key) === `"${key}"` ? `"${key}"` : `${whatOf(key)} (key ${key})`;
           out.push({ id: 'big:' + key, kind: 'big', dismissable: true, text: `${name} is ${mbText(bytes)} MB in total. Each save now uploads the whole value, and this device's copy may stop fitting.` });
         });
-        if (usage.pct >= DEVICE_WARN_PCT && usageDismissed !== Math.floor(usage.pct)) {
-          out.push({ id: 'device-full', kind: 'device-full', dismissable: true, text: `This device's saved data is ${(usage.bytes / MB).toFixed(2)} MB of about 5 MB (${Math.round(usage.pct)}%). When it is full, saves made offline can't be kept on this device.` });
+        // Only when room is really short (85% of what the browser allows, or a save that did not fit). Hiding it lasts
+        // 24 hours, or until the percent rises 5 points, or until another save does not fit.
+        const hit = dev.info().quotaHit;
+        if (usage.pct >= DEVICE_WARN_PCT || hit) {
+          const d = load(DEV_DISMISS_KEY, null), now = Date.now();
+          const hidden = d && typeof d.at === 'number' && now - d.at < DAY_MS && usage.pct < (Number(d.pct) || 0) + 5 && !(hit && hit.at > d.at);
+          if (!hidden) {
+            const tail = " This does not clear when things upload. To free room: System tab, then Clear caches.";
+            out.push({ id: 'device-full', kind: 'device-full', dismissable: true, text: hit
+              ? `${whatOf(hit.key)} did not fit on this device, so it was not stored here.${tail}`
+              : `This device is running out of room for saved data (${Math.round(usage.pct)}% of what the browser allows).${tail}` });
+          }
         }
         roomNotes.forEach(n => out.push({ id: 'room:' + n.id, kind: 'room', dismissable: true, text: `To make room on this device, older Kaizen history kept on this device was removed. ${n.days} day${n.days === 1 ? ' was' : 's were'} missing or different in the cloud, so the whole copy was first saved in the cloud as ${n.id}.` }));
         readIssues.forEach((r, id) => out.push({ id: 'read:' + id, kind: 'read', dismissable: true, text: `Older parts of ${r.what} couldn't be read, so some of its history may be missing from the screen. Nothing was deleted. Reason: ${r.reason}.` }));
@@ -1079,7 +1105,7 @@
           return null;
         }
         if (!written) return null;
-        try { localStorage.setItem(key, merged); } catch (_) {}
+        dev.setItem(key, merged);
         metaCache.set(id, metaOf(written));
         seenSet(id, at, 0);
         measure(id, written);
@@ -1101,7 +1127,7 @@
           meta = metaOf(cur);
           if (cur && typeof cur.value === 'string' && !cur.split) {
             const merged = merger(cur.value, value);
-            if (merged !== value) { value = merged; try { localStorage.setItem(key, merged); } catch (_) {} }
+            if (merged !== value) { value = merged; dev.setItem(key, merged); }
           }
         }
         if (!meta) meta = metaOf(await readRaw(id));
@@ -1164,7 +1190,7 @@
         foldWhole.delete(id);
         idxCache.delete(id);
         measureKey(key, whole);
-        if (whole !== value && !inQueue(id)) { try { localStorage.setItem(key, whole); } catch (_) {} }
+        if (whole !== value && !inQueue(id)) dev.setItem(key, whole);
         return last;
       };
 
@@ -1338,7 +1364,7 @@
         roomBusy = (async () => {
           const out = [];
           measureDevice();
-          if (!force && usage.pct < ROOM_AT) return out;
+          if (!force && usage.ownPct < ROOM_AT) return out;
           if (!db || isOffline()) return out;
           for (const key of Object.keys(LEGACY_PARTS)) {
             const id = sanitiseKey(key);
@@ -1367,13 +1393,13 @@
                   if (v !== raw) throw nwErr('the copy read back from the cloud is not the same');
                 } catch (e) { out.push({ key: lk, action: 'kept', why: reasonOf(e) }); continue; }
                 if (localGet(lk) !== raw) { out.push({ key: lk, action: 'kept', why: 'it changed while checking' }); continue; }
-                try { localStorage.removeItem(lk); } catch (_) {}
+                dev.removeItem(lk);
                 roomNotes = roomNotes.concat([{ id: cid, key: lk, days: differ.length, at: Date.now() }]);
                 keep(ROOM_KEY, roomNotes);
                 out.push({ key: lk, action: 'saved-then-removed', copy: cid, days: differ });
               } else {
                 if (localGet(lk) !== raw) { out.push({ key: lk, action: 'kept', why: 'it changed while checking' }); continue; }
-                try { localStorage.removeItem(lk); } catch (_) {}
+                dev.removeItem(lk);
                 out.push({ key: lk, action: 'removed' });
               }
               seenDrop(lid);
@@ -1384,10 +1410,10 @@
         })().finally(() => { roomBusy = null; });
         return roomBusy;
       };
-      const roomLater = () => { if (usage.pct >= ROOM_AT && db && !isOffline()) makeRoom().catch(() => {}); };
+      const roomLater = () => { if (usage.ownPct >= ROOM_AT && db && !isOffline()) makeRoom().catch(() => {}); };
 
       window.__dbReady.then(() => { measureDevice(); emit(); if (queue.length) flush(); roomLater(); });
-      dev.subscribe(() => { usageLater(); emit(); });
+      dev.subscribe((why) => { usageLater(); if (why === 'write') estimateLater(); });
       window.addEventListener('online', () => { emit(); if (queue.length) flush(); roomLater(); });
       window.addEventListener('offline', () => emit());
 
@@ -1398,8 +1424,7 @@
         const what = opts.what || whatOf(key);
         const whole = foldWhole.has(id);
         if (Array.isArray(opts.marks)) setMarks(key, opts.marks);
-        let localOk = false;
-        try { localStorage.setItem(key, value); localOk = true; } catch (_) {}
+        const localOk = await dev.put(key, value); // false: it did not fit on this device, nothing was stored here
         usageLater();
         const q = queue.find(e => e.id === id);
         const deviceOnly = (reason, firstAt) => {
@@ -1450,7 +1475,7 @@
           }, () => {});
           return r;
         }
-        if (!localOk) { try { localStorage.removeItem(key); } catch (_) {} seenDrop(id); } // a stale device copy; the cloud has the new one
+        if (!localOk) { dev.removeItem(key); seenDrop(id); } // a stale device copy; the cloud has the new one
         failed.delete(id);
         markCloud();
         return 'cloud';
@@ -1604,10 +1629,7 @@
           await ready();
           const out = {};
           try {
-            for (let i = 0; i < localStorage.length; i++) {
-              const k = localStorage.key(i);
-              if (k && k.startsWith(prefix)) out[k] = { id: sanitiseKey(k), key: k, value: localStorage.getItem(k) };
-            }
+            dev.entries().forEach(([k, v]) => { if (k.startsWith(prefix)) out[k] = { id: sanitiseKey(k), key: k, value: v }; });
           } catch (_) {}
           if (db) {
             try {
@@ -1676,7 +1698,7 @@
           const isActive = typeof fields.key === 'string' && sanitiseKey(fields.key) === id && !isReadOnlyId(id);
           let localOk = false;
           if (isActive && typeof fields.value === 'string') {
-            try { localStorage.setItem(fields.key, fields.value); localOk = true; } catch (_) {}
+            localOk = await dev.put(fields.key, fields.value);
           }
           if (!db) return localOk;
           return serial(id, async () => {
@@ -1750,6 +1772,8 @@
         clearCaches: () => clearCaches(),
         // This device's copy as plain strings: dev.getItem / setItem / put / removeItem / entries / keys / ready / backend (nwDev uses it).
         dev,
+        // Resolves when this device's copy is in memory and the storage layer has read its own state (the first screen waits for it).
+        deviceReady: devReady,
 
         // Lets the SaveStatusPill display "Local-only" mode distinctly
         isCloudReady: () => !!window.__dbAvailable,
@@ -1766,7 +1790,7 @@
           if (kind === 'size' && sizeWarn.has(id)) { dismissedSizes[id] = sizeWarn.get(id).bytes; keep(DISMISSED_KEY, dismissedSizes); }
           if (kind === 'big' && bigKeys.has(id)) { dismissedSizes['big:' + id] = bigKeys.get(id); keep(DISMISSED_KEY, dismissedSizes); }
           if (kind === 'room') { roomNotes = roomNotes.filter(n => n.id !== id); keep(ROOM_KEY, roomNotes); }
-          if (kind === 'device-full') usageDismissed = Math.floor(usage.pct);
+          if (kind === 'device-full') dev.setItem(DEV_DISMISS_KEY, JSON.stringify({ at: Date.now(), pct: usage.pct }));
           emit();
         },
         flush: () => flush(),
@@ -14645,6 +14669,8 @@ function NwAppInfo({ active }) {
   const offline = { yes: 'yes', next: 'after the next open', none: 'not set up yet', no: "this browser can't" }[sw] || 'checking…';
   const pct = usage ? usage.pct : 0;
   const mb = (n) => `${((n || 0) / 1048576).toFixed(2)} MB`;
+  const size = (n) => (n >= 1073741824 ? `${(n / 1073741824).toFixed(1)} GB` : mb(n));
+  const pctText = (p) => (p > 0 && p < 1 ? 'under 1%' : `${Math.round(p)}%`);
   const btn = { background: '#2a2a2a', color: '#eee', border: '1px solid #444', borderRadius: 8, padding: '8px 12px', fontSize: 13, marginTop: 6, cursor: 'pointer' };
   const row = { display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 12, padding: '4px 0', color: '#ddd' };
   const when = savedAt && !isNaN(Date.parse(savedAt)) ? new Date(savedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : null;
@@ -14655,11 +14681,13 @@ function NwAppInfo({ active }) {
       <div style={{ ...row, color: '#888', fontSize: 11 }}><span style={{ overflowWrap: 'anywhere' }}>{location.origin + location.pathname}</span></div>
       <div style={row}><span>Opens offline</span><span data-nw-offline>{offline}</span></div>
       {when && <div style={row}><span>Offline copy saved</span><span>{when}</span></div>}
-      <div style={{ ...row, marginTop: 6 }}><span>This device's saved data</span>
-        <span data-nw-device-usage>{usage ? `${(usage.bytes / 1048576).toFixed(2)} MB of about 5 MB (${Math.round(pct)}%)` : '…'}</span></div>
+      <div style={{ ...row, marginTop: 6 }}><span>{usage && usage.real ? 'Room used on this device' : "This device's saved data"}</span>
+        <span data-nw-device-usage>{!usage ? '…' : usage.real ? `${size(usage.used)} of ${size(usage.limit)} (${pctText(pct)})` : `${(usage.bytes / 1048576).toFixed(2)} MB of about 5 MB (${Math.round(pct)}%)`}</span></div>
       <div style={{ height: 6, background: '#2a2a2a', borderRadius: 3, overflow: 'hidden', marginTop: 4 }}>
-        <div style={{ width: `${Math.min(100, pct)}%`, height: '100%', background: pct >= 70 ? '#fbbf24' : '#4ECDC4' }} />
+        <div style={{ width: `${Math.min(100, pct)}%`, height: '100%', background: pct >= 85 ? '#fbbf24' : '#4ECDC4' }} />
       </div>
+      {bd && <div style={row}><span>Kind of storage</span><span data-nw-backend style={{ textAlign: 'right' }}>{bd.backend === 'indexeddb' ? 'IndexedDB' : bd.backend === 'localstorage' ? 'older storage (private browsing or blocked): room is about 5 MB' : 'starting…'}</span></div>}
+      {bd && bd.migration && <div style={{ ...row, color: '#888', fontSize: 11 }}><span data-nw-migrated>{`Moved to IndexedDB ${new Date(bd.migration.at).toLocaleDateString([], { month: 'short', day: 'numeric' })}: ${bd.migration.moved} items${bd.migration.kept ? `, ${bd.migration.kept} left to try again` : ''}`}</span></div>}
       {bd && <div data-nw-meter style={{ marginTop: 8 }}>
         <div style={row}><span>Offline copy of your data</span><span data-nw-meter-offline>{mb(bd.offline)}</span></div>
         <div style={row}><span>Caches (can be read again)</span><span data-nw-meter-caches>{mb(bd.caches)}</span></div>
@@ -14675,7 +14703,7 @@ function NwAppInfo({ active }) {
         </div>}
         {msg && <div data-nw-clear-msg style={{ fontSize: 12, color: '#4ECDC4', marginTop: 6 }}>{msg}</div>}
       </div>}
-      <div style={{ fontSize: 11, color: '#888', marginTop: 6, lineHeight: 1.5 }}>Counted at 2 bytes per character. A message shows at the top at 70%.</div>
+      <div style={{ fontSize: 11, color: '#888', marginTop: 6, lineHeight: 1.5 }}>{usage && usage.real ? "Room used is the browser's own count for this app. The rows above are counted at 2 bytes per character." : 'Counted at 2 bytes per character.'} A message shows at the top at 85%, or when a save does not fit. It does not clear when things upload.</div>
     </div>
   );
 }
@@ -15198,11 +15226,12 @@ class ErrorBoundary extends React.Component {
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 // The first screen is drawn after this device's copy is in memory (window.storage.dev), so every read answers at once.
-Promise.resolve(window.storage.dev.ready).catch(() => {}).then(() => root.render(
+const __nwGateT0 = performance.now();
+Promise.resolve(window.storage.deviceReady).catch(() => {}).then(() => { window.__nwGateMs = Math.round(performance.now() - __nwGateT0); root.render(
   <ErrorBoundary>
     <App />
   </ErrorBoundary>
-));
+); });
 
   </script>
 

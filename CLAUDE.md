@@ -35,6 +35,11 @@ The app opens and saves without internet (`sw.js`, registered at the end of `ind
 - **Every feature must open and save offline using this device's copy.** Read through `window.storage`
   (offline, `get`/`getAll` answer from this device's copy at once) and never wait on a network call before
   showing the screen. A save offline returns `'device-only'` and uploads when the device is back online.
+  This device's copy is in IndexedDB behind an in-memory copy loaded before the first screen (`docs/DEVICE-STORAGE.md`);
+  localStorage is only the fallback when IndexedDB is unavailable. The System tab shows what it holds (offline copy,
+  caches that can be cleared, what is waiting to upload) and the browser's real numbers. The "device full" message
+  shows only at 85% or when a save did not fit. A write that does not fit returns `false` ("nothing was stored");
+  never swallow it.
 - The System tab shows the running version: a short hash of the page's scripts. The same file gives the
   same version at both addresses; any code change gives a new one. Nothing to bump by hand.
 - **If loading ever breaks because of the service worker**, replace `sw.js` with this and push to `main`
