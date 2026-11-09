@@ -1010,7 +1010,7 @@ async function step5() {
       const res = await window.nwRestoreBackup(backup);
       const back = {};
       for (const k of Object.keys(all)) back[k] = (await window.storage.getAll(k)).value;
-      return { res, confirms: window.__confirms, same: Object.keys(all).every(k => back[k] === all[k]), local: localStorage.getItem('test:extra') };
+      return { res, confirms: window.__confirms, same: Object.keys(all).every(k => back[k] === all[k]), local: window.storage.dev.getItem('test:extra') };
     }, { backup: b, all: g.all });
     ok(r3.res.restored === b.count && r3.res.failed.length === 0 && r3.same, `C: format 3 restores all ${b.count} keys into an empty database; every key's getAll reads back exactly`);
     ok(r3.confirms.length === 1 && r3.confirms[0].includes(`Restore ${b.count} items`) && r3.confirms[0].includes('2026'), 'C: restore asks first, with the item count and backup date');
@@ -1022,12 +1022,12 @@ async function step5() {
       window.confirm = () => true;
       const docs = window.__fakeDocs;
       docs.clear();
-      localStorage.setItem('kaizen3:logs', 'device-copy');
+      window.storage.dev.setItem('kaizen3:logs', 'device-copy');
       const t0 = Date.now();
       const res = await window.nwRestoreBackup(v2);
       const fresh = (v) => v instanceof Date && v.getTime() >= t0 - 1000;
       const ex = docs.get('test_extra');
-      return { res, ids: [...docs.keys()].sort(), exFresh: fresh(ex.updatedAt) && fresh(ex.restoredAt), extra: ex.extra, local: localStorage.getItem('kaizen3:logs') };
+      return { res, ids: [...docs.keys()].sort(), exFresh: fresh(ex.updatedAt) && fresh(ex.restoredAt), extra: ex.extra, local: window.storage.dev.getItem('kaizen3:logs') };
     }, v2);
     ok(rr.res.restored === raw.length && rr.res.failed.length === 0 && JSON.stringify(rr.ids) === JSON.stringify(raw.map(d => d.id).sort()), `C: a format-2 file still restores every doc by ID (${raw.length})`);
     ok(rr.exFresh && rr.extra === 'keep me' && rr.local === 'device-copy', "C: format 2: fields kept, updatedAt/restoredAt = now; an archive doesn't overwrite a device copy");
@@ -1048,7 +1048,7 @@ async function step5() {
     ok(fail.restored === 2 && JSON.stringify(fail.failed) === JSON.stringify(['(an entry with no key)']) && JSON.stringify(fail.deviceOnly) === JSON.stringify(['zz:fail']), 'C: a key the cloud rejects is reported as on this device only; an entry with no key fails → ' + JSON.stringify(fail));
     const old = await page.evaluate(async () => {
       const res = await window.nwRestoreBackup({ timestamp: '2026-09-01T00:00:00.000Z', data: { 'test:extra': 'old-format-value' } });
-      return { res, doc: window.__fakeDocs.get('test_extra').value, local: localStorage.getItem('test:extra') };
+      return { res, doc: window.__fakeDocs.get('test_extra').value, local: window.storage.dev.getItem('test:extra') };
     });
     ok(old.res.restored === 1 && old.res.failed.length === 0 && old.doc === 'old-format-value' && old.local === 'old-format-value', 'C: an old-format file (data map) restores with storage.set per key');
 
@@ -1113,10 +1113,10 @@ async function step5() {
     const g = await page.evaluate(async () => {
       localStorage.setItem('gdrive_token_v1', JSON.stringify({ token: 'SECRET-TOKEN', expiresAt: 1 }));
       localStorage.setItem('firebase:authUser', 'fb-internal');
-      localStorage.setItem('__nwInternal', 'internal');
-      localStorage.setItem('someApiToken', 'SECRET-2');
-      localStorage.setItem('kaizen3:tasks', '[3]');
-      localStorage.setItem('practice:log:2026_10_04', '{"entries":[]}');
+      window.storage.dev.setItem('__nwInternal', 'internal');
+      window.storage.dev.setItem('someApiToken', 'SECRET-2');
+      window.storage.dev.setItem('kaizen3:tasks', '[3]');
+      window.storage.dev.setItem('practice:log:2026_10_04', '{"entries":[]}');
       return (await window.nwGatherBackup()).backup;
     });
     const keys = g.entries.map(e => e.key);

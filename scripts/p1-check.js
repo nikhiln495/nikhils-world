@@ -152,6 +152,9 @@ function pageInit({ seed, now, offline, noList, fakeFirestore }) {
       exportAll: async () => null,
       exportAllDocs: async () => null,
       isCloudReady: () => false,
+      // This device's copy is the page's own real device store (IndexedDB behind memory), as in the real app.
+      get dev() { return window.__nwDevStore; },
+      get deviceReady() { return window.__nwDevStore.ready; },
     };
     if (!noList) mock.listPrefix = async (prefix) => {
       log.push(['list', prefix]);

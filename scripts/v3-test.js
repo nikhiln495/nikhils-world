@@ -242,7 +242,7 @@ async function part1() {
     await wait(page, 800);
     bar = await page.locator('[data-nw-savedbar]').first().innerText();
     ok(offline ? /this device only/i.test(bar) : /saved/i.test(bar) && !/device only/i.test(bar), `${tag}: lights out bar → ${bar.split('\n')[0]}`);
-    const raw = await page.evaluate(() => localStorage.getItem('practice:log:2026_11_04'));
+    const raw = await page.evaluate(() => window.storage.dev.getItem('practice:log:2026_11_04'));
     const e = raw && JSON.parse(raw).entries.find(x => x.practiceId === 'lights-out');
     ok(e && e.place === 'couch' && e.myNote === 'book finished' && e.time === '22:30', `${tag}: lights out entry has place, line and time`);
     if (!offline) {
@@ -337,9 +337,9 @@ async function part2() {
     ok(fake.calls.every(c => c.auth === 'Bearer TEST-TOKEN'), "uses the app's existing Google token");
     const dumpMem = await page.evaluate(() => JSON.stringify([...window.__mem.entries()]));
     ok(!/tax form|Maria|dentist|ASMP/.test(dumpMem), 'no Ledger text anywhere in the database (storage)');
-    const cache = await page.evaluate(() => localStorage.getItem('__nw_ledger_cache'));
+    const cache = await page.evaluate(() => window.storage.dev.getItem('__nw_ledger_cache'));
     ok(cache && cache.includes('File the tax form') && !/Maria|ASMP|STARR/.test(cache), 'this device keeps the last read, without work rows');
-    const link = await page.evaluate(() => localStorage.getItem('__nw_ledger_link'));
+    const link = await page.evaluate(() => window.storage.dev.getItem('__nw_ledger_link'));
     ok(link && link.includes(G.SHEET_ID) && !dumpMem.includes(G.SHEET_ID), 'the link is on this device only');
     await finish(ctx, 'ledger strip');
 
@@ -620,7 +620,7 @@ async function part2() {
     await clickName(page, 'Save link');
     await wait(page, 800);
     ok((await page.locator('[data-nw-ledger-setup]').innerText()).includes('Link saved on this device only'), 'saved on this device only');
-    const stored = await page.evaluate(() => localStorage.getItem('__nw_ledger_link'));
+    const stored = await page.evaluate(() => window.storage.dev.getItem('__nw_ledger_link'));
     const inDb = await page.evaluate(() => JSON.stringify([...window.__mem.entries()]));
     ok(stored && stored.includes(G.SHEET_ID) && !inDb.includes(G.SHEET_ID), 'the link is in this device only, not in the database');
     await page.getByRole('button', { name: 'Practice', exact: true }).click();
@@ -1337,7 +1337,7 @@ async function part7() {
   await clickName(page, 'What now?');
   await wait(page, 1200);
   ok(fake.reads.extra === 3, 'a changed doc is read again, the other is not (' + fake.reads.extra + ')');
-  const cache = await page.evaluate(() => localStorage.getItem('__nw_dump_hist'));
+  const cache = await page.evaluate(() => window.storage.dev.getItem('__nw_dump_hist'));
   ok(cache && !/Maria|ASMP/.test(cache), 'the device copy has no work lines');
   await finish(ctx, 'past dumps');
 

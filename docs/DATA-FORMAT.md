@@ -321,7 +321,13 @@ Every Claude call saves `{ time, kind, words, prompt, text, tools, sources, mode
 `stuck-else`, `coach-me`, `outside`, `draft-shobha` (Practice) and `kaizen-foci` (Kaizen's session-pattern
 analysis). The System tab's cost tracker reads this month's docs.
 
-## On the device (localStorage)
+## On the device (IndexedDB)
+
+The device store is IndexedDB (database `nw-device`, object store `kv`, key → string) behind an in-memory copy that is
+loaded before the first screen; localStorage holds app data only when IndexedDB can't be used (private browsing,
+blocked), and never holds `gdrive_token*` or `firebase*` keys. Keys that older versions kept in localStorage are
+moved once (copy, read back, compare, then remove). How it works, what is a cache and what is waiting to upload:
+**`docs/DEVICE-STORAGE.md`**. Below, "on the device" is what used to be "in localStorage".
 
 - Each key's latest value is kept under the key itself: what this device saved, refreshed from the cloud on
   every read (for a key outside `SEALED_LOG_KEYS` with old parts, the whole value). That is what the app
@@ -337,8 +343,11 @@ analysis). The System tab's cost tracker reads this month's docs.
 - `__nw_deleted` — `{ key: [markers] }`: this device's copy of each sealed log's `deleted` list.
 - `__nw_last_cloud_save`, `__nw_conflicts`, `__nw_dismissed_sizes` — for the status line and banners.
 - `__nw_room_notes` — conflict copies made when the old `kaizen3:logs` device copy was tidied (one banner each).
+- `__nw_dump_hist`, `__nw_ledger_cache`, `__nw_cache:*` — caches: can be thrown away and read again ("Clear caches").
+  `__nw_dev_migrated` — when the move from localStorage ran; `__nw_room_dismiss` — when the "device full" message
+  was hidden; `__nw_dev_fallback` (localStorage only) — this device ran without IndexedDB.
 - **Room on this device:** `kaizen3:logs` (the old Kaizen log, only used offline for pre-July history) is
-  removed from the device once the device's saved data passes 60% of the 5 MB estimate and the device is
+  removed from the device once the device's saved data passes 60% of the 5 MB estimate (bytes kept by the app, not the browser's quota) and the device is
   online: if every day in it matches the cloud's whole Kaizen history, it is removed; if any day is missing
   or different, the whole copy is first written as `kaizen3_logs__conflict_<time>` (fields: `key`, `value`,
   `conflictOf: "kaizen3_logs"`, `deviceCopy: true`, `days`: the days that differed, `savedAt`), read back to
@@ -368,8 +377,12 @@ false and null 1; maps and arrays: the sum of what they hold), plus 32.
 | each split piece | 700,000 |
 
 Docs that are never written again (sealed parts, old archives, pieces, conflict copies) get no banner; the
-System tab's size table lists every doc. The System tab also shows this device's saved data (localStorage,
-counted at 2 bytes per character) against an estimate of 5 MB (5,242,880 bytes), with a banner at 70%.
+System tab's size table lists every doc. The System tab also shows the room used on this device from
+`navigator.storage.estimate()` (real used and quota). The 5 MB estimate (5,242,880 bytes, 2 bytes per character) is used
+only with the localStorage fallback and to decide when the old Kaizen device copy is tidied. A banner shows at 85%
+of what the browser allows, or when a save did not fit; OK hides it for 24 hours or until it rises 5 points
+(`__nw_room_dismiss`: `{ at, pct }`). The meter also splits what the app keeps into the offline copy of your data,
+caches (can be read again) and what is waiting to upload.
 
 ## Backup files (format 3)
 

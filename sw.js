@@ -108,7 +108,7 @@ async function serveCdn(event) {
   const cache = await caches.open(CDN_CACHE);
   const hit = await cache.match(event.request, { ignoreVary: true });
   if (hit) {
-    if (hit.type === 'opaque') {
+    if (hit.type === 'opaque' && self.navigator.onLine !== false) { // (not when the device knows it is offline)
       event.waitUntil(fetch(event.request).then(r => (keepable(r) ? cache.put(event.request, r) : null)).catch(() => {}));
     }
     return hit;

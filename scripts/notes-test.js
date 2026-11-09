@@ -515,13 +515,13 @@ async function part9() {
     await done(ctx, label);
   };
   await run('room: matching', days, '', async (page) => {
-    ok(await waitFor(page, () => localStorage.getItem('kaizen3:logs') === null), 'every day matches the cloud → the device copy is removed (on its own, once over 60% and online)');
+    ok(await waitFor(page, () => window.storage.dev.getItem('kaizen3:logs') === null), 'every day matches the cloud → the device copy is removed (on its own, once over 60% and online)');
     const ids = await cloudIds(page);
     ok(!ids.some(id => /__conflict_/.test(id)) && ids.includes('kaizen3_logs'), 'no conflict copy; the cloud doc is untouched');
   });
   const missing = { ...days }; delete missing['2026-06-07'];
   await run('room: a day missing', missing, '', async (page) => {
-    ok(await waitFor(page, () => localStorage.getItem('kaizen3:logs') === null), 'a day missing from the cloud → the device copy is removed only after…');
+    ok(await waitFor(page, () => window.storage.dev.getItem('kaizen3:logs') === null), 'a day missing from the cloud → the device copy is removed only after…');
     const r = await page.evaluate(() => {
       const id = [...window.__fakeDocs.keys()].find(k => /^kaizen3_logs__conflict_\d/.test(k) && !/__split_/.test(k));
       const d = id && window.__fakeDocs.get(id);
@@ -541,7 +541,7 @@ async function part9() {
     const ctx = await openPage({ fakeFirestore: fake, now: NOW, ...seedLocal('') });
     await ctx.page.evaluate(() => { window.__fakeFail = (op, id) => (op === 'set' && /__conflict_/.test(id) ? 'reject' : null); });
     const r = await ctx.page.evaluate(() => window.storage.makeRoom(true));
-    ok(r.some(x => x.action === 'kept') && (await ctx.page.evaluate(() => localStorage.getItem('kaizen3:logs') !== null)), 'if the conflict copy is not confirmed in the cloud, the device copy is kept → ' + JSON.stringify(r));
+    ok(r.some(x => x.action === 'kept') && (await ctx.page.evaluate(() => window.storage.dev.getItem('kaizen3:logs') !== null)), 'if the conflict copy is not confirmed in the cloud, the device copy is kept → ' + JSON.stringify(r));
     await done(ctx, 'room: copy fails');
   }
   // Something waiting to upload: kept.
@@ -552,7 +552,7 @@ async function part9() {
     const ctx = await openPage({ fakeFirestore: fake, now: NOW, ...seedLocal(q) });
     await ctx.page.waitForTimeout(3000);
     const r = await ctx.page.evaluate(() => window.storage.makeRoom(true));
-    ok(r.length === 1 && r[0].action === 'kept' && r[0].why === 'waiting to upload' && (await ctx.page.evaluate(() => localStorage.getItem('kaizen3:logs') !== null)), 'an upload waiting for it → the device copy is kept → ' + JSON.stringify(r));
+    ok(r.length === 1 && r[0].action === 'kept' && r[0].why === 'waiting to upload' && (await ctx.page.evaluate(() => window.storage.dev.getItem('kaizen3:logs') !== null)), 'an upload waiting for it → the device copy is kept → ' + JSON.stringify(r));
     await done(ctx, 'room: waiting');
   }
   // Offline: nothing happens.
@@ -560,7 +560,7 @@ async function part9() {
     const ctx = await openPage({ fakeFirestore: { ...base() }, now: NOW, offline: true, ...seedLocal('') });
     await ctx.page.waitForTimeout(2500);
     const r = await ctx.page.evaluate(() => window.storage.makeRoom(true));
-    ok(r.length === 0 && (await ctx.page.evaluate(() => localStorage.getItem('kaizen3:logs') !== null)), 'offline → nothing is compared or removed');
+    ok(r.length === 0 && (await ctx.page.evaluate(() => window.storage.dev.getItem('kaizen3:logs') !== null)), 'offline → nothing is compared or removed');
     await done(ctx, 'room: offline');
   }
 }
@@ -574,7 +574,7 @@ async function part10() {
   await setOffline(page, true);
   await page.fill('#pr-forgot', 'Wallet on the shelf');
   await page.waitForTimeout(1500);
-  ok((await page.evaluate(() => JSON.parse(localStorage.getItem('practice:drafts') || '{}').drafts?.forgot?.v)) === 'Wallet on the shelf' && !(await cloud(page, 'practice_drafts')), 'offline: the draft is kept on this device (not in the cloud yet)');
+  ok((await page.evaluate(() => JSON.parse(window.storage.dev.getItem('practice:drafts') || '{}').drafts?.forgot?.v)) === 'Wallet on the shelf' && !(await cloud(page, 'practice_drafts')), 'offline: the draft is kept on this device (not in the cloud yet)');
   await click(page, 'Level 2');
   await page.waitForTimeout(600);
   const t = await bar(page).innerText();
@@ -647,7 +647,7 @@ async function part11() {
   ok(!(await cloudIds(page)).some(id => /__conflict_/.test(id)), 'no conflict copy was made');
 
   // 3. The same save arriving twice (a retry, a queue upload) does not double an entry.
-  await page.evaluate(() => window.storage.set('practice:asks:2026_10_04', window.localStorage.getItem('practice:asks:2026_10_04')));
+  await page.evaluate(() => window.storage.set('practice:asks:2026_10_04', window.storage.dev.getItem('practice:asks:2026_10_04')));
   ok((await cloud(page, ASKS)).entries.length === 5, 'saving the same entries again adds nothing (still 5)');
 
   // 4. The Practice tab reads what the laptop saved without a reload.
