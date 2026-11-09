@@ -5,6 +5,7 @@
 // 4. storage-test.js all    — honest saves, upload queue, opt-in sealing, deletes, fold-back, split values,
 //                             sizes and banners, the device meter, offline reads
 // 5. backup-test.js all     — backup format 3, safe Drive sync, local-time file names, the Apps Script
+// 5b. inbox-test.js        — tools/inbox/*.gs (voice memos to text, Fireflies to Drive), every Google service mocked
 // 6. sw-test.js             — opens offline at / and /nikhils-world/ (service worker, manifest, new deploys)
 // 7. notes-test.js all      — drafts in every tab, notes, the Saved / Add note / Undo bar, log tidy, Kaizen
 //                             doneAt, two-device merges, the Claude cost tracker, room on this device, offline
@@ -23,6 +24,7 @@ const steps = [
   ['screen scenarios', ['p1-test.js', 'all']],
   ['storage layer', ['storage-test.js', 'all']],
   ['backups and Drive', ['backup-test.js', 'all']],
+  ['NW Inbox scripts (voice memos, Fireflies)', ['inbox-test.js', 'all']],
   ['offline (service worker)', ['sw-test.js']],
   ['drafts, notes, saved bar, cost, device room', ['notes-test.js', 'all']],
   ['build v3: waking record, counts, joy, Ledger, Brain Dump, What now, predictions', ['v3-test.js', 'all']],

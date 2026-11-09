@@ -93,7 +93,7 @@ The app opens and saves without internet (`sw.js`, registered at the end of `ind
 4. How parts, sealed docs, deleted markers, split values and conflict copies are stored, and the backup
    file format: **`docs/DATA-FORMAT.md`**. Read it before touching the storage layer or reading the data
    from outside the app. The Drive backup that runs on its own is `tools/drive-backup.gs`
-   (setup: `docs/DRIVE-AUTO-BACKUP.md`); its merge must keep matching `getAll`.
+   (setup: `docs/DRIVE-AUTO-BACKUP.md`); its merge must keep matching `getAll`. A separate Apps Script project, "NW Inbox" (voice memos to text, Fireflies to Drive), lives in `tools/inbox/` (setup: `docs/INBOX-SETUP.md`); it never touches Firestore.
 
 ## No secrets
 
