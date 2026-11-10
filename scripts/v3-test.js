@@ -390,7 +390,7 @@ async function part2() {
     await page.locator('[data-pr-ledger-open]').first().click();
     await page.locator('[data-pr-ledger-step]').filter({ hasText: 'Put the tax folder' }).getByRole('button', { name: 'Done', exact: true }).click();
     let pv = await page.locator('[data-pr-ledger-preview]').innerText();
-    ok(pv.includes('Done → TRUE') && /Completed_At → 2026-11-03T/.test(pv) && !pv.includes('Actual_Mins'), 'preview shows exactly what changes');
+    ok(pv.includes('Done → TRUE') && /Completed_At → 2026-11-03 08:\d\d$/m.test(pv) && !pv.includes('Actual_Mins'), 'preview shows exactly what changes');
     ok(writes(fake).length === 0, 'nothing is written before the tap');
     await clickName(page, 'Cancel');
     ok(writes(fake).length === 0 && await page.locator('[data-pr-ledger-preview]').count() === 0, 'Cancel writes nothing');
@@ -398,8 +398,8 @@ async function part2() {
     await clickName(page, 'Confirm and send');
     await wait(page, 800);
     let w = writes(fake, 'update');
-    ok(w.length === 2 && w.some(x => x.range === 'Ledger!A2' && x.values[0][0] === true) && w.some(x => x.range === 'Ledger!M2' && /^2026-11-03T/.test(x.values[0][0])), 'Done = TRUE and Completed_At = ISO time, only those two cells → ' + w.map(x => x.range).join(', '));
-    ok(fake.sheets.Ledger[1][0] === true && fake.sheets.Ledger[1][12].startsWith('2026-11-03T'), 'the sheet has them');
+    ok(w.length === 2 && w.some(x => x.range === 'Ledger!A2' && x.values[0][0] === true) && w.some(x => x.range === 'Ledger!M2' && /^2026-11-03 08:\d\d$/.test(x.values[0][0])), 'Done = TRUE and Completed_At = local time in the Ledger format, only those two cells → ' + w.map(x => x.range).join(', '));
+    ok(fake.sheets.Ledger[1][0] === true && /^2026-11-03 08:\d\d$/.test(fake.sheets.Ledger[1][12]), 'the sheet has them');
     ok(/Saved/.test(await page.locator('[data-nw-savedbar]').first().innerText()), 'the Saved bar says Saved (the Ledger has it)');
     await finish(ctx, 'ledger done');
 
@@ -637,7 +637,7 @@ const NOW_PLAN = () => ({
   options: [
     { title: 'Short start', steps: [
       { text: 'Put the tax folder on the desk', ledger_row: 2, minutes: 2, start: '08:15', kind: 'academic' },
-      { text: 'Walk to the mailbox', ledger_row: null, minutes: 10, start: '08:17', kind: 'recovery' },
+      { text: 'Walk to the mailbox', ledger_row: null, minutes: 10, start: '08:17', kind: 'nourishment' },
       { text: 'Fill in page one of the form', ledger_row: 3, minutes: 40, est: true, start: '08:27', kind: 'other' },
       { text: 'Phone Maria Lopez', ledger_row: 8, minutes: 5, start: '09:07' },
     ] },
@@ -645,7 +645,7 @@ const NOW_PLAN = () => ({
   ],
   parked: ['I worry about the lease'], new_tasks: ['Call Dana about the move'], question: 'What time is class?',
 });
-const nowProxy = (plan = NOW_PLAN()) => async () => ({ status: 200, json: { model: 'claude-sonnet-5-5', usage: { input_tokens: 900, output_tokens: 300 }, content: [{ type: 'tool_use', id: 't1', name: 'plan_next', input: plan }] } });
+const nowProxy = (plan = NOW_PLAN()) => async () => ({ status: 200, json: { model: 'claude-sonnet-5-5', usage: { input_tokens: 900, output_tokens: 300 }, content: [{ type: 'text', text: JSON.stringify(plan) }] } });
 const WORDS = 'The dentist page, the tax folder and the lease are all in my head and I do not know where to start.';
 
 async function part3() {
@@ -660,14 +660,14 @@ async function part3() {
     await page.waitForSelector('[data-pr-now-patterns]');
     const call = ctx.proxyCalls[ctx.proxyCalls.length - 1];
     const text = call.messages[0].content;
-    ok(call.tool_choice && call.tool_choice.type === 'tool' && call.tool_choice.name === 'plan_next' && call.tools.length === 1 && call.tools[0].name === 'plan_next', 'a forced tool call to plan_next');
+    ok(!call.tool_choice && !call.tools && call.output_config.format && call.output_config.format.type === 'json_schema', 'a structured-output request (no forced tool)');
     ok(text.includes(WORDS) && text.includes('row 2 | File the tax form | step 1 | Put the tax folder on the desk') && text.includes('Homework help'), 'sends his words and the allowed Ledger rows (with row numbers)');
     ok(text.includes('The first physical step is Step 1.') && text.includes('Park a worry'), "sends the Rules tab's rule texts");
     ok(/Local time now: 08:1\d\./.test(text) && /Context: local time/.test(text), 'sends the local time and what he logged today');
     ok(!/Maria|ASMP|STARR|VINE|participant/i.test(text), 'no work row reaches Claude');
     ok(!/row 4 /.test(text), 'a done row is not sent');
     const sys = call.system[0].text;
-    ok(/vessel/.test(sys) && /Never ask whether he should move/.test(sys) && /never held until after/.test(sys) && /Academic step, an Other step and a Recovery/.test(sys) && /2 to 3 times/.test(sys) && /Do not invent/.test(sys) && /synthesize/.test(sys), 'prompt rules are in the system text');
+    ok(/vessel/.test(sys) && /Never ask whether he should move/.test(sys) && /never held until after/.test(sys) && /Academic step, an Other step and a Self-nourishment/.test(sys) && /2 to 3 times/.test(sys) && /Do not invent/.test(sys) && /synthesize/.test(sys), 'prompt rules are in the system text');
     const t = await visibleText(page);
     ok(t.includes('Three things wait on the dentist page') && t.includes('Short start') && t.includes('Dentist first'), 'patterns and options are shown');
     ok(t.includes('· 40 min est.') && t.includes('· 10 min') && !t.includes('· 10 min est.'), 'over 10 minutes shows est.; 10 does not');
@@ -903,10 +903,10 @@ async function part4() {
 
   console.log('\n[4.5 One line about predictions goes to Ask Claude, Something else, Coach me, What now]');
   {
-    const ctx = await openLedger(newFake(), { proxy: async (body) => (body.tools && body.tools[0].name === 'plan_next' ? nowProxy()() : choosePicks()()) });
+    const ctx = await openLedger(newFake(), { proxy: async (body) => (body.output_config && body.output_config.format ? nowProxy()() : choosePicks()()) });
     // seed predictions through a second page state: reopen with the seeded logs
     await ctx.browser.close();
-    const c2 = await openPage({ seed: { ...predSeed(), }, now: '2026-11-04T09:00:00', token: true, google: newFake().handler, device: dev(), proxy: async (body) => (body.tools && body.tools[0].name === 'plan_next' ? nowProxy()() : choosePicks()()) });
+    const c2 = await openPage({ seed: { ...predSeed(), }, now: '2026-11-04T09:00:00', token: true, google: newFake().handler, device: dev(), proxy: async (body) => (body.output_config && body.output_config.format ? nowProxy()() : choosePicks()()) });
     await c2.page.waitForTimeout(3500);
     const { page } = c2;
     await page.getByRole('button', { name: 'Practice', exact: true }).click();
@@ -935,7 +935,7 @@ async function part4() {
     await page.locator('textarea[aria-label="What is in your head"]').fill('lots');
     await clickName(page, 'What now?'); await wait(page, 900);
     call = c2.proxyCalls[c2.proxyCalls.length - 1];
-    ok(call.tools[0].name === 'plan_next' && LINE.test(call.messages[0].content), 'What now: the line');
+    ok(call.output_config.format && LINE.test(call.messages[0].content), 'What now: the line');
     // no predictions -> no line
     await c2.browser.close();
     const c3 = await openPractice({ seed: baseSeed(), now: '2026-11-04T09:00:00', proxy: choosePicks() });

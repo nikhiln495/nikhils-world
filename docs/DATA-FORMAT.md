@@ -283,7 +283,9 @@ leaves `{ id, deleted: true, u }`. No ratings.
 
 `{ "entries": [{ id, at, time, words, result, ... }] }`. Append-only, merged by `id` like the practice log.
 Holds what he typed and Claude's answer (patterns, options, parked worries, new tasks). Only rows the work
-filter allows are ever in it (see Ledger below).
+filter allows are ever in it (see Ledger below). A step's `kind` is `academic`, `other` or `nourishment`; an older result
+may say `recovery`, which is shown as Self-nourishment. Claude's answer is requested as structured output
+(`output_config.format`), not a forced tool.
 
 ## Feedback for the app (feedback:app)
 
@@ -423,6 +425,50 @@ pretty-printed with 2 spaces:
 Restore accepts format 3 (each key through `window.storage.set`; for a sealed log, `setExact` also sets
 markers so the history reads back exactly; each key is read back and must match), format 2 (raw docs by
 ID) and the older `{ data: { key: value } }` files.
+
+## Today's three (practice:three:<YYYY_MM>, practice:three-start)
+
+From Dr. Shobha's 21 days: one Academic, one Other and one Self-nourishment step a day. Calendar items are givens and are
+never part of the three.
+
+`practice:three:<YYYY_MM>` is `{ "month", "entries": [{ id, at (ISO), date (local YYYY-MM-DD), kind, slot?, text, ledger? }] }`.
+One doc per month, append-only. The entries are meant to be merged by `id` like `practice:joy`; the merge list
+(`ENTRIES_KEY`) is inside the storage layer, which this build did not touch, so until `practice:three:` is added to it two
+devices that save at the same moment get the storage layer's usual conflict copy instead of a merge (the Mirror reads with
+`listPrefix('practice:three:')` and should skip conflict copies). Undo from the Saved bar removes exactly that entry.
+
+- `kind`: `checkin` (the optional two-minute check-in), `pick` (a slot was filled or changed; the last pick for a slot on a day
+  is the current one), `done` (the slot's step was marked done), `appreciate` ("I appreciate that I…", same `slot`), `park`
+  (a parked thought), `ack` (the Acknowledge box).
+- `slot`: `academic`, `other` or `nourishment` (shown as "Self-nourishment"). Absent for `checkin`, `park` and `ack`.
+- `text`: what he typed, or the step's text. For a `pick` from the Ledger it is the row's First_Physical_Step (else Step_Action).
+- `ledger`: `{ row, task, stepNum, stepAction }`, present when the step came from the Ledger or from a What now? step that had a
+  Ledger row. **Ledger text may be saved here only from rows the work filter allows** (the same exception as `practice:ramp`;
+  work rows are never read into the app, so they cannot get here). It is never put into the one-line context that is saved with
+  Claude's answers; What now? is told the full text and does not save it.
+
+`practice:three-start` is `{ "start": "YYYY-MM-DD", "at" }`: the date Day 1 of the 21 days was. The card asks once. Day N is
+the number of local calendar days since `start`, plus 1; after Day 21 the card says "Day 21 done."
+
+## Calendar givens (on the device only)
+
+"Connect Calendar" asks Google for `https://www.googleapis.com/auth/calendar.readonly`, only when tapped, through the same
+token client as the Drive sign-in. Nothing from the calendar goes to Firestore.
+
+- `__nw_cal_token`: `{ token, expiresAt }`, its own short-lived token (the Drive token is not changed).
+- `__nw_cal_cache`: `{ at, events: [{ title, start (ISO), end (ISO), allDay, calendar, work }] }`: the last read (today and
+  tomorrow until noon, selected calendars, cancelled and declined events left out, same title + same start merged). An event
+  whose title or calendar name has VINE, ASMP, STARR, RTI or Work is stored as `title: "Work event"`, `calendar: ""`,
+  `work: true`, with times only, so a work title is never on this phone's copy, on screen, or sent to Claude.
+
+## The Ledger link and how it was found (on the device only)
+
+- `__nw_ledger_link` (unchanged): the sheet's link. Never in the repo or the database.
+- `__nw_ledger_how`: `{ how: "name" | "contains" | "picked" | "pasted", name, at }`: how this device got its link. "name" is a
+  Drive search for a spreadsheet he owns, not in the trash, named exactly `⚡ Universal Spark Ledger — Work, Academic &
+  Personal`; "contains" is the fallback search for a name containing "Universal Spark Ledger"; "picked" is a tap in the list
+  shown when there are several; "pasted" is the paste box ("Use a different sheet"). Shown on the System tab.
+- `Completed_At` is written the Ledger's own way, `YYYY-MM-DD HH:mm` in local time; the reader accepts that and ISO times.
 
 ## Recipe: reading over the Firestore REST API
 

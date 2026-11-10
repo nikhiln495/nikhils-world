@@ -228,7 +228,7 @@ async function openPage({ seed = {}, now = null, proxy = null, offline = false, 
   await page.addInitScript(pageInit, { seed, now, offline, noList, fakeFirestore });
   if (device) await page.addInitScript((d) => { try { Object.keys(d).forEach(k => localStorage.setItem(k, d[k])); } catch (_) {} }, device);
   if (token) await page.addInitScript(() => { try { localStorage.setItem('gdrive_token_v1', JSON.stringify({ token: 'TEST-TOKEN', expiresAt: Date.now() + 3600000 })); } catch (_) {} });
-  if (googleStub) await page.addInitScript(() => { window.google = { accounts: { oauth2: { initTokenClient: (cfg) => ({ requestAccessToken: () => setTimeout(() => cfg.callback({ access_token: 'TEST-TOKEN', expires_in: 3600 }), 20) }) } } }; });
+  if (googleStub) await page.addInitScript(() => { window.google = { accounts: { oauth2: { initTokenClient: (cfg) => { (window.__gScopes = window.__gScopes || []).push(cfg.scope); return ({ requestAccessToken: () => setTimeout(() => cfg.callback({ access_token: 'TEST-TOKEN', expires_in: 3600 }), 20) }) } } } }; });
 
   await page.goto(ORIGIN + '/');
   await page.waitForFunction(() => document.querySelector('nav button'), null, { timeout: 60000 });

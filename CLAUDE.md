@@ -152,3 +152,15 @@ as Nikhil's own Google account.
   stored (`window.nwByTime`).
 - The Note button (left of the status line, every tab) saves to `notes:<YYYY_MM_DD>`; a tab says where it is
   with `window.nwSetContext(tab, { screen, practice, step })`.
+- **Claude calls never force a tool.** The current models answer 400 to `tool_choice` of type `tool` or `any` (`auto` is fine).
+  A fixed JSON shape goes through `pCallClaude({ format })` (`output_config.format`, `json_schema`): `additionalProperties: false`
+  on every object, nullable as `anyOf` with null, no `minimum`/`maximum`/`minLength`/`maxLength`, `minItems` only 0 or 1, no
+  property that asks for reasoning. A non-200 from the proxy shows the API's own message (`pProxyError`). The harness fails if
+  `index.html` ever sends a forced tool choice.
+- **Google Calendar is read only and device only** (`__nw_cal_token`, `__nw_cal_cache`; titles can hold other people's names).
+  Calendar items are givens: the day's three are chosen around them, and Claude is told they are fixed. Work events go to
+  Claude as "Work event, busy" with times only.
+- **Today's three** (`practice:three:<YYYY_MM>`, `practice:three-start`; shape in `docs/DATA-FORMAT.md`). Every other tab that
+  adds to the one-line context for Claude does it through `pContextLine`, which now includes the three (a Ledger step is not
+  named there, because that line is saved with the answer).
+- **`Completed_At` is written as `YYYY-MM-DD HH:mm` in local time** (`nwLedgerStamp`), the Ledger's own format.

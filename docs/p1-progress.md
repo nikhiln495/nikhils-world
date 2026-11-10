@@ -208,6 +208,22 @@ Console errors from the deliberately blocked requests are not counted; any other
 
 - Offline, sealing, Drive backup (Oct 5): `node scripts/harness.js` → see the PR for the final run (api.anthropic.com in index.html: 0 · storage-layer check: ok · page load: no console errors · `p1-test.js all` · `storage-test.js all` · `backup-test.js all` · `sw-test.js`). Screenshots at 390×844 reviewed (Reflect with "Tap again to delete this day" and "Deleted days (1)"; System with "This app", the device meter and the offline history line). The live Firestore, its rules, the Cloud Functions and Google Drive were not touched.
 
+## Build v4-A (Nov 5, 2026)
+
+- What now? works again: the reply is requested as structured output (`output_config.format`), not a forced tool (the current
+  models answer 400 to that). Every proxy error shows the API's message. A refusal or unreadable JSON: one line, his words stay,
+  Try again. The harness fails if a forced `tool_choice` is ever sent.
+- The Ledger on any device: after Connect Google a device with no link searches Drive for the sheet by name (picker if several,
+  paste box if none); the System tab says which sheet and how it was found. `Completed_At` uses the Ledger's own local format.
+- Calendar givens: Connect Calendar (read only, asked for only when tapped), Givens today at the top of the Ledger strip, kept on
+  the device, work events masked, sent to What now? as fixed events.
+- Today's three (Dr. Shobha's 21 days): check-in with a 2:00 clock, three slots, park, appreciate, acknowledge, Day N of 21, a
+  button on the waking flow's last screen, entries in Day history; "recovery" is now "Self-nourishment"; a Mirror line in
+  What now? when the Mirror is registered.
+- Keys: `practice:three:<YYYY_MM>`, `practice:three-start` (new); device only: `__nw_cal_token`, `__nw_cal_cache`,
+  `__nw_ledger_how`.
+- Checks: `node scripts/v4a-test.js all`, then the full harness (result in the PR).
+
 ## Not checked
 
 - The real AI proxy was never called; every request went to a local fake. The request bodies were checked field by field, but the live proxy's replies (for example, whether it allows `web_search`) were not.
