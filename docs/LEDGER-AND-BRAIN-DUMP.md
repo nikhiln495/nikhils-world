@@ -25,7 +25,7 @@ Drive sign-in.") and everything else keeps working.
 
 `NW-DEVICE-CACHE` in `index.html`: the Ledger link (`__nw_ledger_link`), the last read with its time and the Rules
 text (`__nw_ledger_cache`, work rows already removed), changes waiting to be sent (`__nw_ledger_pending`), Brain
-Dump captures with their status (`__nw_dump_queue`), and drafts of Ledger / Brain Dump text (`__nw_dev_draft:*`).
+Dump work captures with their status (`__nw_dump_queue`; every other capture is in `dump:captures:<YYYY_MM>` since build v5), and drafts of Ledger / Brain Dump text (`__nw_dev_draft:*`).
 appdata is publicly readable, so none of it may be written there. The only Ledger text that can reach Firestore is
 inside saved **What now?** results and the first step he saves for tomorrow, and only from rows the work filter allows.
 

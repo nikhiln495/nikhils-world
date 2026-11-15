@@ -549,7 +549,7 @@ async function part2() {
     ps = fake.doc.paras;
     ok(ps[0].text === 'Tuesday, Nov 3, 2026' && /^Buy stamps \(from Nikhil's World/.test(ps[1].text) && /^Pay the water bill \(from Nikhil's World/.test(ps[2].text) && ps[3].text.startsWith('task: Call the dentist') && ps.filter(p => p.text === 'Tuesday, Nov 3, 2026').length === 1, "under today's heading (no second heading), above the earlier capture; one paragraph per line, each with the suffix");
     ok(ps[1].style === 'NORMAL_TEXT' && ps[2].style === 'NORMAL_TEXT', 'inserted paragraphs are normal text');
-    ok(!(await page.evaluate(() => JSON.stringify([...window.__mem.entries()]))).includes('Buy stamps'), 'capture text is not in the database');
+    ok((await page.evaluate(() => JSON.stringify([...window.__mem.entries()]))).includes('Buy stamps'), 'capture text is kept in the database (dump:captures, Nov 15 decision), so every device sees it');
     await finish(ctx, 'dump online');
 
     // stale revision
@@ -594,8 +594,8 @@ async function part2() {
     await page.locator('textarea[aria-label="Brain Dump text"]').fill('Offline thought');
     await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
     await wait(page, 500);
-    ok(/on this device/.test(await page.locator('[data-nw-capture]').first().innerText()) && fake.calls.length === 0, 'offline: kept on this device, nothing sent');
-    ok((await page.locator('[data-nw-savedbar]').first().innerText()).toLowerCase().includes('device only'), 'the bar does not say saved');
+    ok(/waiting/.test(await page.locator('[data-nw-capture]').first().innerText()) && fake.calls.length === 0, 'offline: kept as waiting, nothing sent to Google');
+    ok((await page.locator('[data-nw-dump] [role="status"]').innerText()).includes('Waiting: it goes to the Brain Dump when you are online.'), 'the panel says it is waiting for the Brain Dump, not sent');
     await page.evaluate(() => { window.__offline = false; window.dispatchEvent(new Event('online')); });
     await wait(page, 1800);
     ok(fake.doc.paras.some(p => /^Offline thought \(from Nikhil's World/.test(p.text)), 'back online: sent');
@@ -603,7 +603,7 @@ async function part2() {
     await page.evaluate(() => { for (let i = 0; i < 12; i++) window.nwBrainDump.add('cap ' + i, ''); });
     await page.locator('[data-nw-quick="dump"]').click().catch(() => {});
     await page.locator('[data-nw-quick="dump"]').click();
-    ok(await page.locator('[data-nw-capture]').count() === 10, 'shows the last 10 captures');
+    ok(await page.locator('[data-nw-capture]').count() === 13, "shows this month's captures (13), not only the last 10");
     await finish(ctx, 'dump offline');
   }
 

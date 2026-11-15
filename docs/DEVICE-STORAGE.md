@@ -34,7 +34,7 @@ The System tab meter shows three numbers (each at 2 bytes per character):
 | Group | What | Removed by "Clear caches"? |
 |---|---|---|
 | Caches (can be read again) | `__nw_dump_hist` (Brain Dump history), `__nw_ledger_cache` (last Ledger read), and any key starting `__nw_cache:` | yes, only these |
-| Waiting to upload | `__nw_upload_queue`, the device copy of every key in it, `__nw_ledger_pending`, `__nw_dump_queue`, `__nw_dev_draft:*` | never |
+| Waiting to upload | `__nw_upload_queue`, the device copy of every key in it, `__nw_ledger_pending`, `__nw_dump_queue` (work captures only, since build v5), `__nw_dev_draft:*` | never |
 | Offline copy of your data | the device copy of every other key (so the app opens offline), the Ledger link, settings | never |
 
 To add a cache: name it `__nw_cache:<name>` and write it with `nwDev.set`. It must be something that is read again

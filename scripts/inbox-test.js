@@ -135,8 +135,14 @@ function makeEnv(opts = {}) {
     },
   };
 
+  // opts.now pins the scripts' clock (the rolling doc keeps only the last 7 days, so a test about Nov 3 needs Nov 3's clock).
+  let SDate = Date;
+  if (opts.now) {
+    const fixed = Date.parse(opts.now), start = Date.now();
+    SDate = class extends Date { constructor(...a) { if (a.length === 0) super(fixed + (Date.now() - start)); else super(...a); } static now() { return fixed + (Date.now() - start); } };
+  }
   const ctx = {
-    console, Date, JSON, Math, Object, Array, String, Number, Error, RegExp, Promise,
+    console, Date: SDate, JSON, Math, Object, Array, String, Number, Error, RegExp, Promise,
     PropertiesService: { getScriptProperties: () => ({
       getProperty: (k) => (k in props ? props[k] : null), setProperty: (k, v) => { props[k] = String(v); }, deleteProperty: (k) => { delete props[k]; },
     }) },
@@ -200,7 +206,7 @@ function part1() {
   console.log('\n[1. Voice Inbox: headings, text above the first heading, order, empty paragraphs]');
   // a. same date as the first Heading 1: added under it, status line kept
   {
-    const env = makeEnv(); const s = voiceSetup(env, [{ name: NAME_NOV3 }]);
+    const env = makeEnv({ now: '2026-11-04T12:00:00Z' }); const s = voiceSetup(env, [{ name: NAME_NOV3 }]);
     const main = env.newDoc('Transcripts of Voice Recordings', SAMPLE_A);
     const before = texts(main), empties = emptyCount(main);
     vertexOk(env, ['First paragraph.\n\nSecond paragraph.']);
