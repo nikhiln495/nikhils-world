@@ -78,7 +78,7 @@ async function step2() {
     await page.waitForTimeout(300);
     const hw = await memJSON(page, 'practice:homework');
     ok(hw.items[0].updates?.length === 1 && hw.items[0].updates[0].text === 'Said it in bed today' && hw.items[1].updates.length === 1 && hw.items.length === 2 && hw.owedByDrShobha.length === 2, 'Add update appends to that item only; nothing removed');
-    await page.getByRole('button', { name: 'Start' }).first().click();
+    await page.getByRole('button', { name: 'Start', exact: true }).first().click();
     t = await visibleText(page);
     ok(t.includes('Before') && t.includes('how much brace'), 'Start opens the guided flow for that practice');
     await page.screenshot({ path: process.env.SHOT_DIR ? process.env.SHOT_DIR + '/today-morning.png' : '/dev/null' }).catch(() => {});
@@ -440,7 +440,7 @@ async function step3() {
     ok(lines.every(l => /^[a-z0-9-]+ \| .+ \| stage:(pre4|stage4|post4|any|-) \| when:.{0,110}$/.test(l)), 'every INDEX line has the spec format, when ≤ 110 chars');
     ok(call.messages.length === 1 && call.messages[0].content.startsWith('I keep rereading the chat from last night\nContext: local time') && /last waking level today: 2/.test(call.messages[0].content) && /sc-break \(before 7, after 4\)/.test(call.messages[0].content), 'TEXT = his words + one context line (time, level, today\'s reps with ratings)');
     ok(t.includes('Thought stop') && t.includes('Say stop out loud and look at three things') && t.includes('Task-drop reset') && t.includes('Stand still, then name the next task.') && t.includes('Self-compassion break') && !t.includes('One-word container'), 'picks filtered in code: unknown and not-working dropped, post4 kept; max 3');
-    await page.getByRole('button', { name: 'Start' }).first().click();
+    await page.getByRole('button', { name: 'Start', exact: true }).first().click();
     await clickName(page, 'Begin'); await clickName(page, 'Next'); await clickName(page, 'Next'); await clickName(page, 'Next');
     await clickName(page, 'Save rep');
     await page.waitForTimeout(300);
@@ -518,7 +518,7 @@ async function step3() {
     await page.getByLabel('Ask Claude', { exact: true }).fill('test');
     ok(await page.getByRole('button', { name: 'Pick practices for me' }).isDisabled() && t.includes('Ask Claude needs the internet'), 'offline → Ask Claude disabled with a note');
     await clickName(page, 'Looping, overthinking');
-    await page.getByRole('button', { name: 'Start' }).first().click();
+    await page.getByRole('button', { name: 'Start', exact: true }).first().click();
     await clickName(page, 'Begin');
     ok((await visibleText(page)).includes('Step 1 of'), 'practices still work offline');
     ok((await mem(page, 'practice:stuck-map')) === '{oops', 'unreadable stuck map not overwritten');
@@ -555,7 +555,7 @@ async function step4() {
     const lists = await page.evaluate(i => window.__storageLog.slice(i).filter(x => x[0] === 'list').map(x => x[1]), ctx.mark);
     ok(lists.length >= 1 && lists.every(x => x === 'practice:log:'), 'lists logs with the "practice:log:" prefix only');
     ok((await mem(page, k('2025-02-01'))) === '{broken', 'unreadable log doc left alone');
-    await page.getByRole('button', { name: 'Start' }).first().click();
+    await page.getByRole('button', { name: 'Start', exact: true }).first().click();
     ok((await visibleText(page)).includes('how much self-criticism'), 'Start from Learn opens the guided flow (self-criticism label)');
     await finish(ctx, 'learn');
   }
@@ -761,7 +761,7 @@ async function step5() {
     ok(r && Array.isArray(r.sources) && r.sources.length === 0, 'A: sources empty when there are no citations');
     let t = await visibleText(page);
     ok(t.includes("Saved to today's answers.") && t.includes('Say stop out loud.') && !t.includes('not working, filtered'), 'A: "Saved to today\'s answers." under the picks; filtered picks not offered');
-    await page.getByRole('button', { name: 'Start' }).first().click();
+    await page.getByRole('button', { name: 'Start', exact: true }).first().click();
     await clickName(page, 'Begin'); await clickName(page, 'Next'); await clickName(page, 'Next'); await clickName(page, 'Next');
     await clickName(page, 'Save rep'); await page.waitForTimeout(300);
     const lg = await memJSON(page, 'practice:log:2026_10_04');

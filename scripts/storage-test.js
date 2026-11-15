@@ -1066,7 +1066,7 @@ async function part14() {
     ok(r.first === null, 'a refused first write leaves nothing behind');
     ok(r.sync === true && r.after === 'old', 'a write that fails after returning true puts the old value back');
     ok(r.none === false && r.hasHuge === null, 'when the browser says there is less room than the value needs, it returns false at once and stores nothing');
-    ok(/This does not clear when things upload\. To free room: System tab, then Clear caches\.$/.test(r.banner || ''), 'the message says it does not clear on upload and names the one thing to do → ' + (r.banner || '').slice(0, 90));
+    ok(/What uses the room: .+ To free room: System tab, then Clear caches; it removes only the caches\. This message closes by itself when there is room again\.$/.test(r.banner || ''), 'the message says what uses the room, the one thing to do, and that it closes by itself → ' + (r.banner || '').slice(0, 90));
     await done(ctx, '14 full');
   }
 

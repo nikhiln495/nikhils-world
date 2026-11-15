@@ -176,7 +176,7 @@ async function part2() {
     ok((await stripText(page)).includes('File the tax form') && /Found .*Universal Spark Ledger.* linked it on this device/.test(await stripText(page)), 'one match: used at once, and the Ledger reads');
     const q = decodeURIComponent(driveCalls(fake)[0].url);
     ok(q.includes("name='" + LEDGER_NAME + "'") && q.includes("'me' in owners") && q.includes('trashed=false') && q.includes('application/vnd.google-apps.spreadsheet') && q.includes('orderBy=modifiedTime desc'), 'the search asks for the exact name, owned by him, not trashed, newest first');
-    const stored = await page.evaluate(() => localStorage.getItem('__nw_ledger_link'));
+    const stored = await page.evaluate(() => window.storage.dev.getItem('__nw_ledger_link'));
     const inDb = await page.evaluate(() => JSON.stringify([...window.__mem.entries()]));
     ok(stored && stored.includes(G.SHEET_ID) && !inDb.includes(G.SHEET_ID), 'the link is kept in the device-only key, not in the database');
     ok(!HTML.includes(G.SHEET_ID) && !/docs\.google\.com\/spreadsheets\/d\/[A-Za-z0-9_-]{25,}/.test(HTML), 'no sheet link or id is in index.html');
@@ -199,10 +199,10 @@ async function part2() {
     await page.waitForSelector('[data-pr-ledger-pick]');
     const items = await page.locator('[data-pr-ledger] [data-pr-ledger-pick]').allInnerTexts();
     ok(items.length === 2 && items.every(t => t.includes(LEDGER_NAME)) && /Nov 3, 2026/.test(items[0]) && /Sep 10, 2026/.test(items[1]), 'names and modified dates, newest first');
-    ok(await page.evaluate(() => localStorage.getItem('__nw_ledger_link')) === null, 'nothing is chosen for him');
+    ok(await page.evaluate(() => window.storage.dev.getItem('__nw_ledger_link')) === null, 'nothing is chosen for him');
     await page.locator('[data-pr-ledger] [data-pr-ledger-pick]').first().click();
     await page.waitForSelector('[data-pr-ledger-open]');
-    ok((await page.evaluate(() => localStorage.getItem('__nw_ledger_link'))).includes(G.SHEET_ID), 'one tap uses that sheet');
+    ok((await page.evaluate(() => window.storage.dev.getItem('__nw_ledger_link'))).includes(G.SHEET_ID), 'one tap uses that sheet');
     await page.getByRole('button', { name: 'System', exact: true }).click();
     ok(/picked by you from a list/.test(await page.locator('[data-nw-ledger-how]').innerText()), 'the System tab says it was picked from a list');
     await finish(ctx, 'picker');
@@ -224,7 +224,7 @@ async function part2() {
     const c2 = await openNoLink(none);
     await c2.page.locator('[data-pr-ledger] [data-pr-connect]').click();
     await c2.page.waitForFunction(() => /No Ledger spreadsheet found/.test(document.body.innerText));
-    ok(/No Ledger spreadsheet found in your Drive\. Paste its link on the System tab\./.test(await stripText(c2.page)) && await c2.page.evaluate(() => localStorage.getItem('__nw_ledger_link')) === null, 'none found: says so and sets no link');
+    ok(/No Ledger spreadsheet found in your Drive\. Paste its link on the System tab\./.test(await stripText(c2.page)) && await c2.page.evaluate(() => window.storage.dev.getItem('__nw_ledger_link')) === null, 'none found: says so and sets no link');
     await c2.page.getByRole('button', { name: 'System', exact: true }).click();
     await c2.page.locator('input[aria-label="Ledger link"]').fill(SHEET_URL);
     await clickName(c2.page, 'Save link');
@@ -332,7 +332,7 @@ async function part3() {
     ok(/tomorrow 09:00–09:30/.test(t) && t.includes('Tomorrow early') && !t.includes('Tomorrow afternoon'), 'tomorrow until noon only');
     ok(t.includes('All day') && t.includes('Quiet day'), 'an all-day item is listed');
     ok(!/Staff meeting|Maria|ASMP call|VINE/.test(t) && (t.match(/Work event/g) || []).length === 2, 'work events show as "Work event" with times only');
-    const store = await page.evaluate(() => JSON.stringify({ cal: localStorage.getItem('__nw_cal_cache'), db: [...window.__mem.entries()] }));
+    const store = await page.evaluate(() => JSON.stringify({ cal: window.storage.dev.getItem('__nw_cal_cache'), db: [...window.__mem.entries()] }));
     ok(/__nw_cal_cache|Dr\. Shobha session/.test(store) && !/Staff meeting|Maria|ASMP call/.test(store), 'this device keeps the read; no work title in it');
     const db = await page.evaluate(() => JSON.stringify([...window.__mem.entries()]));
     ok(!/CAL-TOKEN|Quiet day|Tomorrow early/.test(db), 'nothing from the calendar reaches the database');
@@ -356,7 +356,7 @@ async function part3() {
     await page.locator('[data-pr-givens-refresh]').click();
     await wait(page, 800);
     ok(cal.calls.length > n0, 'Refresh reads again');
-    const keep = await page.evaluate(() => ({ __nw_ledger_link: localStorage.getItem('__nw_ledger_link'), __nw_cal_token: localStorage.getItem('__nw_cal_token'), __nw_cal_cache: localStorage.getItem('__nw_cal_cache') }));
+    const keep = await page.evaluate(() => ({ __nw_ledger_link: window.storage.dev.getItem('__nw_ledger_link'), __nw_cal_token: window.storage.dev.getItem('__nw_cal_token'), __nw_cal_cache: window.storage.dev.getItem('__nw_cal_cache') }));
     await ctx.browser.close();
     const off = calData();
     const c2 = await openPage({ seed: baseSeed(), now: '2026-11-03T08:10:00', token: true, google: off.wrap(newFake().handler), offline: true, device: keep });
