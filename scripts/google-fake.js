@@ -6,6 +6,7 @@
 //   fake.sheets[tab]      the cells (rows of values); a test may change them to simulate a moved row
 //   fake.doc              { id, title, revision, paras: [{ text, style }] }
 //   fake.apiDisabled      'sheets' | 'docs' → 403 "API has not been used" for that API
+//   fake.docByTitle(t)    any doc by its title, including one the app created through Drive (files.create)
 const SHEET_ID = 'FAKE_SHEET_ID_0123456789abcdef';
 const DOC_ID = 'FAKE_DOC_ID_0123456789';
 
@@ -21,7 +22,7 @@ function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null
     apiDisabled: null,
     doc: doc ? { id: docId, title: doc.title, revision: 1, paras: JSON.parse(JSON.stringify(doc.paras || [])) } : null,
     extra: new Map(extraDocs.map(e => [e.id, { id: e.id, title: e.title, revision: 1, paras: JSON.parse(JSON.stringify(e.paras)) }])),
-    driveFiles: (driveFiles || (doc ? [{ id: docId, name: doc.title, modifiedTime: '2026-11-02T10:00:00Z' }] : [])).concat(extraDocs.map(e => ({ id: e.id, name: e.title, modifiedTime: e.modifiedTime || '2026-10-31T10:00:00Z' }))),
+    driveFiles: (driveFiles || (doc ? [{ id: docId, name: doc.title, modifiedTime: '2026-11-02T10:00:00Z', parents: ['FAKE_BRAIN_DUMP_FOLDER'] }] : [])).concat(extraDocs.map(e => ({ id: e.id, name: e.title, modifiedTime: e.modifiedTime || '2026-10-31T10:00:00Z' }))),
     staleOnce: 0,                  // the next N Docs reads are followed by another writer's change (revision moves)
     reads: { docs: 0 },
     writes: [],                    // { api, ... } every accepted write
@@ -93,8 +94,7 @@ function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null
     return err(route, 400, 'Unsupported by the fake: ' + rest);
   }
 
-  // ── Docs ──
-  const full = () => F.doc.paras.map(p => p.text + '\n').join('');
+  // ── Docs ── (the main doc, extra docs, and docs made through Drive files.create all answer the same way)
   const content = (d = F.doc) => {
     let at = 1;
     const out = [{ startIndex: 0, endIndex: 1, sectionBreak: {} }];
@@ -106,8 +106,8 @@ function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null
     return out;
   };
   const styleAt = (paras, pos) => { let a = 0; for (const p of paras) { const e = a + p.text.length + 1; if (pos >= a && pos < e) return p.style || 'NORMAL_TEXT'; a = e; } return 'NORMAL_TEXT'; };
-  function applyInsert(index, text) {
-    const old = F.doc.paras, oldFull = full(), pos = index - 1;
+  function applyInsert(d, index, text) {
+    const old = d.paras, oldFull = old.map(p => p.text + '\n').join(''), pos = index - 1;
     const inherit = styleAt(old, Math.min(pos, oldFull.length - 1));
     const next = oldFull.slice(0, pos) + text + oldFull.slice(pos);
     const styleOfOld = (p) => styleAt(old, p);
@@ -119,45 +119,56 @@ function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null
       out.push({ text: line, style: inserted ? inherit : styleOfOld(mapped) });
       a = endChar + 1;
     });
-    F.doc.paras = out;
+    d.paras = out;
   }
-  function applyStyle(start, end, style) {
+  function applyStyle(d, start, end, style) {
     let a = 1;
-    F.doc.paras.forEach(p => { const e = a + p.text.length + 1; if (a < end && e > start) p.style = style; a = e; });
+    d.paras.forEach(p => { const e = a + p.text.length + 1; if (a < end && e > start) p.style = style; a = e; });
   }
   async function docs(route, url, req) {
     if (F.apiDisabled === 'docs') return err(route, 403, 'Google Docs API has not been used in project 55888993304 before or it is disabled.', { status: 'PERMISSION_DENIED' });
     const u = new URL(url);
     const m = u.pathname.match(/^\/v1\/documents\/([^/:]+)(:batchUpdate)?$/);
-    const xd = m && F.extra.get(m[1]);
-    if (xd && req.method() === 'GET') { F.reads.docs++; F.reads.extra = (F.reads.extra || 0) + 1; return json(route, 200, { documentId: xd.id, title: xd.title, revisionId: 'rev1', body: { content: content(xd) } }); }
-    if (!m || !F.doc || m[1] !== F.DOC_ID) return err(route, 404, 'Requested entity was not found.');
+    const main = m && F.doc && m[1] === F.DOC_ID;
+    const d = !m ? null : main ? F.doc : F.extra.get(m[1]);
+    if (!d) return err(route, 404, 'Requested entity was not found.');
     if (req.method() === 'GET') {
       F.reads.docs++;
-      const rev = 'rev' + F.doc.revision;
-      const body = { documentId: F.DOC_ID, title: F.doc.title, revisionId: rev, body: { content: content() } };
-      if (F.staleOnce > 0) { F.staleOnce--; F.doc.revision++; F.doc.paras.push({ text: 'Added by another device meanwhile', style: 'NORMAL_TEXT' }); }
+      if (!main) F.reads.extra = (F.reads.extra || 0) + 1;
+      const body = { documentId: d.id, title: d.title, revisionId: 'rev' + d.revision, body: { content: content(d) } };
+      if (main && F.staleOnce > 0) { F.staleOnce--; d.revision++; d.paras.push({ text: 'Added by another device meanwhile', style: 'NORMAL_TEXT' }); }
       return json(route, 200, body);
     }
     if (req.method() === 'POST' && m[2]) {
       const body = req.postDataJSON();
       const want = body.writeControl && body.writeControl.requiredRevisionId;
-      if (want && want !== 'rev' + F.doc.revision) return err(route, 400, 'Precondition check failed: the requiredRevisionId does not match the latest revision.', { status: 'FAILED_PRECONDITION' });
+      if (want && want !== 'rev' + d.revision) return err(route, 400, 'Precondition check failed: the requiredRevisionId does not match the latest revision.', { status: 'FAILED_PRECONDITION' });
       body.requests.forEach(r => {
-        if (r.insertText) { applyInsert(r.insertText.location.index, r.insertText.text); F.writes.push({ api: 'docs', kind: 'insertText', index: r.insertText.location.index, text: r.insertText.text }); }
-        if (r.updateParagraphStyle) { applyStyle(r.updateParagraphStyle.range.startIndex, r.updateParagraphStyle.range.endIndex, r.updateParagraphStyle.paragraphStyle.namedStyleType); F.writes.push({ api: 'docs', kind: 'style', range: r.updateParagraphStyle.range, style: r.updateParagraphStyle.paragraphStyle.namedStyleType }); }
-        if (r.deleteContentRange || r.replaceAllText) F.writes.push({ api: 'docs', kind: 'FORBIDDEN', r });
+        if (r.insertText) { applyInsert(d, r.insertText.location.index, r.insertText.text); F.writes.push({ api: 'docs', doc: d.id, kind: 'insertText', index: r.insertText.location.index, text: r.insertText.text }); }
+        if (r.updateParagraphStyle) { applyStyle(d, r.updateParagraphStyle.range.startIndex, r.updateParagraphStyle.range.endIndex, r.updateParagraphStyle.paragraphStyle.namedStyleType); F.writes.push({ api: 'docs', doc: d.id, kind: 'style', range: r.updateParagraphStyle.range, style: r.updateParagraphStyle.paragraphStyle.namedStyleType }); }
+        if (r.deleteContentRange || r.replaceAllText) F.writes.push({ api: 'docs', doc: d.id, kind: 'FORBIDDEN', r });
       });
-      F.doc.revision++;
-      return json(route, 200, { documentId: F.DOC_ID, writeControl: { requiredRevisionId: 'rev' + F.doc.revision } });
+      d.revision++;
+      return json(route, 200, { documentId: d.id, writeControl: { requiredRevisionId: 'rev' + d.revision } });
     }
     return err(route, 400, 'Unsupported by the fake');
   }
+  // A doc by its title (the main doc or any other), for tests.
+  F.docByTitle = (title) => (F.doc && F.doc.title === title ? F.doc : [...F.extra.values()].find(x => x.title === title) || null);
 
-  // ── Drive: files.list by name ──
-  async function drive(route, url) {
+  // ── Drive: files.list by name; files.create of a Google Doc (an empty doc, kept like the others) ──
+  async function drive(route, url, req) {
     const u = new URL(url);
     if (u.pathname !== '/drive/v3/files') return err(route, 404, 'Not found');
+    if (req && req.method() === 'POST') {
+      const body = req.postDataJSON() || {};
+      if (body.mimeType !== 'application/vnd.google-apps.document') return err(route, 400, 'Unsupported by the fake: only Google Docs are created');
+      const id = 'FAKE_DOC_NEW_' + (F.extra.size + 1);
+      F.extra.set(id, { id, title: body.name, revision: 1, paras: [] });
+      F.driveFiles.push({ id, name: body.name, modifiedTime: '2026-11-15T10:00:00Z', parents: body.parents || [] });
+      F.writes.push({ api: 'drive', kind: 'create', id, name: body.name, parents: body.parents || [] });
+      return json(route, 200, { id, name: body.name, parents: body.parents || [] });
+    }
     const q = u.searchParams.get('q') || '';
     const nm = q.match(/name='((?:[^'\\]|\\.)*)'/);
     const name = nm ? nm[1].replace(/\\'/g, "'") : null;
@@ -174,7 +185,7 @@ function makeGoogle({ sheet = {}, formulas = null, doc = null, driveFiles = null
     if (!/^Bearer \S+/.test(req.headers()['authorization'] || '')) { await err(route, 401, 'Request had invalid authentication credentials.'); return true; }
     if (url.startsWith('https://sheets.googleapis.com/')) await sheets(route, url, req);
     else if (url.startsWith('https://docs.googleapis.com/')) await docs(route, url, req);
-    else if (url.startsWith('https://www.googleapis.com/drive/')) await drive(route, url);
+    else if (url.startsWith('https://www.googleapis.com/drive/')) await drive(route, url, req);
     else return false;
     return true;
   };

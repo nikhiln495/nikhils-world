@@ -70,12 +70,24 @@ Rules every write follows:
 
 The newest Google Doc named exactly `Brain Dump <Mon> <YYYY>` (for example `Brain Dump Nov 2026`) is found with the Drive
 API. New text goes to the top: under today's H1 heading (`Monday, Nov 2, 2026` format) when that is the document's
-first heading, otherwise a new H1 heading for today is inserted first. Each paragraph ends with
-`(from Nikhil's World, 8:10 AM)`; an optional tag (`task:`, `note:`, `class:`, `geog:`, `stagecraft:`, `work:`,
+first heading, otherwise a new H1 heading for today is inserted first. Each capture ends with
+`(from Nikhil's World, 8:10 AM)`; an optional tag (`task:`, `note:`, `wins:`, `class:`, `geog:`, `stagecraft:`, `work:`,
 `life:`, `private:`) goes in front. The write uses the Docs API with `writeControl.requiredRevisionId` from a fresh read
 (if the revision is stale it reads again and retries, up to 3 times). It only inserts text; it never edits or deletes.
-The first send of a session shows a preview. Offline captures stay on the device and go out, oldest first, when back
-online (if signed in).
+
+**Shape (build v5, Nov 15).** Send writes at once (no preview).
+- `task:`, `done:` and `wins:` give one paragraph per typed line, each with the tag and the stamp.
+- Any other tag, or none, with at most 12 lines and 1,500 characters gives **one paragraph**: the tag once at the front,
+  the lines kept as soft line breaks (U+000B; checked against a real Google Doc on Nov 15, it shows as a line break), the
+  stamp once at the end. A line that starts with a name and a colon ("Corky:", "Me:") stays its own line.
+- Longer text is a **paste**: the full text goes to a Doc named `Brain Dump Pastes <Mon YYYY>` (made on first use in the
+  Brain Dump's folder, same day headings), and the Brain Dump gets one line:
+  `paste: N lines, N characters, starts '…' (from Nikhil's World, 5:04 PM)`.
+- **Whose words?** Mine (default) adds nothing. A name gives `(from Nikhil's World, 5:04 PM, words: Corky)`; AI draft gives
+  `(from Nikhil's World, 5:04 PM, AI draft)`. No AI model or company is named in the Doc.
+
+Captures are kept through `window.storage` (`dump:captures:<YYYY_MM>`, see DATA-FORMAT.md), so every device lists them.
+Offline they wait and go out, oldest first, when back online (if signed in); only the device that made a capture sends it.
 
 ## Past Brain Dumps for What now? (Nov 4)
 

@@ -290,12 +290,13 @@ may say `recovery`, which is shown as Self-nourishment. Claude's answer is reque
 ## Brain Dump captures (dump:captures:<YYYY_MM>)
 
 Since Nov 15, 2026 (build v5). `{ "month": "YYYY_MM", "entries": [{ id, at, u, text, tag, status: device|sent, sentAt?, dev }] }`,
-one doc per month (by the capture's local date), append-only, merged by `id` like `practice:joy` (`ENTRIES_KEY`). `status`
+one doc per month (by the capture's local date), append-only (`words?`, `pasted?` too), merged by `id` like `practice:joy` (`ENTRIES_KEY`). `status`
 `device` means waiting to go to the Brain Dump Doc. `dev` is the device that made it (`window.storage.deviceLabel()`); only
 that device sends it, so a capture is never sent twice. Nothing is trimmed. **Work captures** (tag `work:`, text starting
 `work:`, or naming VINE, ASMP, STARR or RTI) are never written here: they stay in `__nw_dump_queue` on the device that made
 them. Captures from before this change were in `__nw_dump_queue` only; the first load moves the non-work ones here with
-their status. Who said what (`words`, from build v5 PR 2) is kept on the capture.
+their status. `words` is who said it: absent or `mine`, `ai` (an AI draft) or a person's name. `pasted: true` means the
+full text of a long capture is already in the Pastes doc (so a retry only writes the pointer line).
 
 ## Feedback for the app (feedback:app)
 

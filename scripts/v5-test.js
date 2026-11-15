@@ -22,7 +22,9 @@ const CAP_ID = `dump_captures_${MK}`;
 const asDocs = (obj) => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k.replace(/[:/.#$[\]]/g, '_'), { key: k, value: typeof v === 'string' ? v : JSON.stringify(v), updatedAt: new Date(1000) }]));
 const newFake = (over = {}) => G.makeGoogle({ doc: { title: 'Brain Dump Nov 2026', paras: [{ text: 'Saturday, Nov 14, 2026', style: 'HEADING_1' }, { text: 'older note', style: 'NORMAL_TEXT' }] }, ...over });
 async function open(opts = {}) {
-  const ctx = await openPage({ now: NOW, fakeFirestore: asDocs(F.base()), ...opts });
+  const o = { now: NOW, fakeFirestore: asDocs(F.base()), ...opts };
+  if (o.fakeFirestore === null) delete o.fakeFirestore;
+  const ctx = await openPage(o);
   await ctx.page.waitForTimeout(3500);
   return ctx;
 }
@@ -188,9 +190,112 @@ async function part1() {
   }
 }
 
+// ───────────────────────── Part 2 ─────────────────────────
+const SHEET_URL = `https://docs.google.com/spreadsheets/d/${G.SHEET_ID}/edit#gid=0`;
+const sendDump = async (page, text, opts = {}) => {
+  await page.locator('textarea[aria-label="Brain Dump text"]').fill(text);
+  if (opts.tag) await page.locator('[data-nw-dump]').getByRole('button', { name: opts.tag, exact: true }).click();
+  if (opts.words) await page.locator('[data-nw-dump-whose]').getByRole('button', { name: opts.words, exact: true }).click();
+  if (opts.other) {
+    await page.locator('[data-nw-dump-whose]').getByRole('button', { name: 'Someone else', exact: true }).click();
+    await page.locator('input[aria-label="Whose words: name"]').fill(opts.other);
+    await page.locator('[data-nw-dump-whose]').getByRole('button', { name: 'Use', exact: true }).click();
+  }
+  await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
+  await wait(page, opts.wait || 1200);
+};
+async function part2() {
+  console.log('\n[v5 2a. Dump: one tap; the right shape; who said it]');
+  {
+    const fake = newFake();
+    const ctx = await open({ fakeFirestore: null, seed: F.base(), token: true, google: fake.handler });
+    const { page } = ctx;
+    await openDump(page);
+    const whose = await page.locator('[data-nw-dump-whose]').innerText();
+    ok(/Mine/.test(whose) && /Corky/.test(whose) && /AI draft/.test(whose) && /Someone else/.test(whose), 'Whose words? offers Mine, the Joy names, AI draft and Someone else');
+    ok(await page.locator('[data-nw-dump]').getByRole('button', { name: 'wins:', exact: true }).count() === 1, 'there is a wins: tag');
+    await sendDump(page, 'Bought the stamps\nCalled Mom\nWrote the outline', { tag: 'note:' });
+    ok(!(await page.locator('[data-nw-dump-preview]').count()) && fake.writes.some(w => w.api === 'docs'), 'one tap: Send writes at once, no preview');
+    let ps = fake.doc.paras;
+    ok(ps[0].text === 'Sunday, Nov 15, 2026' && /^note: Bought the stamps\u000bCalled Mom\u000bWrote the outline \(from Nikhil's World, 9:1\d AM\)$/.test(ps[1].text) && ps[2].text === 'Saturday, Nov 14, 2026', 'a 3-line note: dump is one paragraph: the tag once, three lines, the stamp once → ' + JSON.stringify(ps[1].text));
+    await sendDump(page, 'Email Dr. Shobha\nBook the room\nPrint the form', { tag: 'task:' });
+    ps = fake.doc.paras;
+    ok(ps.slice(1, 4).every(p => /^task: .+ \(from Nikhil's World, 9:1\d AM\)$/.test(p.text)) && ps[1].text.startsWith('task: Email Dr. Shobha') && ps[3].text.startsWith('task: Print the form'), 'a 3-line task: dump is three task: paragraphs');
+    await sendDump(page, 'Finished the draft\nWalked to class', { tag: 'wins:' });
+    ok(/^wins: Finished the draft /.test(fake.doc.paras[1].text) && /^wins: Walked to class /.test(fake.doc.paras[2].text), 'wins: also gives one paragraph per line');
+    await sendDump(page, 'Corky: you could just call them\nMe: I will after lunch', { other: 'Corky' });
+    ps = fake.doc.paras;
+    ok(/^Corky: you could just call them\u000bMe: I will after lunch \(from Nikhil's World, 9:1\d AM, words: Corky\)$/.test(ps[1].text), '"Corky:" and "Me:" stay on their own lines; the stamp says whose words → ' + JSON.stringify(ps[1].text));
+    await sendDump(page, 'Here is a draft reply to the landlord', { words: 'AI draft' });
+    ok(/^Here is a draft reply to the landlord \(from Nikhil's World, 9:1\d AM, AI draft\)$/.test(fake.doc.paras[1].text), 'AI draft shows in the stamp');
+    ok(!fake.doc.paras.some(p => /claude|anthropic|sonnet|opus|gpt|gemini/i.test(p.text)), 'no AI model or company is named in the Doc');
+    const cap = await page.evaluate(() => window.nwBrainDump.captures().find(c => /landlord/.test(c.text)));
+    ok(cap && cap.words === 'ai', 'who said it is saved on the capture as words');
+    // A 13-line dump is a paste.
+    const long = Array.from({ length: 13 }, (_, i) => `Line ${i + 1} of the long paste`).join('\n');
+    await sendDump(page, long, { wait: 2000 });
+    const paste = fake.docByTitle('Brain Dump Pastes Nov 2026');
+    ps = fake.doc.paras;
+    ok(/^paste: 13 lines, \d+ characters, starts 'Line 1 of the long paste' \(from Nikhil's World, 9:1\d AM\)$/.test(ps[1].text) && !ps.some(p => p.text.includes('Line 13 of')), 'a 13-line dump puts one pointer line in the Brain Dump → ' + JSON.stringify(ps[1].text));
+    ok(paste && paste.paras[0].text === 'Sunday, Nov 15, 2026' && paste.paras[0].style === 'HEADING_1' && /^paste \(from Nikhil's World/.test(paste.paras[1].text) && paste.paras.filter(p => /^Line \d+ of the long paste$/.test(p.text)).length === 13, 'and the full text goes to "Brain Dump Pastes Nov 2026" under the day heading');
+    const made = fake.writes.filter(w => w.api === 'drive' && w.kind === 'create');
+    ok(made.length === 1 && made[0].parents[0] === 'FAKE_BRAIN_DUMP_FOLDER', "the Pastes doc was made once, in the Brain Dump's folder");
+    await sendDump(page, long.replace(/long/g, 'second'), { wait: 2000 });
+    ok(fake.writes.filter(w => w.api === 'drive' && w.kind === 'create').length === 1 && fake.docByTitle('Brain Dump Pastes Nov 2026').paras.filter(p => /second paste/.test(p.text)).length === 13, 'a second paste goes to the same Pastes doc');
+    // The past-Brain-Dump search still finds dump text (soft line breaks and the words stamp included).
+    const past = await page.evaluate(() => pPastDumps('Called Mom outline landlord Corky'));
+    ok(past.lines.some(l => /Called Mom/.test(l) && !/from Nikhil's World/.test(l)) && past.lines.some(l => /landlord/.test(l)), 'the past-Brain-Dump search finds dump text, stamps removed → ' + JSON.stringify(past.lines.slice(0, 3)));
+    await finish(ctx, 'dump shapes');
+  }
+
+  console.log('\n[v5 2b. Dump offline: written once after reconnecting; captures queued before this change still write]');
+  {
+    const fake = newFake();
+    const old = [{ id: 'd_old9', at: '2026-11-14T20:00:00Z', text: 'Old queued thought\nsecond line', tag: '', status: 'device' }];
+    const ctx = await open({ offline: true, token: true, google: fake.handler, device: { __nw_dump_queue: JSON.stringify(old) } });
+    const { page } = ctx;
+    await openDump(page);
+    await sendDump(page, 'Thought while offline', { wait: 800 });
+    ok((await page.locator('[data-nw-dump] [role="status"]').innerText()).includes('Waiting: it goes to the Brain Dump when you are online.') && fake.calls.length === 0, 'offline: waiting, nothing sent');
+    await page.evaluate(() => { window.__offline = false; window.dispatchEvent(new Event('online')); });
+    await waitFor(page, () => window.nwBrainDump.captures().every(c => c.status === 'sent'), null, 15000);
+    const ps = fake.doc.paras.map(p => p.text);
+    ok(ps.filter(t => /^Thought while offline \(from Nikhil's World/.test(t)).length === 1, 'back online: the offline dump is written once');
+    ok(ps.filter(t => /^Old queued thought\u000bsecond line \(from Nikhil's World, 11:00 AM\)$/.test(t)).length === 1, 'a capture queued before this change still writes (with its own time)');
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await wait(page, 1500);
+    ok(fake.doc.paras.filter(p => /^Thought while offline /.test(p.text)).length === 1, 'and not again');
+    await finish(ctx, 'dump offline');
+  }
+
+  console.log('\n[v5 2c. Ledger: adding a step is one tap, with Undo]');
+  {
+    const fake = G.makeGoogle({ sheet: { Ledger: G.ledgerValues(), Rules: G.RULES_ROWS } });
+    const ctx = await open({ fakeFirestore: null, seed: F.base(), token: true, google: fake.handler, device: { __nw_ledger_link: JSON.stringify(SHEET_URL) } });
+    const { page } = ctx;
+    await page.getByRole('button', { name: 'Practice', exact: true }).click();
+    await page.waitForSelector('[data-pr-ledger-open]');
+    await page.locator('[data-pr-ledger-open]').first().click();
+    await page.locator('input[aria-label="New step for this task"]').fill('Photograph the form');
+    await page.getByRole('button', { name: 'Add step', exact: true }).first().click();
+    await wait(page, 1200);
+    ok(!(await page.locator('[data-pr-ledger-preview]').count()), 'no Review step and no Confirm and send');
+    const n = fake.sheets.Ledger.length;
+    const last = fake.sheets.Ledger[n - 1];
+    ok(last[4] === 'File the tax form' && last[5] === 'Step 3' && last[6] === 'Photograph the form', 'one tap appended the step row');
+    const bar = await page.locator('[data-nw-savedbar]').first().innerText();
+    ok(/Saved/.test(bar) && /Undo/.test(bar), 'the Saved bar shows, with Undo');
+    await page.locator('[data-nw-savedbar]').first().getByRole('button', { name: 'Undo' }).click();
+    await wait(page, 1200);
+    const after = fake.sheets.Ledger[n - 1];
+    ok(after[4] === '' && after[5] === '' && after[6] === '', 'Undo empties the cells the app wrote in that row → ' + JSON.stringify(after.slice(0, 8)));
+    await finish(ctx, 'ledger add step');
+  }
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
-  const parts = { 1: part1 };
+  const parts = { 1: part1, 2: part2 };
   for (const [k, fn] of Object.entries(parts)) if (which === 'all' || which === k) await fn();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);

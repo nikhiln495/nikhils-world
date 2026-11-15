@@ -462,11 +462,9 @@ async function part2() {
     ok(cm.startsWith("[Nov 1 09:00] started (from Nikhil's World)\n[Nov 3 08:") && cm.endsWith("Found the folder under the bed (from Nikhil's World)"), 'comment added on a new line; what was there is kept → ' + JSON.stringify(cm));
     ok(writes(fake, 'update').length === 1 && writes(fake, 'update')[0].range === 'Ledger!P2', 'only the Comments cell was written');
     await page.locator('input[aria-label="New step for this task"]').fill('Photograph the form');
-    await clickName(page, 'Review new step');
-    pv = await page.locator('[data-pr-ledger-preview]').innerText();
-    ok(pv.includes('Step_Num Step 3') && pv.includes('Photograph the form'), 'new step preview: next Step_Num ("Step 3", the form this sheet uses)');
-    await clickName(page, 'Confirm and send');
+    await clickName(page, 'Add step');
     await wait(page, 800);
+    ok(!(await page.locator('[data-pr-ledger-preview]').count()), 'adding a step is one tap: no preview, no Confirm (his Nov 9 note)');
     const last = fake.sheets.Ledger[fake.sheets.Ledger.length - 1];
     ok(last[4] === 'File the tax form' && last[2] === G.SPARK && last[3] === 'Home' && last[5] === 'Step 3' && last[6] === 'Photograph the form' && last[0] === '' && last[12] === '', 'appended row: same Parent_Task, Bucket, Domain; Step_Num 3; other cells left alone');
     await clickName(page, 'Add task');
@@ -529,12 +527,9 @@ async function part2() {
     await page.locator('textarea[aria-label="Brain Dump text"]').fill('Call the dentist about the crown');
     await page.locator('[data-nw-dump]').getByRole('button', { name: 'task:', exact: true }).click();
     await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
-    await page.waitForSelector('[data-nw-dump-preview]');
-    let pv = await page.locator('[data-nw-dump-preview]').innerText();
-    ok(pv.includes('Brain Dump Nov 2026') && pv.includes('A new heading goes at the top first: Tuesday, Nov 3, 2026') && /task: Call the dentist about the crown \(from Nikhil's World, 8:\d\d AM\)/.test(pv), 'preview before the first send: doc, heading, and the exact paragraph');
-    ok(fake.writes.length === 0, 'nothing sent before the preview is confirmed');
-    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send now' }).click();
     await wait(page, 1000);
+    ok(!(await page.locator('[data-nw-dump-preview]').count()), 'Send writes at once: no preview, no "Send now" (his Nov 6 note)');
+    ok((await page.locator('[data-nw-dump] [role="status"]').innerText()).includes('Sent to "Brain Dump Nov 2026"'), 'the panel says which doc it went to');
     let ps = fake.doc.paras;
     ok(ps[0].text === 'Tuesday, Nov 3, 2026' && ps[0].style === 'HEADING_1' && /^task: Call the dentist about the crown \(from Nikhil's World, 8:\d\d AM\)$/.test(ps[1].text) && ps[1].style === 'NORMAL_TEXT' && ps[2].text === 'Monday, Nov 2, 2026' && ps[2].style === 'HEADING_1', 'a new H1 heading at the top, then the paragraph, existing text below');
     ok(ps.length === 6 && ps[3].text.startsWith('task: old thing') && ps[5].text === 'older note', 'existing text untouched');
@@ -547,8 +542,8 @@ async function part2() {
     await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
     await wait(page, 1200);
     ps = fake.doc.paras;
-    ok(ps[0].text === 'Tuesday, Nov 3, 2026' && /^Buy stamps \(from Nikhil's World/.test(ps[1].text) && /^Pay the water bill \(from Nikhil's World/.test(ps[2].text) && ps[3].text.startsWith('task: Call the dentist') && ps.filter(p => p.text === 'Tuesday, Nov 3, 2026').length === 1, "under today's heading (no second heading), above the earlier capture; one paragraph per line, each with the suffix");
-    ok(ps[1].style === 'NORMAL_TEXT' && ps[2].style === 'NORMAL_TEXT', 'inserted paragraphs are normal text');
+    ok(ps[0].text === 'Tuesday, Nov 3, 2026' && /^Buy stamps\u000bPay the water bill \(from Nikhil's World, 8:\d\d AM\)$/.test(ps[1].text) && ps[2].text.startsWith('task: Call the dentist') && ps.filter(p => p.text === 'Tuesday, Nov 3, 2026').length === 1, "under today's heading (no second heading), above the earlier capture; untagged lines stay together in one paragraph (v5)");
+    ok(ps[1].style === 'NORMAL_TEXT', 'the inserted paragraph is normal text');
     ok((await page.evaluate(() => JSON.stringify([...window.__mem.entries()]))).includes('Buy stamps'), 'capture text is kept in the database (dump:captures, Nov 15 decision), so every device sees it');
     await finish(ctx, 'dump online');
 
@@ -558,10 +553,8 @@ async function part2() {
     await wait(page, 600);
     await page.locator('[data-nw-quick="dump"]').click();
     await page.locator('textarea[aria-label="Brain Dump text"]').fill('Stale test');
-    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
-    await page.waitForSelector('[data-nw-dump-preview]');
     fake.staleOnce = 1;
-    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send now' }).click();
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
     await wait(page, 1500);
     ps = fake.doc.paras;
     ok(ps.some(p => p.text === 'Added by another device meanwhile') && ps.some(p => /^Stale test /.test(p.text)) && ps[0].text === 'Tuesday, Nov 3, 2026', 'a stale revision: read again, retried, the other device\'s text kept');
@@ -575,9 +568,6 @@ async function part2() {
     await page.locator('[data-nw-quick="dump"]').click();
     await page.locator('textarea[aria-label="Brain Dump text"]').fill('Second thing');
     await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
-    await page.waitForSelector('[data-nw-dump-preview]');
-    ok((await page.locator('[data-nw-dump-preview]').innerText()).includes("Under today's heading: Tuesday, Nov 3, 2026"), "preview says it goes under today's heading");
-    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send now' }).click();
     await wait(page, 1000);
     ps = fake.doc.paras;
     ok(ps.length === 4 && ps[1].text.startsWith('Second thing') && ps[2].text === 'earlier today' && ps[0].style === 'HEADING_1' && ps[3].style === 'HEADING_1', "no new heading; the new paragraph is first under today's");
@@ -1253,11 +1243,9 @@ async function part6() {
     await page.locator('[data-nw-quick="dump"]').click();
     await page.locator('textarea[aria-label="Brain Dump text"]').fill('Month-start thought');
     await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
-    await page.waitForSelector('[data-nw-dump-preview]');
-    const pv = await page.locator('[data-nw-dump-preview]').innerText();
-    ok(pv.includes('Brain Dump Oct 2026') && /newest Brain Dump doc/.test(pv), 'the preview says it is using the newest doc');
-    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send now' }).click();
     await wait(page, 1000);
+    const said = await page.locator('[data-nw-dump] [role="status"]').innerText();
+    ok(said.includes('Brain Dump Oct 2026') && /newest Brain Dump doc/.test(said), 'the panel says it used the newest doc → ' + said);
     ok(fake.doc.paras[0].text === 'Tuesday, Nov 3, 2026' && /^Month-start thought/.test(fake.doc.paras[1].text) && fake.doc.paras[3].text === 'old', 'added at the top of the October doc; its text is untouched');
     await ctx.browser.close();
     const none = newFake({ driveFiles: [] });
@@ -1290,9 +1278,7 @@ async function part6() {
     ok(w.length >= 2 && w.some(x => x.range === 'Ledger!A13' && x.values[0][0] === true), 'the percentages changed meanwhile: still the same row (13) → ' + w.map(x => x.range).join(', '));
     // adding a step uses the same "Step N" form
     await page.locator('input[aria-label="New step for this task"]').fill('Eleven');
-    await clickName(page, 'Review new step');
-    ok((await page.locator('[data-pr-ledger-preview]').innerText()).includes('Step_Num Step 11 · Eleven'), 'new step preview: Step 11');
-    await clickName(page, 'Confirm and send');
+    await clickName(page, 'Add step');
     await wait(page, 900);
     const last = fake.sheets.Ledger[fake.sheets.Ledger.length - 1];
     ok(last[4] === 'Real format task' && last[5] === 'Step 11' && last[6] === 'Eleven', 'the new row says "Step 11" like the others');
