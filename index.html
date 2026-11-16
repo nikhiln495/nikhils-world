@@ -686,6 +686,7 @@
         [/^practice:joy:(\d{4})_(\d\d)$/, m => `Joys for ${m[1]}-${m[2]}`],
         [/^practice:three:(\d{4})_(\d\d)$/, m => `Today's three for ${m[1]}-${m[2]}`],
         [/^practice:wrong:(\d{4})_(\d\d)$/, m => `Went wrong for ${m[1]}-${m[2]}`],
+        [/^nw:return$/, 'Return card'],
         [/^dump:captures:(\d{4})_(\d\d)$/, m => `Brain Dump captures for ${m[1]}-${m[2]}`],
         [/^feedback:app$/, 'Feedback for the app'],
         [/^practice:seeds$/, 'Practice seeds (done markers)'], [/^creative-reps$/, 'Creative reps'],
@@ -11165,11 +11166,14 @@ function GuidedFlow({ practiceId, source, note, playbook, onSave, onClose }) {
   const label = pRatingLabel(p, playbook);
   const n = steps.length;
   const w = i >= 0 && i < n ? pStepWidget(p, steps, i) : null;
+  // Left midway: the return card (when its switch is on) says where.
+  const keepMidway = () => { if (i >= 0 && i < n && window.nwReturnKeep) window.nwReturnKeep(`${p.name}, step ${i + 1} of ${n}`, 'flow', { type: 'flow', practiceId }); };
+  const close = () => { keepMidway(); onClose(); };
 
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, gap: 8 }}>
-        <button style={pBtn()} onClick={onClose}>✕ Close</button>
+        <button style={pBtn()} onClick={close}>✕ Close</button>
         <span style={{ fontSize: 13, color: PC.muted, fontFamily: pMono }}>{i < 0 ? 'Before' : i >= n ? 'After' : `Step ${i + 1} of ${n}`}</span>
       </div>
       <div style={pCard({ padding: 18 })}>
@@ -13229,7 +13233,7 @@ function LedgerStrip() {
       <div style={pLabel}>{title}</div>
       {list.map(({ task, rows }) => (
         <div key={task} style={{ marginBottom: 4 }}>
-          <button data-pr-ledger-open aria-expanded={openTask === task} onClick={() => setOpenTask(openTask === task ? null : task)} style={{ ...pBtn('ghost', { width: '100%', textAlign: 'left', minHeight: 44 }), display: 'block' }}>
+          <button data-pr-ledger-open aria-expanded={openTask === task} onClick={() => { if (openTask !== task && window.nwReturnKeep) { const nx = L.rows.filter(r => r.Parent_Task === task && !nwIsDone(r)).sort((a, b) => nwStep(a) - nwStep(b))[0]; window.nwReturnKeep(`${task}${nx ? ` · ${nx.Step_Action}` : ''}`, 'ledger', { type: 'practice' }); } setOpenTask(openTask === task ? null : task); }} style={{ ...pBtn('ghost', { width: '100%', textAlign: 'left', minHeight: 44 }), display: 'block' }}>
             <div style={{ fontSize: 15, color: PC.text, fontWeight: 600 }}>{task}</div>
             <div style={{ fontSize: 13, color: PC.muted, fontWeight: 400 }}>Next: {rows[0].Step_Action}{rows.length > 1 ? ` · ${rows.length} open steps` : ''}{rows[0].Deadline ? ` · due ${rows[0].Deadline}` : ''}</div>
           </button>
@@ -13621,6 +13625,7 @@ function DumpPanel({ tab, onDone }) {
   const [tag, setTag] = useState('');
   const [words, setWords] = useState('mine');
   const [msg, setMsg] = useState('');
+  const [lastSent, setLastSent] = useState('');
   const [busy, wrap] = window.useBusy();
   const caps = useCaptures();
   const [shown, setShown] = useState(20);
@@ -13632,7 +13637,7 @@ function DumpPanel({ tab, onDone }) {
     if (!nwDumpParas(text, tag).length) return;
     setMsg('');
     const c = window.nwBrainDump.add(text, tag, words && words !== 'mine' ? { words } : null);
-    clearText(); setTag(''); setWords('mine');
+    clearText(); setTag(''); setWords('mine'); setLastSent(c.text.split('\n')[0]);
     const where = await c.saved;
     const bar = (w) => window.nwShowBar({ tab, mode: 'saved', what: 'Brain Dump capture', where: w, ref: { what: `Brain Dump: ${c.text.slice(0, 40)}` } });
     if (where === false) { setMsg('Nothing was stored: this device is full. Copy the text somewhere safe.'); bar(false); return; }
@@ -13668,6 +13673,7 @@ function DumpPanel({ tab, onDone }) {
         {!signedIn && <ConnectGoogle onDone={() => tick(x => x + 1)} />}
       </div>
       {msg && <div role="status" style={{ fontSize: 13, color: '#fbbf24', marginTop: 6 }}>{msg}</div>}
+      {lastSent && window.NwKeepWayBack && <window.NwKeepWayBack key={lastSent} text={lastSent} from="dump" target={{ type: 'quick', id: 'dump' }} />}
       <div style={{ ...nwQuickLabel, margin: '10px 0 4px' }}>THIS MONTH'S CAPTURES, ALL DEVICES</div>
       {!list.length ? <div style={{ fontSize: 13, color: '#9ca3af' }}>None yet.</div> : list.slice(0, shown).map(c => (
         <div key={c.id} data-nw-capture style={{ fontSize: 13, padding: '4px 0', borderBottom: '1px solid #262626', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>
@@ -14255,7 +14261,7 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
   const edit = (k, patch) => setPlan(p => p.map((s, j) => (j === k ? { ...s, ...patch } : s)));
   const move = (k, d) => setPlan(p => { const q = p.slice(); const t = k + d; if (t < 0 || t >= q.length) return q; [q[k], q[t]] = [q[t], q[k]]; return q; });
   const clocks = plan.map((s, k) => pAddMin(planStart, plan.slice(0, k).reduce((a, x) => a + (+x.minutes || 0), 0)) || s.start);
-  const startStep = (i) => { setRun({ i, startedAt: Date.now(), note: '', mins: '' }); setDoneOp(null); };
+  const startStep = (i) => { setRun({ i, startedAt: Date.now(), note: '', mins: '' }); setDoneOp(null); if (plan[i] && window.nwReturnKeep) window.nwReturnKeep(plan[i].text, 'what-now', { type: 'practice' }); };
   const finishStep = wrap(async () => {
     const s = plan[run.i];
     const actual = Math.max(1, Math.round((run.mins !== '' ? +run.mins * 60000 : Date.now() - run.startedAt) / 60000));
@@ -14890,6 +14896,7 @@ function WrongPanel({ tab, onDone }) {
   const names = pUseJoyNames();
   const [busy, wrap] = window.useBusy();
   const [msg, setMsg] = useState('');
+  const [keep, setKeep] = useState('');
   const [list, setList] = useState(null);
   const [tick, setTick] = useState(0);
   useEffect(() => { let live = true; pReadWrongs().then(l => { if (live) setList(l); }).catch(() => { if (live) setList([]); }); return () => { live = false; }; }, [tick]);
@@ -14915,6 +14922,7 @@ function WrongPanel({ tab, onDone }) {
       },
     });
     if (r && r.where) {
+      setKeep(entry.did === 'Nothing yet' ? entry.what : '');
       clearWhat(); clearDid(); clearWho(); clearTyped(); clearPart(); setMsg('');
     }
   });
@@ -14941,6 +14949,7 @@ function WrongPanel({ tab, onDone }) {
         <button style={{ ...nwQuickBtn, ...nwQuickBtnOn, marginLeft: 'auto' }} disabled={busy || !what.trim()} onClick={save}>Save</button>
       </div>
       {msg && <div role="alert" style={{ fontSize: 13, color: '#fca5a5', marginTop: 6 }}>{msg}</div>}
+      {keep && <NwKeepWayBack key={keep} text={keep} from="wrong" target={{ type: 'quick', id: 'wrong' }} />}
       <div style={{ ...nwQuickLabel, margin: '10px 0 4px' }}>WHAT WENT WRONG, AND WHAT YOU DID NEXT</div>
       {!list ? <div style={{ fontSize: 13, color: '#9ca3af' }}>Reading…</div> : !list.length ? <div style={{ fontSize: 13, color: '#9ca3af' }}>None yet.</div>
         : list.slice(0, 20).map(e => <WrongRow key={e.id} e={e} tab={tab} names={names} onChanged={() => setTick(t => t + 1)} />)}
@@ -15081,6 +15090,97 @@ function JoyRow({ j, onChanged }) {
   );
 }
 window.NwJoyRow = JoyRow;
+
+// ─────────────────────────────────────────────────────
+// BUILD v5 · PART 5 (Nov 15) — the return card: one line, "Back to: …", behind a switch on the System tab
+// nw:return = { on, card: { id, text, at, from, target } | null, at }. Through window.storage, so it shows on every device.
+// Off (the default), the app is exactly as before. One card only: a newer one replaces the older (which stays where it
+// came from). Hide and Done remove it with nothing after it. The only signal kept is how often Open was tapped, counted on
+// this device (NW_RETURN_OPENS) and shown on the System tab.
+// ─────────────────────────────────────────────────────
+const NW_RETURN_KEY = 'nw:return';
+const NW_RETURN_OPENS = '__nw_return_opens';
+const NWR = { on: false, card: null, loaded: false, subs: new Set() };
+const nwrEmit = () => NWR.subs.forEach(fn => { try { fn(); } catch (_) {} });
+async function nwReturnLoad() {
+  try {
+    const r = await window.storage.get(NW_RETURN_KEY);
+    const v = r && r.value ? JSON.parse(r.value) : null;
+    NWR.on = !!(v && v.on); NWR.card = v && v.card ? v.card : null;
+  } catch (_) {}
+  NWR.loaded = true; nwrEmit();
+}
+async function nwReturnSave(patch) {
+  Object.assign(NWR, patch); nwrEmit();
+  const where = await window.storage.set(NW_RETURN_KEY, JSON.stringify({ on: NWR.on, card: NWR.card, at: new Date().toISOString() }));
+  return where;
+}
+function useReturn() {
+  const [, setN] = useState(0);
+  useEffect(() => { const f = () => setN(n => n + 1); NWR.subs.add(f); if (!NWR.loaded) nwReturnLoad(); return () => { NWR.subs.delete(f); }; }, []);
+  return NWR;
+}
+// Makes this the card (only when the switch is on). target: { type: 'flow', practiceId } | { type: 'practice' } | { type: 'quick', id }.
+function nwReturnKeep(text, from, target) {
+  if (!NWR.on || !String(text || '').trim()) return null;
+  const card = { id: `r_${Date.now().toString(36)}`, text: String(text).trim().slice(0, 200), at: new Date().toISOString(), from, target: target || null };
+  return nwReturnSave({ card });
+}
+window.nwReturnKeep = nwReturnKeep;
+// The small "keep as my way back" button (after a Dump, on a Went wrong entry saved with "Nothing yet").
+function NwKeepWayBack({ text, from, target }) {
+  const R = useReturn();
+  const [kept, setKept] = useState(false);
+  if (!R.on || !text) return null;
+  return <button data-nw-keep-way-back disabled={kept} onClick={async () => { await nwReturnKeep(text, from, target); setKept(true); }} style={{ ...nwQuickBtn, minHeight: 30, padding: '2px 8px', fontSize: 12, marginTop: 6 }}>{kept ? 'Kept as my way back' : 'keep as my way back'}</button>;
+}
+// The card, at the top of whatever screen opens.
+function NwReturnCard() {
+  const R = useReturn();
+  useEffect(() => { const f = () => { if (document.visibilityState === 'visible') nwReturnLoad(); }; document.addEventListener('visibilitychange', f); return () => document.removeEventListener('visibilitychange', f); }, []);
+  if (!R.on || !R.card) return null;
+  const c = R.card;
+  const left = new Date(c.at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  const open = () => {
+    try { const n = Number(nwDev.get(NW_RETURN_OPENS, 0)) || 0; nwDev.set(NW_RETURN_OPENS, n + 1); } catch (_) {}
+    const t = c.target || {};
+    if (t.type === 'quick') window.dispatchEvent(new CustomEvent('nw-open-quick', { detail: t.id }));
+    else if (t.type === 'flow' || t.type === 'practice') window.dispatchEvent(new CustomEvent('nw-return-open', { detail: t }));
+  };
+  const btn = { background: 'transparent', color: '#eee', border: '1px solid #555', borderRadius: 6, padding: '4px 10px', fontSize: 13, minHeight: 32, cursor: 'pointer', fontFamily: 'inherit' };
+  return (
+    <div data-nw-return style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', padding: '8px 16px', background: '#14202a', borderBottom: '1px solid #2b4150', color: '#e5e7eb', fontSize: 14 }}>
+      <span data-nw-return-text style={{ flex: '1 1 200px', overflowWrap: 'anywhere' }}>Back to: {c.text}. Left {left}.</span>
+      {c.target && <button style={btn} onClick={open}>Open</button>}
+      <button style={btn} onClick={() => nwReturnSave({ card: null })}>Done</button>
+      <button style={btn} onClick={() => nwReturnSave({ card: null })}>Hide</button>
+    </div>
+  );
+}
+window.NwReturnCard = NwReturnCard;
+// The switch, on the System tab.
+function NwReturnSwitch({ active }) {
+  const R = useReturn();
+  const [msg, setMsg] = useState('');
+  useEffect(() => { if (active) nwReturnLoad(); }, [active]);
+  const opens = Number(nwDev.get(NW_RETURN_OPENS, 0)) || 0;
+  const flip = async () => {
+    const where = await nwReturnSave({ on: !R.on, card: R.on ? null : R.card });
+    setMsg(where === 'cloud' ? 'Saved.' : where === 'device-only' ? 'Saved on this device only, not in the cloud yet.' : 'Nothing was stored.');
+  };
+  return (
+    <div data-nw-return-switch style={{ background: '#1a1a1a', padding: 16, borderRadius: 12, border: '1px solid #333', marginBottom: 16 }}>
+      <div style={{ color: '#aaa', fontSize: 11, letterSpacing: 1, marginBottom: 8 }}>RETURN CARD</div>
+      <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 14, color: '#eee' }}>
+        <input type="checkbox" aria-label="Show the return card" checked={R.on} onChange={flip} /> Show one "Back to:" line at the top when something is left midway
+      </label>
+      <div style={{ fontSize: 12, color: '#888', marginTop: 6, lineHeight: 1.5 }}>Off, the app is as before. On this device, Open was tapped {opens} time{opens === 1 ? '' : 's'}.</div>
+      {msg && <div role="status" style={{ fontSize: 12, color: '#4ECDC4', marginTop: 4 }}>{msg}</div>}
+    </div>
+  );
+}
+window.NwReturnSwitch = NwReturnSwitch;
+window.NwKeepWayBack = NwKeepWayBack;
 
 function NwFeedbackList({ active }) {
   const [list, setList] = useState(null);
@@ -15248,7 +15348,14 @@ function PracticeApp() {
     const open = () => setStack(st => (st.length && st[st.length - 1].type === 'waking' ? st : [...st, { type: 'waking', key: `waking-${Date.now()}-${st.length}` }]));
     window.addEventListener('nw-open-waking', open);
     if (NW_START_WAKING_P()) open();
-    return () => window.removeEventListener('nw-open-waking', open);
+    // The return card's Open: back into the flow (its draft resumes at the step it was on), or Today.
+    const back = (e) => {
+      const t = (e && e.detail) || {};
+      if (t.type === 'flow' && t.practiceId) setStack([{ type: 'flow', id: t.practiceId, source: 'app', key: `flow-${Date.now()}` }]);
+      else { setStack([]); setScreen('today'); }
+    };
+    window.addEventListener('nw-return-open', back);
+    return () => { window.removeEventListener('nw-open-waking', open); window.removeEventListener('nw-return-open', back); };
   }, []);
 
   // Puts a changed log doc on screen if it is today's.
@@ -16168,7 +16275,8 @@ function App() {
   useEffect(() => {
     const onWake = () => setActiveTab('practice');
     window.addEventListener('nw-open-waking', onWake);
-    return () => window.removeEventListener('nw-open-waking', onWake);
+    window.addEventListener('nw-return-open', onWake);
+    return () => { window.removeEventListener('nw-open-waking', onWake); window.removeEventListener('nw-return-open', onWake); };
   }, []);
   const [backupStatus, setBackupStatus] = useState('');
   const fileRef = useRef(null);
@@ -16392,6 +16500,7 @@ function App() {
     <div style={{ background: '#0f0f0f', height: '100vh', width: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
 
       {window.NwStorageBanners && <window.NwStorageBanners />}
+      {window.NwReturnCard && <window.NwReturnCard />}
 
       <div style={paneStyle('roulette')}><NwWakeUpTop /><CreativeRoulette /></div>
       <div style={paneStyle('kaizen')}><KaizenApp /></div>
@@ -16408,6 +16517,7 @@ function App() {
         <NwAppInfo active={activeTab === 'system'} />
         <NwClaudeCost active={activeTab === 'system'} />
         {window.NwLedgerSetup && <window.NwLedgerSetup active={activeTab === 'system'} />}
+        {window.NwReturnSwitch && <window.NwReturnSwitch active={activeTab === 'system'} />}
         <p style={{ fontSize: 13, color: '#888', marginBottom: 24, lineHeight: 1.6 }}>
           Backs up everything in the database, including the Practice tab and anything added later. Run weekly and drop the file into Google Drive as "Elite Maintenance."
         </p>

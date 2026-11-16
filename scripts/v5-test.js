@@ -585,9 +585,117 @@ async function part4() {
   }
 }
 
+// ───────────────────────── Part 5 ─────────────────────────
+const docsOf = (page) => page.evaluate(() => Object.fromEntries([...window.__fakeDocs.entries()].map(([k, v]) => [k, { ...v, updatedAt: new Date(1000) }])));
+const card = async (page) => ((await page.locator('[data-nw-return-text]').count()) ? page.locator('[data-nw-return-text]').innerText() : null);
+async function part5() {
+  console.log('\n[v5 5a. Return card: a guided flow left at step 3; Open goes back; a second device shows it]');
+  {
+    const ctx = await open();
+    const { page } = ctx;
+    ok(await page.locator('[data-nw-return]').count() === 0, 'off by default: no card');
+    await page.getByRole('button', { name: 'System', exact: true }).click();
+    await page.locator('input[aria-label="Show the return card"]').check();
+    await wait(page, 600);
+    ok(/Saved\./.test(await page.locator('[data-nw-return-switch]').innerText()), 'the switch is saved');
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent('nw-return-open', { detail: { type: 'flow', practiceId: 'ten-percent-intercept' } })));
+    await page.waitForSelector('text=Begin');
+    await page.getByRole('button', { name: 'Begin', exact: true }).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    ok((await page.locator('.pr-root').innerText()).includes('Step 3 of 3'), 'the flow is at step 3');
+    await wait(page, 1500);
+    await page.getByRole('button', { name: '✕ Close' }).click();
+    await wait(page, 800);
+    ok(/^Back to: 10% intercept, step 3 of 3\. Left \d{1,2}:\d\d (AM|PM)\.$/.test(await card(page) || ''), 'leaving at step 3 fills the card → ' + await card(page));
+    const docs = await docsOf(page);
+    ok(docs.nw_return && JSON.parse(docs.nw_return.value).card.target.practiceId === 'ten-percent-intercept', 'the card is stored through window.storage at nw:return');
+    await finish(ctx, 'return flow');
+    // Reopened (here: a second device on the same database): the card shows; Open goes back to step 3.
+    const ctx2 = await open({ fakeFirestore: docs });
+    const p2 = ctx2.page;
+    ok(/^Back to: 10% intercept, step 3 of 3/.test(await card(p2) || ''), 'reopening (another device) shows the card');
+    await p2.locator('[data-nw-return]').getByRole('button', { name: 'Open' }).click();
+    await wait(p2, 1500);
+    ok((await p2.locator('.pr-root').innerText()).includes('Step 3 of 3'), 'Open returns to step 3');
+    await p2.getByRole('button', { name: 'System', exact: true }).click();
+    ok(/Open was tapped 1 time\./.test(await p2.locator('[data-nw-return-switch]').innerText()), 'the System tab shows how often Open was tapped on this device');
+    await finish(ctx2, 'return second device');
+  }
+
+  console.log('\n[v5 5b. Return card offline: a kept Dump line; the newer replaces the older; Hide]');
+  {
+    // Offline from the start: the switch is in this device's copy (as after an earlier online open).
+    const ctx = await open({ offline: true, device: { 'nw:return': JSON.stringify({ on: true, card: null }) } });
+    const { page } = ctx;
+    await openDump(page);
+    await page.locator('textarea[aria-label="Brain Dump text"]').fill('Reply to the drafted paragraph');
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
+    await wait(page, 600);
+    await page.locator('[data-nw-keep-way-back]').click();
+    await wait(page, 600);
+    ok(/^Back to: Reply to the drafted paragraph\. Left /.test(await card(page) || ''), 'keep as my way back makes the Dump line the card');
+    await page.reload(); await page.waitForFunction(() => document.querySelector('nav button')); await wait(page, 2500);
+    ok(/^Back to: Reply to the drafted paragraph/.test(await card(page) || ''), 'offline, after reopening, the kept line still shows');
+    await openDump(page);
+    await page.locator('textarea[aria-label="Brain Dump text"]').fill('Call the bank');
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
+    await wait(page, 600);
+    await page.locator('[data-nw-keep-way-back]').click();
+    await wait(page, 600);
+    ok(await page.locator('[data-nw-return]').count() === 1 && /^Back to: Call the bank\./.test(await card(page) || ''), 'of two kept lines only the newer shows');
+    await page.locator('[data-nw-return]').getByRole('button', { name: 'Hide' }).click();
+    await wait(page, 600);
+    ok(await page.locator('[data-nw-return]').count() === 0, 'Hide removes it');
+    await page.reload(); await page.waitForFunction(() => document.querySelector('nav button')); await wait(page, 2500);
+    const after = await page.locator('[data-nw-return]').count();
+    ok(after === 0, 'after Hide and reopening, nothing shows → ' + after + ' card(s) ' + (await card(page) || ''));
+    ok(!/\bhidden\b/i.test(await page.evaluate(() => document.body.innerText)), 'no count or badge for what was hidden');
+    // Went wrong with "Nothing yet" offers it too.
+    await page.locator('[data-nw-quick="wrong"]').click();
+    await page.locator('input[aria-label="What went wrong"]').fill('Forgot the form at home');
+    await page.locator('[data-nw-wrong]').getByRole('button', { name: 'Nothing yet' }).click();
+    await page.locator('[data-nw-wrong]').getByRole('button', { name: 'Save' }).click();
+    await wait(page, 600);
+    await page.locator('[data-nw-wrong] [data-nw-keep-way-back]').click();
+    await wait(page, 500);
+    ok(/^Back to: Forgot the form at home\./.test(await card(page) || ''), 'a Went wrong entry saved with "Nothing yet" can be kept as the way back');
+    await finish(ctx, 'return offline');
+  }
+
+  console.log('\n[v5 5c. Switch off: the app is as before]');
+  {
+    const fake = newFake();
+    const ctx = await open({ token: true, google: fake.handler });
+    const { page } = ctx;
+    await openDump(page);
+    await page.locator('textarea[aria-label="Brain Dump text"]').fill('Switch-off dump');
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'Send', exact: true }).click();
+    await wait(page, 1200);
+    ok(fake.doc.paras.some(p => /^Switch-off dump /.test(p.text)) && await page.locator('[data-nw-keep-way-back]').count() === 0, 'Dump sends as before, with no keep button');
+    await page.locator('[data-nw-quick="joy"]').click();
+    await page.locator('[data-nw-joy] textarea[aria-label="What happened"]').fill('Sun on the snow');
+    await page.locator('[data-nw-joy]').getByRole('button', { name: 'Save joy' }).click(); await wait(page, 600);
+    await page.locator('[data-nw-quick="predict"]').click();
+    await page.locator('textarea[aria-label="Prediction"]').fill('Quiet evening');
+    await page.locator('[data-nw-predict]').getByRole('radio', { name: '3', exact: true }).click();
+    await page.locator('[data-nw-predict]').getByRole('button', { name: 'Save prediction' }).click(); await wait(page, 600);
+    await page.locator('[data-nw-quick="feedback"]').click();
+    await page.locator('textarea[aria-label="Feedback for the app"]').fill('TEST feedback with the switch off');
+    await page.locator('[data-nw-feedback], [data-nw-quick-panel]').getByRole('button', { name: /^Send|^Save/ }).first().click().catch(() => {});
+    await wait(page, 600);
+    await page.getByRole('button', { name: 'Play', exact: true }).click();
+    await page.locator('[data-nw-wakeup]').click();
+    await page.waitForSelector('text=Where are you?');
+    await page.getByRole('button', { name: '✕ Close' }).click();
+    ok(await page.locator('[data-nw-return]').count() === 0 && !(await page.evaluate(() => window.__fakeDocs.has('nw_return'))), 'with the switch off: no card, and nw:return is never written (Dump, Joy, Predict, Feedback, Wake up)');
+    await finish(ctx, 'switch off');
+  }
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
-  const parts = { 1: part1, 2: part2, 3: part3, 4: part4 };
+  const parts = { 1: part1, 2: part2, 3: part3, 4: part4, 5: part5 };
   for (const [k, fn] of Object.entries(parts)) if (which === 'all' || which === k) await fn();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);

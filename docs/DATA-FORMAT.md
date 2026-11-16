@@ -333,6 +333,15 @@ now?. They are not listed on the strip and not offered for Today's three. Nothin
 saved What now? record (`practice:ramp`) a work step's text is `(work, kept on this device)` with no `ledger` ref, and any
 other line that names work is replaced the same way. Past Brain Dump lines are no longer filtered for work.
 
+## The return card (nw:return)
+
+Since build v5. `{ "on": true|false, "card": { id, text, at, from, target } | null, "at" }`, stored whole through
+`window.storage`, so the card shows on every device. `on` is the System tab switch (off by default; off, nothing is shown
+and nothing is written here by the app). `from`: `flow`, `what-now`, `ledger`, `dump` or `wrong`. `target`:
+`{ type: "flow", practiceId }` (Open returns to the guided flow; its draft resumes at the step), `{ type: "practice" }`
+(Practice, Today) or `{ type: "quick", id }` (opens that quick panel). One card only; Hide and Done set `card` to null. How
+often Open was tapped is counted on the device only (`__nw_return_opens`) and shown on the System tab.
+
 ## Feedback for the app (feedback:app)
 
 `{ "entries": [{ id, at, date, screen, text, status: new|planned|done }] }`, append-only, merged by `id`.
