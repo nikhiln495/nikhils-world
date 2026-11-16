@@ -14261,7 +14261,7 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
   const edit = (k, patch) => setPlan(p => p.map((s, j) => (j === k ? { ...s, ...patch } : s)));
   const move = (k, d) => setPlan(p => { const q = p.slice(); const t = k + d; if (t < 0 || t >= q.length) return q; [q[k], q[t]] = [q[t], q[k]]; return q; });
   const clocks = plan.map((s, k) => pAddMin(planStart, plan.slice(0, k).reduce((a, x) => a + (+x.minutes || 0), 0)) || s.start);
-  const startStep = (i) => { setRun({ i, startedAt: Date.now(), note: '', mins: '' }); setDoneOp(null); if (plan[i] && window.nwReturnKeep) window.nwReturnKeep(plan[i].text, 'what-now', { type: 'practice' }); };
+  const startStep = (i) => { setRun({ i, startedAt: Date.now(), note: '', mins: '' }); setDoneOp(null); if (plan[i] && window.nwReturnKeep) window.nwReturnKeep(plan[i].work ? 'a work step from What now?' : plan[i].text, 'what-now', { type: 'practice' }); }; // the card syncs, so a work step's text stays off it
   const finishStep = wrap(async () => {
     const s = plan[run.i];
     const actual = Math.max(1, Math.round((run.mins !== '' ? +run.mins * 60000 : Date.now() - run.startedAt) / 60000));
