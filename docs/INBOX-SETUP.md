@@ -83,7 +83,9 @@ Run worker bridge) and `appsscript.json`. No keys are in these files. The worker
   private (not work), one speaker or several, is copied in full into this month's `Brain Dump <Mon> <yyyy>` under the day
   heading (`Sunday, Nov 15, 2026`), as one paragraph: `task: …` with speaker labels on their own lines, ending
   `(voice, 2:39 AM)`. Untagged memos stay in the transcript doc only.
-- **Speaker labels:** `Speaker 1:`, `Speaker 2:`; a name only when the recording itself says it. This rule is sent with each
-  job (`prompt` in `request.json`); the worker's own prompt has to say the same.
+- **Speaker labels:** `Speaker 1:`, `Speaker 2:`; a name only when the recording itself says it. In a memo that begins with a
+  tag word, the person who says it is **Nikhil** and everyone else is `Speaker 2:`, `Speaker 3:` in the order they speak
+  (the script relabels the worker's text itself, so this holds whatever the worker returned). The rule is also sent with
+  each job (`prompt` in `request.json`); the worker's own prompt should say the same.
 - **`installCloudInbox()`** no longer switches `ENABLE_FIREFLIES` or `ENABLE_ACOUSTIC_NOTES` off: it sets them only when they
   are not set yet.

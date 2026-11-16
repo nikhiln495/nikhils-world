@@ -281,10 +281,19 @@ function part1() {
     const task = bd.filter(x => /^task: /.test(x));
     eq(task, ['task: email Dr. Shobha about Thursday. (voice, 2:39 AM)'], 'a memo starting "task" makes one Brain Dump paragraph, the tag in front, ending (voice, 2:39 AM)');
     const note = bd.filter(x => /^note:/.test(x));
-    eq(note, ['note:\nSpeaker 1: we decided to walk instead of drive.\nSpeaker 2: And we leave at four. (voice, 2:45 AM)'], 'a two-speaker tagged memo makes one paragraph with both speaker labels on their own lines');
+    eq(note, ['note:\nNikhil: we decided to walk instead of drive.\nSpeaker 2: And we leave at four. (voice, 2:45 AM)'], 'a two-speaker tagged memo makes one paragraph with both speaker labels on their own lines; the one who says the tag word is Nikhil');
+    ok(env.auto().some(x => /\nNikhil: Note, we decided to walk instead of drive\.\nSpeaker 2: And we leave at four\./.test(x)), 'the transcript doc says Nikhil too');
     ok(!bd.some(x => /dinner/.test(x)), 'an untagged memo goes to the transcript doc only');
     ok(env.auto().some(x => /dinner/.test(x)), '...where it is');
     ok(!bd.some(x => /survey reminder/.test(x)), 'a memo starting "work" does not go to the Brain Dump');
+    // The worker may number him second: he is still Nikhil, and the others are Speaker 2, Speaker 3 in the order they speak.
+    const e3 = cloudEnv();
+    e3.addAudio('20261115 030000-T5.m4a', 'Speaker 2: Joy, Corky made soup.\nSpeaker 1: It was the lentil one.\nSpeaker 3: I helped.\nSpeaker 1: She did.', 20);
+    e3.addAudio('20261115 030500-T6.m4a', 'Speaker 1: So what about dinner?\nSpeaker 2: Not sure yet.', 10);
+    e3.twoRuns();
+    eq(e3.bdTexts().filter(x => /^joy:/.test(x)), ['joy:\nNikhil: Corky made soup.\nSpeaker 2: It was the lentil one.\nSpeaker 3: I helped.\nSpeaker 2: She did. (voice, 3:00 AM)'], 'the tag speaker is Nikhil wherever the worker numbered him; the others are Speaker 2, Speaker 3');
+    ok(e3.auto().some(x => /Speaker 1: So what about dinner\?/.test(x)) && !e3.auto().some(x => /Nikhil: So what/.test(x)), 'an untagged memo keeps the worker\'s labels');
+    ok(/label the person who says that first word "Nikhil:"/.test(e3.jobs[0].prompt), 'the rule sent with each job says so');
     env.twoRuns();
     ok(env.bdTexts().filter(x => /^task: /.test(x)).length === 1, 'running again adds nothing to the Brain Dump');
     const env2 = cloudEnv();

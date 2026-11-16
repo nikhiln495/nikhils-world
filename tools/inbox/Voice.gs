@@ -11,8 +11,32 @@ var NWI_PROMPT = 'Transcribe this audio recording verbatim. Use light punctuatio
   'Only if more than one person speaks, start each speaker\'s turn on its own line with "Speaker 1:", "Speaker 2:" and so on. ' +
   'Use a person\'s name in place of the number only when the recording itself says it: someone says their own name, ' +
   'is addressed by name, or is named afterwards (for example "that was Corky"). Never guess a name. ' +
-  'If one person speaks, do not add any speaker label. Output only the transcript.';
+  'If one person speaks, do not add any speaker label. ' +
+  'If the recording begins with one of these words: task, note, done, wins, joy, coach, geog, stagecraft, life, private, ' +
+  'label the person who says that first word "Nikhil:"; everyone else is "Speaker 2:", "Speaker 3:" and so on, unless the recording names them. ' +
+  'Output only the transcript.';
 
+// In a memo that begins with a tag word, the speaker who says it is Nikhil (only he starts memos with a tag word, Nov 15).
+// Everyone else is "Speaker 2", "Speaker 3"… in the order they first speak, unless the recording names them. Applied here
+// as well as asked of the worker, so it holds whatever the worker returned. map: { "<label as written>": "<new label>" }.
+function nwiNikhilMap_(lines) {
+  var first = NWI_LABEL_RE.exec(String(lines[0] || ''));
+  if (!first) return null;
+  var map = {}, n = 2;
+  map[first[1]] = 'Nikhil';
+  lines.forEach(function (l) {
+    var m = NWI_LABEL_RE.exec(l);
+    if (m && !map[m[1]] && /^Speaker \d+$/.test(m[1])) map[m[1]] = 'Speaker ' + n++;
+  });
+  return map;
+}
+function nwiApplyLabels_(lines, map) {
+  if (!map) return lines;
+  return lines.map(function (l) {
+    var m = NWI_LABEL_RE.exec(l);
+    return m && map[m[1]] ? map[m[1]] + ': ' + l.slice(m[0].length) : l;
+  });
+}
 // Memos that begin with one of these words go to the Brain Dump in full (not "work").
 var NWI_TAGS = ['task', 'note', 'done', 'wins', 'joy', 'coach', 'geog', 'stagecraft', 'life', 'private'];
 var NWI_LABEL_RE = /^(Speaker \d+|[A-Z][A-Za-z.'-]*(?: [A-Z][A-Za-z.'-]*)?):\s*/;
@@ -270,6 +294,8 @@ function nwiWriteMemo_(f, text, docRef, notes, seconds) {
   String(text || '').split(/\n+/).forEach(function (l) { l = l.trim(); if (l) body.push(l); });
   var part = nwiPartOf_(f.name), parts = nwiJson_('VOICE_PARTS', {}), first = part ? parts[part.base] : null;
   var later = !!(first && first.id !== f.id), dur = nwiDurText_(seconds);
+  var labels = later ? (first.labels || null) : (nwiSpokenTag_(body) ? nwiNikhilMap_(body) : null);
+  body = nwiApplyLabels_(body, labels);
   var lines = [later
     ? '(continued, part ' + part.n + (dur ? ', ' + dur : '') + ')'
     : '(voice memo, ' + nwiFmt_(f.recorded, 'h:mm a') + (dur ? ', ' + dur : '') + ', automatic draft, speakers as heard)'];
@@ -281,7 +307,7 @@ function nwiWriteMemo_(f, text, docRef, notes, seconds) {
   lines.push('Source audio: https://drive.google.com/file/d/' + f.id + '/view');
   var tag = later ? first.tag : nwiSpokenTag_(body);
   if (part && !first) {
-    parts[part.base] = { id: f.id, tag: tag || null, at: Date.now() };
+    parts[part.base] = { id: f.id, tag: tag || null, labels: labels || null, at: Date.now() };
     var keys = Object.keys(parts).sort(function (a, b) { return parts[b].at - parts[a].at; });
     keys.forEach(function (k, i) { if (i >= 40 || Date.now() - parts[k].at > 3 * 86400000) delete parts[k]; });
     nwiSet_('VOICE_PARTS', JSON.stringify(parts));
