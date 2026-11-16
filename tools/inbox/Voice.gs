@@ -4,6 +4,19 @@ var NWI_CHUNK = 8 * 1024 * 1024; // multiple of 256 KiB, as Cloud Storage resuma
 var NWI_RUN_BUDGET_MS = 270000;  // stop starting new files after 4.5 of the 6 minutes
 var NWI_DEADLINE = 0;
 
+// The transcription rule (Nov 15). It goes with each job in request.json as "prompt"; the Cloud Run worker's own prompt
+// must say the same (its source is not in this project). Speaker numbers stay unless the recording itself says a name.
+var NWI_PROMPT = 'Transcribe this audio recording verbatim. Use light punctuation and break it into paragraphs. ' +
+  'Do not summarize. Do not clean up or change any words. Do not add headings or any other text. ' +
+  'Only if more than one person speaks, start each speaker\'s turn on its own line with "Speaker 1:", "Speaker 2:" and so on. ' +
+  'Use a person\'s name in place of the number only when the recording itself says it: someone says their own name, ' +
+  'is addressed by name, or is named afterwards (for example "that was Corky"). Never guess a name. ' +
+  'If one person speaks, do not add any speaker label. Output only the transcript.';
+
+// Memos that begin with one of these words go to the Brain Dump in full (not "work").
+var NWI_TAGS = ['task', 'note', 'done', 'wins', 'joy', 'coach', 'geog', 'stagecraft', 'life', 'private'];
+var NWI_LABEL_RE = /^(Speaker \d+|[A-Z][A-Za-z.'-]*(?: [A-Z][A-Za-z.'-]*)?):\s*/;
+
 function runVoiceInbox() {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) return;
@@ -219,18 +232,117 @@ function nwiSavedMemoBlock_(doc, id) {
   var match = doc.getBody().findText(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   if (!match) return null;
   var text = match.getElement().getParent().asParagraph().getText();
-  return text.indexOf('(voice memo, ') === 0 && text.slice(-needle.length) === needle ? text : null;
+  return (text.indexOf('(voice memo, ') === 0 || text.indexOf('(continued, part ') === 0) && text.slice(-needle.length) === needle ? text : null;
 }
-function nwiWriteMemo_(f, text, docRef, notes) {
-  var lines = ['(voice memo, ' + nwiFmt_(f.recorded, 'h:mm a') + ', auto-transcribed from ' + f.name + ')',
-    'Automatic draft — audio coverage and speaker labels not verified. Speaker numbers restart within each marked audio section.'];
-  text.split(/\n+/).forEach(function (l) { l = l.trim(); if (l) lines.push(l); });
+function nwiMemoPara_(doc, id) {
+  var needle = 'Source audio: https://drive.google.com/file/d/' + id + '/view';
+  var match = doc.getBody().findText(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return match ? match.getElement().getParent().asParagraph() : null;
+}
+// "2 min 17 s" or "17 s".
+function nwiDurText_(sec) {
+  if (!(Number(sec) >= 0)) return '';
+  var total = Math.round(Number(sec)), m = Math.floor(total / 60), s = total - m * 60;
+  return m ? m + ' min ' + s + ' s' : s + ' s';
+}
+// Recly splits one recording into ..._p001, ..._p002: { base, n } (null for any other name).
+function nwiPartOf_(name) {
+  var m = /^(.*)_p(\d{2,4})(\.[A-Za-z0-9]+)?$/.exec(name || '');
+  return m ? { base: m[1], n: Number(m[2]) } : null;
+}
+// Under 3 seconds, or nothing but "[inaudible]", "[No intelligible speech]" and the like.
+function nwiIsEmptyMemo_(text, seconds) {
+  if (seconds !== undefined && seconds !== null && Number(seconds) < 3) return true;
+  var rest = String(text || '').split(/\n+/).map(function (l) { return l.replace(NWI_LABEL_RE, '').replace(/\[[^\]]*\]/g, '').replace(/[\s.,…-]+/g, ''); }).join('');
+  return !rest;
+}
+// The tag word a memo starts with (after any speaker label), or null.
+function nwiSpokenTag_(lines) {
+  var first = String(lines[0] || '').replace(NWI_LABEL_RE, '');
+  var m = /^([A-Za-z]+)\b/.exec(first);
+  var w = m ? m[1].toLowerCase() : '';
+  return NWI_TAGS.indexOf(w) >= 0 ? w : null;
+}
+// One header line per memo (Nov 15). Parts of one Recly recording become one entry: the first part has the header, a later
+// part is added under it as "(continued, part 2, …)". Each part ends with its own source line, so a retry finds it.
+function nwiWriteMemo_(f, text, docRef, notes, seconds) {
+  var body = [];
+  String(text || '').split(/\n+/).forEach(function (l) { l = l.trim(); if (l) body.push(l); });
+  var part = nwiPartOf_(f.name), parts = nwiJson_('VOICE_PARTS', {}), first = part ? parts[part.base] : null;
+  var later = !!(first && first.id !== f.id), dur = nwiDurText_(seconds);
+  var lines = [later
+    ? '(continued, part ' + part.n + (dur ? ', ' + dur : '') + ')'
+    : '(voice memo, ' + nwiFmt_(f.recorded, 'h:mm a') + (dur ? ', ' + dur : '') + ', automatic draft, speakers as heard)'];
+  body.forEach(function (l) { lines.push(l); });
   if (notes) {
     lines.push('Acoustic observations — AI estimates, separate from spoken words');
     notes.split(/\n+/).forEach(function (l) { if (l.trim()) lines.push(l.trim()); });
   }
   lines.push('Source audio: https://drive.google.com/file/d/' + f.id + '/view');
-  nwiStoreMemoBlock_(f, lines.join('\n'), docRef);
+  var tag = later ? first.tag : nwiSpokenTag_(body);
+  if (part && !first) {
+    parts[part.base] = { id: f.id, tag: tag || null, at: Date.now() };
+    var keys = Object.keys(parts).sort(function (a, b) { return parts[b].at - parts[a].at; });
+    keys.forEach(function (k, i) { if (i >= 40 || Date.now() - parts[k].at > 3 * 86400000) delete parts[k]; });
+    nwiSet_('VOICE_PARTS', JSON.stringify(parts));
+  }
+  if (later) nwiStoreContinuation_(f, lines.join('\n'), docRef, first.id);
+  else nwiStoreMemoBlock_(f, lines.join('\n'), docRef);
+  if (tag) {
+    try { nwiToBrainDump_(f, tag, body, later); }
+    catch (e) { nwiLog_(f.name, '', '', '', 'Brain Dump not updated: ' + e.message); }
+  }
+}
+// A later part goes right under its recording's entry (after any parts already there); if that entry is not in the
+// doc (e.g. the rolling doc dropped it), it goes under its day like any memo.
+function nwiStoreContinuation_(f, block, docRef, firstId) {
+  [docRef].concat((function () { try { return [nwiRollingDoc_()]; } catch (e) { return []; } })()).forEach(function (doc, k) {
+    if (nwiSavedMemoBlock_(doc, f.id)) return;
+    var p = nwiMemoPara_(doc, firstId);
+    if (!p) { if (k === 0) nwiStoreMemoBlock_(f, block, doc); return; }
+    var body = doc.getBody(), at = body.getChildIndex(p) + 1, paras = body.getParagraphs();
+    while (at < paras.length && !nwiIsH1_(paras[at]) && paras[at].getText().indexOf('(continued, part ') === 0) at++;
+    var np = at >= body.getNumChildren() ? body.appendParagraph(block) : body.insertParagraph(at, block);
+    np.setHeading(DocumentApp.ParagraphHeading.NORMAL);
+    doc.saveAndClose();
+  });
+}
+
+// ── Spoken tags reach the Brain Dump (Nov 15) ──
+// This month's "Brain Dump <Mon> <yyyy>" (the app's own doc). Not made here: when it is not found, the log says so.
+function nwiBrainDumpDoc_(when) {
+  var name = 'Brain Dump ' + nwiFmt_(when, 'MMM yyyy');
+  var me = Session.getEffectiveUser().getEmail(), it = DriveApp.getFilesByName(name);
+  while (it.hasNext()) {
+    var f = it.next();
+    if (f.getMimeType() === 'application/vnd.google-apps.document' && (!f.getOwner() || f.getOwner().getEmail() === me)) return DocumentApp.openById(f.getId());
+  }
+  return null;
+}
+// One paragraph, under the day heading in the app's format ("Sunday, Nov 15, 2026"), at the top of that day like the
+// app's own captures. The spoken tag becomes "task:" in front; speaker labels stay on their own lines; it ends
+// "(voice, 2:39 AM)". Written once per audio file.
+function nwiToBrainDump_(f, tag, lines, later) {
+  var written = nwiGetList_('VOICE_BD_WRITTEN');
+  if (written.indexOf(f.id) >= 0 || !lines.length) return;
+  var doc = nwiBrainDumpDoc_(f.recorded);
+  if (!doc) { nwiLog_(f.name, '', '', '', 'Brain Dump not updated: no doc named "Brain Dump ' + nwiFmt_(f.recorded, 'MMM yyyy') + '"'); return; }
+  var out = lines.slice();
+  var label = (NWI_LABEL_RE.exec(out[0]) || [''])[0];
+  if (!later) out[0] = label + out[0].slice(label.length).replace(/^[A-Za-z]+\b[\s,.:;!-]*/, '');
+  if (!out[0].slice(label.length).trim()) out.shift(); // the memo was only the tag word on its first line
+  var multi = out.some(function (l) { return NWI_LABEL_RE.test(l); });
+  var text = tag + ':' + (later ? ' (continued)' : '') + (multi ? '\n' : ' ') + out.join('\n') + ' (voice, ' + nwiFmt_(f.recorded, 'h:mm a') + ')';
+  var heading = Utilities.formatDate(f.recorded, nwiTz_(), 'EEEE, MMM d, yyyy');
+  var body = doc.getBody(), paras = body.getParagraphs(), at = -1;
+  for (var i = 0; i < paras.length; i++) if (nwiIsH1_(paras[i]) && paras[i].getText().trim() === heading) { at = body.getChildIndex(paras[i]) + 1; break; }
+  if (at < 0) { body.insertParagraph(0, heading).setHeading(DocumentApp.ParagraphHeading.HEADING1); at = 1; }
+  var p = at >= body.getNumChildren() ? body.appendParagraph(text) : body.insertParagraph(at, text);
+  p.setHeading(DocumentApp.ParagraphHeading.NORMAL);
+  doc.saveAndClose();
+  written.push(f.id);
+  nwiSetList_('VOICE_BD_WRITTEN', written.slice(-300));
+  nwiLog_(f.name, '', '', '', 'Brain Dump: ' + tag + ' line added');
 }
 function nwiStoreMemoBlock_(f, block, docRef) {
   var heading = nwiFmt_(f.recorded, 'EEE, MMM d, yyyy');

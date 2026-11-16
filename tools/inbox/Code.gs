@@ -7,7 +7,7 @@ var NWI_DEFAULTS = {
   GCP_PROJECT: 'nikhils-world',
   VERTEX_MODEL: 'gemini-3.5-flash-lite', // supported audio/transcription pilot
   VERTEX_REGION: 'global',              // supported global endpoint
-  TIME_ZONE: 'America/Anchorage',        // India Dec 16 to Mar 5: set TIME_ZONE to Asia/Kolkata
+  TIME_ZONE: 'America/Anchorage',        // the fallback; TZ_SCHEDULE (below) changes it by date
   DAILY_CAP_MINUTES: '120',
   INLINE_MAX_MB: '20',                   // bigger files go through the Cloud Storage bucket
   AUDIO_KBPS_ESTIMATE: '32',             // low on purpose: guesses a memo longer than it is, so the cap errs safe
@@ -53,7 +53,19 @@ function nwiSetList_(name, arr) {
   for (; text.length > 0; i++) { props.setProperty(name + '_' + i, text.slice(0, 8000)); text = text.slice(8000); }
   while (props.getProperty(name + '_' + i) !== null) { props.deleteProperty(name + '_' + i); i++; }
 }
-function nwiTz_() { return nwiCfg_('TIME_ZONE'); }
+// Time zone by date (Nov 15): Script Property TZ_SCHEDULE, e.g.
+// [{"from":"2026-12-16","tz":"Asia/Kolkata"},{"from":"2027-03-06","tz":"America/Anchorage"}].
+// The latest entry whose date is not after today wins; with none (or an unreadable list) it is TIME_ZONE.
+function nwiTz_() {
+  var base = nwiCfg_('TIME_ZONE');
+  var sched = nwiJson_('TZ_SCHEDULE', null);
+  if (!sched || !sched.length) return base;
+  var today = Utilities.formatDate(new Date(), base, 'yyyy-MM-dd'), pick = null;
+  sched.forEach(function (s) {
+    if (s && s.tz && /^\d{4}-\d{2}-\d{2}$/.test(s.from || '') && s.from <= today && (!pick || s.from >= pick.from)) pick = s;
+  });
+  return pick ? pick.tz : base;
+}
 function nwiFmt_(date, pattern) { return Utilities.formatDate(date, nwiTz_(), pattern); }
 function nwiToken_() { return ScriptApp.getOAuthToken(); }
 

@@ -49,14 +49,18 @@ function nwiCloudHold_(f, folders, prop, state, reason) {
   nwiLog_(f.name, '', '', '', 'cloud worker held: ' + reason);
   return 'problem';
 }
-function nwiCloudFinalize_(f, folders, state, prop) {
+function nwiCloudFinalize_(f, folders, state, prop, skipped) {
   var history = nwiVoiceWritten_();
   if (history.indexOf(f.id) < 0) { history.push(f.id); nwiSetList_('VOICE_WRITTEN', history.slice(-300)); }
-  f.file.setDescription((f.keepInPlace ? 'NW Inbox processed: ' : '') + 'Automatic draft saved by cloud worker. All decoded intervals processed; words/speakers unverified. Source retained.');
+  f.file.setDescription((f.keepInPlace ? 'NW Inbox processed: ' : '') + (skipped
+    ? 'Skipped: under 3 seconds or no intelligible speech. Nothing was written. Source retained.'
+    : 'Automatic draft saved by cloud worker. All decoded intervals processed; words/speakers unverified. Source retained.'));
   if (!f.keepInPlace) f.file.moveTo(folders.done);
   PropertiesService.getScriptProperties().deleteProperty(prop);
-  nwiLog_(f.name, state.duration_seconds ? state.duration_seconds / 60 : '', '', '', 'cloud draft saved — audio intervals processed; speech accuracy unverified');
-  return 'done';
+  nwiLog_(f.name, state.duration_seconds ? state.duration_seconds / 60 : '', '', '', skipped
+    ? 'skipped: under 3 seconds or no intelligible speech; nothing written'
+    : 'cloud draft saved — audio intervals processed; speech accuracy unverified');
+  return skipped ? 'skipped' : 'done';
 }
 // Poll pending jobs even when the recursive scan is visiting a different folder.
 function nwiCloudPendingFiles_(files) {
@@ -127,7 +131,7 @@ function nwiCloudVoiceOne_(f, folders, docRef) {
       metadata = nwiCloudFetch_(nwiCloudObjectUrl_(prefix + '/source', false));
     }
     state.source_generation = metadata.generation;
-    nwiCloudWrite_(prefix + '/request.json', { pipeline: NWI_CLOUD_PIPELINE, source_id: f.id, source_generation: metadata.generation, size: state.size });
+    nwiCloudWrite_(prefix + '/request.json', { pipeline: NWI_CLOUD_PIPELINE, source_id: f.id, source_generation: metadata.generation, size: state.size, prompt: NWI_PROMPT });
     state.phase = 'ready';
     nwiSet_(prop, JSON.stringify(state));
   }
@@ -146,12 +150,15 @@ function nwiCloudVoiceOne_(f, folders, docRef) {
   }
   if (result.status !== 'complete') return nwiCloudHold_(f, folders, prop, state, result.error || 'Worker did not finish every section.');
   if (result.pipeline !== NWI_CLOUD_PIPELINE || result.source_id !== f.id || String(result.source_generation) !== String(state.source_generation) ||
-      !result.intervals_verified || result.completed_sections !== result.expected_sections || !(result.completed_sections > 0) || !result.text) {
+      !result.intervals_verified || result.completed_sections !== result.expected_sections || !(result.completed_sections > 0)) {
     return nwiCloudHold_(f, folders, prop, state, 'Worker result does not match this source or has incomplete interval coverage.');
   }
   state.duration_seconds = result.duration_seconds;
   nwiSet_(prop, JSON.stringify(state));
-  nwiWriteMemo_(f, result.text, docRef, null);
+  // Under 3 seconds, or no intelligible speech: nothing is written; the log sheet says so (Nov 15).
+  if (nwiIsEmptyMemo_(result.text, result.duration_seconds)) return nwiCloudFinalize_(f, folders, state, prop, true);
+  if (!result.text) return nwiCloudHold_(f, folders, prop, state, 'Worker result has no text.');
+  nwiWriteMemo_(f, result.text, docRef, null, result.duration_seconds);
   return nwiCloudFinalize_(f, folders, state, prop);
 }
 
@@ -174,8 +181,9 @@ function installCloudInbox() {
   nwiSet_('CLOUD_RUN_REGION', 'us-central1');
   Object.keys(expected).forEach(function (key) { nwiSet_(key, expected[key]); });
   if (!nwiProp_('VOICE_IMPORT_AFTER')) nwiSet_('VOICE_IMPORT_AFTER', '2026-11-12T03:29:00Z');
-  nwiSet_('ENABLE_ACOUSTIC_NOTES', 'false');
-  nwiSet_('ENABLE_FIREFLIES', 'false');
+  // Set only when missing: a value he chose (e.g. ENABLE_FIREFLIES true) is never switched back off (Nov 15).
+  if (nwiProp_('ENABLE_ACOUSTIC_NOTES') === null) nwiSet_('ENABLE_ACOUSTIC_NOTES', 'false');
+  if (nwiProp_('ENABLE_FIREFLIES') === null) nwiSet_('ENABLE_FIREFLIES', 'false');
   checkVoiceInbox();
   nwiCloudFetch_('https://storage.googleapis.com/storage/v1/b/' + nwiProp_('WORKER_BUCKET'));
   nwiCloudFetch_('https://run.googleapis.com/v2/projects/' + nwiCfg_('GCP_PROJECT') + '/locations/' + nwiProp_('CLOUD_RUN_REGION') + '/jobs/' + nwiProp_('CLOUD_RUN_JOB'));

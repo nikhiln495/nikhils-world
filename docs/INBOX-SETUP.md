@@ -24,7 +24,8 @@ Project Settings → **Script Properties** → **Add script property**. Names mu
 |---|---|---|
 | `FIREFLIES_API_KEY` | For Fireflies | Make it in Fireflies: **Settings → Developer Settings → API key**. Copy it straight into this box. Never paste it in a chat or the repo. |
 | `FIREFLIES_DOC_NAME` | Optional | Name template for new Fireflies docs. `{date}` = meeting date `YYYY-MM-DD`, `{context}` = "Session with Dr. Shobha" or the Fireflies title. Default: `Fireflies Transcript {date} {context}`. To change it, edit this value; it only affects docs made afterwards. Old docs are never renamed. |
-| `TIME_ZONE` | Optional | Default `America/Anchorage`. For India (Dec 16 to Mar 5) use `Asia/Kolkata`, and change it back after. |
+| `TIME_ZONE` | Optional | Default `America/Anchorage`. Used when `TZ_SCHEDULE` is not set or has no entry yet. |
+| `TZ_SCHEDULE` | Optional | Time zone by date, e.g. `[{"from":"2026-12-16","tz":"Asia/Kolkata"},{"from":"2027-03-06","tz":"America/Anchorage"}]`. The latest entry whose date is not after today is used, so nothing needs changing by hand on the day. |
 | `VERTEX_MODEL` | Optional | Default `gemini-2.5-flash` (Flash tier, takes audio). Newer Flash ids (for example `gemini-3.5-flash`) can be put here. |
 | `VERTEX_REGION` | Optional | Default `us-central1`. `global` also works. |
 | `GCP_PROJECT` | Optional | Default `nikhils-world`. |
@@ -66,3 +67,23 @@ A Gmail-account Apps Script gets **90 minutes of trigger time per day, shared by
 - Look at the sheet "NW Inbox log" (time, file, minutes, tokens, status).
 - A file in **Problem** has the error in its description. Move it back to the Inbox to try again.
 - "Waiting: daily cap" means the day's minutes are used; it goes through tomorrow.
+
+## Build v5 (Nov 15, 2026): what changed in the voice pipeline
+
+The repository now holds the project as it runs in Drive: `Code.gs`, `Voice.gs`, `Fireflies.gs`, `Cloud Bridge.gs` (the Cloud
+Run worker bridge) and `appsscript.json`. No keys are in these files. The worker's own source is not in this repository.
+
+- **One header line per memo:** `(voice memo, 2:39 AM, 2 min 17 s, automatic draft, speakers as heard)`, then the text, then
+  the `Source audio:` line (kept: it is how a retry finds an entry already written).
+- **Recly parts** (`…_p001`, `…_p002`) are one entry: the first part has the header, later parts go directly under it as
+  `(continued, part 2, …)`, also when a part arrives later.
+- **Empties are skipped:** under 3 seconds, or only `[inaudible]` / `[No intelligible speech]`: nothing is written; the log
+  sheet says `skipped`.
+- **Spoken tags reach the Brain Dump:** a memo that begins with task, note, done, wins, joy, coach, geog, stagecraft, life or
+  private (not work), one speaker or several, is copied in full into this month's `Brain Dump <Mon> <yyyy>` under the day
+  heading (`Sunday, Nov 15, 2026`), as one paragraph: `task: …` with speaker labels on their own lines, ending
+  `(voice, 2:39 AM)`. Untagged memos stay in the transcript doc only.
+- **Speaker labels:** `Speaker 1:`, `Speaker 2:`; a name only when the recording itself says it. This rule is sent with each
+  job (`prompt` in `request.json`); the worker's own prompt has to say the same.
+- **`installCloudInbox()`** no longer switches `ENABLE_FIREFLIES` or `ENABLE_ACOUSTIC_NOTES` off: it sets them only when they
+  are not set yet.
