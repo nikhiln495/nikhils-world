@@ -298,6 +298,30 @@ them. Captures from before this change were in `__nw_dump_queue` only; the first
 their status. `words` is who said it: absent or `mine`, `ai` (an AI draft) or a person's name. `pasted: true` means the
 full text of a long capture is already in the Pastes doc (so a retry only writes the pointer line).
 
+## Went wrong (practice:wrong:<YYYY_MM>)
+
+Since build v5 (Nov 15, 2026). `{ "month", "entries": [{ id, at, time, what, did, who[], part, myTry, compare, bd, edits? }] }`,
+one doc per month, append-only, merged by `id` (`ENTRIES_KEY`). Only `what` is required; the rest may be empty. `did` may be
+`Nothing yet`; `who` may be `["Nobody"]`. `myTry` and `compare` (`{ mine: { matches, problem }, options: [{ approach,
+first_step, person }] }`) are filled by Compare. `bd` is the id of its Brain Dump capture. An edit keeps what it said before in
+`edits: [{ at, from }]`. **A work entry** (work:, VINE, ASMP, STARR, RTI) is never written here: it stays on the device that
+made it in `__nw_wrong_work` (NW-DEVICE-CACHE), `{ entries: [...] }`, and is never sent to Claude.
+
+## Brain Dump lines for joys, predictions and Went wrong (build v5)
+
+Each joy, prediction, prediction outcome and Went wrong entry adds one capture (see Brain Dump captures), written as one
+Brain Dump line: `joy: <what> · with <who>`, `predict: <prediction>`, `predict outcome: <outcome> (came true|partly|didn't)`,
+`wrong: <what> · did: <did> · with: <who>`, each ending with the stamp. Joys, predictions and Went wrong entries keep the
+capture's id as `bd`. Undo before sending marks the capture `status: "removed"` (never sent); an edit before sending changes the
+capture's text; an edit after sending adds `edit: <tag> <new text>` under that entry's day (`day` on the capture). Lines
+already in the Doc are never rewritten.
+
+## "Left to myself, I'd ___" (asks)
+
+An answer to his own try is saved in `practice:asks:<day>` like any answer, with `kind: "compare"`, `of` (the screen: `stuck`,
+`stuck-else`, `outside`, `coach-me`, `what-now`, `wrong`, `joy-more`) and `myTry`. When the box is empty nothing is added and
+the request is the same as before.
+
 ## Feedback for the app (feedback:app)
 
 `{ "entries": [{ id, at, date, screen, text, status: new|planned|done }] }`, append-only, merged by `id`.

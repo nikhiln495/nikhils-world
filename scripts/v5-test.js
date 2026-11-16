@@ -293,9 +293,183 @@ async function part2() {
   }
 }
 
+// ───────────────────────── Part 3 ─────────────────────────
+const { execSync } = require('child_process');
+const MAIN_HTML = (() => { try { return execSync('git show 69a2273:index.html', { cwd: path.join(__dirname, '..'), maxBuffer: 64 * 1024 * 1024 }).toString(); } catch (_) { return null; } })();
+const toolUse = (picks) => ({ status: 200, json: { model: 'claude-sonnet-5-5', usage: { input_tokens: 10, output_tokens: 5 }, content: [{ type: 'text', text: 'ok' }, { type: 'tool_use', id: 't1', name: 'choose_practices', input: { picks } }] } });
+const COMPARE = { mine: { matches: 'Stepping outside for air is what people often do first.', problem: 'Checking the phone outside may pull you back in.' }, options: [
+  { approach: 'Breathing move', first_step: 'Put one hand on your belly and breathe out slowly four times.', person: null },
+  { approach: 'Tell one person', first_step: 'Text Corky one line about what happened.', person: 'Someone who asks questions out loud' },
+] };
+const textReply = (obj) => ({ status: 200, json: { model: 'claude-sonnet-5-5', usage: { input_tokens: 10, output_tokens: 5 }, stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(obj) }] } });
+const proxyFor = async (body) => (body.output_config && body.output_config.format ? textReply(COMPARE) : toolUse([{ id: 'thought-stop', why: 'Say stop out loud.' }]));
+// A structured-output schema that follows the rules in CLAUDE.md.
+function schemaProblems(node, at = 'schema') {
+  const out = [];
+  if (!node || typeof node !== 'object') return out;
+  if (node.type === 'object' && node.additionalProperties !== false) out.push(`${at}: additionalProperties is not false`);
+  ['minimum', 'maximum', 'minLength', 'maxLength'].forEach(k => { if (k in node) out.push(`${at}: has ${k}`); });
+  if ('minItems' in node && ![0, 1].includes(node.minItems)) out.push(`${at}: minItems ${node.minItems}`);
+  Object.entries(node.properties || {}).forEach(([k, v]) => { if (/reason|thinking|explain/i.test(k)) out.push(`${at}.${k}: asks for reasoning`); out.push(...schemaProblems(v, `${at}.${k}`)); });
+  if (node.items) out.push(...schemaProblems(node.items, `${at}[]`));
+  (node.anyOf || []).forEach((v, i) => out.push(...schemaProblems(v, `${at}|${i}`)));
+  return out;
+}
+async function askClaudeOnce(html, myTry) {
+  const ctx = await openPage({ seed: F.base(), now: '2026-10-04T09:00:00', proxy: proxyFor, ...(html ? { html: () => html } : {}) });
+  const { page } = ctx;
+  await wait(page, 3500);
+  await page.getByRole('button', { name: 'Practice', exact: true }).click();
+  await page.waitForSelector('.pr-root h1');
+  await page.getByRole('tab', { name: 'Library' }).click();
+  await page.getByRole('button', { name: 'Stuck', exact: true }).click();
+  await page.getByLabel('Ask Claude', { exact: true }).fill('I keep rereading the chat from last night');
+  if (myTry) await page.locator('[data-pr-mytry] textarea').first().fill(myTry);
+  await page.getByRole('button', { name: 'Pick practices for me' }).click();
+  await wait(page, 1500);
+  return ctx;
+}
+const norm = (b) => JSON.stringify(b).replace(/\d\d:\d\d/g, 'HH:MM');
+
+async function part3() {
+  console.log('\n[v5 3a. Went wrong: saved offline, on a second device, one Brain Dump line; work entries stay here]');
+  {
+    const fake = newFake();
+    const ctx = await open({ offline: true, token: true, google: fake.handler });
+    const { page } = ctx;
+    const quick = await page.locator('[data-nw-quick]').evaluateAll(els => els.map(e => e.getAttribute('data-nw-quick')));
+    ok(JSON.stringify(quick.slice(0, 5)) === JSON.stringify(['joy', 'wrong', 'predict', 'dump', 'feedback']), 'the quick row: Joy, Went wrong, Predict, Dump, Feedback → ' + JSON.stringify(quick));
+    await page.locator('[data-nw-quick="wrong"]').click();
+    ok(await page.locator('[data-nw-wrong]').getByRole('button', { name: 'Save' }).isDisabled(), 'What went wrong is the only required field');
+    await page.locator('input[aria-label="What went wrong"]').fill('Missed the 3:30 class');
+    await page.locator('[data-nw-wrong]').getByRole('button', { name: 'Nothing yet' }).click();
+    await page.locator('[data-nw-wrong]').getByRole('button', { name: 'Corky', exact: true }).click();
+    await page.locator('input[aria-label="Which part"]').fill('Leaving the dorm');
+    await page.locator('[data-nw-wrong]').getByRole('button', { name: 'Save' }).click();
+    await wait(page, 800);
+    const bar = (await page.locator('[data-nw-savedbar]').first().innerText()).toLowerCase();
+    ok(bar.includes('device only') && /undo/.test(bar), 'offline: the bar says on this device only, with Undo');
+    ok((await page.locator('[data-nw-wrong-row]').first().innerText()).includes('Missed the 3:30 class'), 'the entry shows in the list you can read back');
+    // Nobody is its own choice.
+    await page.locator('input[aria-label="What went wrong"]').fill('TEST VINE consent form had the wrong date');
+    await page.locator('[data-nw-wrong]').getByRole('button', { name: 'Nobody', exact: true }).click();
+    await page.locator('[data-nw-wrong]').getByRole('button', { name: 'Save' }).click();
+    await wait(page, 800);
+    await page.evaluate(() => { window.__offline = false; window.dispatchEvent(new Event('online')); });
+    ok(await waitFor(page, () => window.storage.status().waiting === 0), 'back online: the upload queue empties');
+    await waitFor(page, () => window.nwBrainDump.captures().filter(c => c.tag === 'wrong:').every(c => c.status === 'sent'), null, 15000);
+    const doc = await cloudDoc(page, 'practice_wrong_2026_11');
+    const e = doc && doc.entries.find(x => x.what === 'Missed the 3:30 class');
+    ok(e && e.did === 'Nothing yet' && JSON.stringify(e.who) === '["Corky"]' && e.part === 'Leaving the dorm' && e.id && e.at && e.time && 'myTry' in e && 'compare' in e, 'practice:wrong:2026_11 holds { id, at, time, what, did, who, part, myTry, compare }');
+    const all = await allFake(page);
+    ok(!/VINE consent/.test(all), 'the work entry did not reach the fake Firestore');
+    ok((await page.evaluate(() => JSON.stringify(window.storage.dev.getItem('__nw_wrong_work')))).includes('VINE consent'), 'it is kept on this device');
+    const lines = fake.doc.paras.map(p => p.text);
+    ok(lines.filter(x => /^wrong: Missed the 3:30 class · did: Nothing yet · with: Corky \(from Nikhil's World, 9:1\d AM\)$/.test(x)).length === 1, 'exactly one Brain Dump line for it, after the reconnect');
+    ok(lines.filter(x => /VINE consent/.test(x)).length === 1, 'the work entry also gets its line (from this device; the Brain Dump is his own doc)');
+    await page.evaluate(() => window.dispatchEvent(new Event('online'))); await wait(page, 1200);
+    ok(fake.doc.paras.filter(p => /^wrong: Missed the 3:30/.test(p.text)).length === 1, 'and only one');
+    await finish(ctx, 'went wrong offline');
+    const ctx2 = await open({ fakeFirestore: { ...asDocs(F.base()), practice_wrong_2026_11: { key: 'practice:wrong:2026_11', value: JSON.stringify(doc), updatedAt: new Date(3000) } } });
+    await ctx2.page.locator('[data-nw-quick="wrong"]').click();
+    await wait(ctx2.page, 800);
+    const rows2 = await ctx2.page.locator('[data-nw-wrong-row]').allInnerTexts();
+    ok(rows2.some(r => r.includes('Missed the 3:30 class')) && !rows2.some(r => /VINE/.test(r)), 'a second device shows the entry (not the work one) → ' + JSON.stringify(rows2));
+    await ctx2.page.getByRole('button', { name: 'Practice', exact: true }).click();
+    await ctx2.page.waitForSelector('.pr-root h1');
+    const hist = await ctx2.page.evaluate(async () => (await pDayItems('2026-11-15', null)).items.map(i => i.kind + ': ' + i.title));
+    ok(hist.includes('Went wrong: Missed the 3:30 class'), 'Day history shows it next to Joys → ' + JSON.stringify(hist));
+    await finish(ctx2, 'went wrong second device');
+  }
+
+  console.log('\n[v5 3b. Joy, prediction and outcome: one Brain Dump line each; edit and Undo]');
+  {
+    const fake = newFake();
+    const ctx = await open({ offline: true, token: true, google: fake.handler });
+    const { page } = ctx;
+    await page.locator('[data-nw-quick="joy"]').click();
+    await page.locator('[data-nw-joy] textarea[aria-label="What happened"]').fill('Corky laughed at my joke');
+    await page.locator('[data-nw-joy]').getByRole('button', { name: 'Corky', exact: true }).click();
+    await page.locator('[data-nw-joy]').getByRole('button', { name: 'Save joy' }).click();
+    await wait(page, 600);
+    await page.locator('[data-nw-quick="predict"]').click();
+    await page.locator('textarea[aria-label="Prediction"]').fill('The meeting will run long');
+    await page.locator('[data-nw-predict]').getByRole('radio', { name: '6', exact: true }).click();
+    await page.locator('[data-nw-predict]').getByRole('button', { name: 'Save prediction' }).click();
+    await wait(page, 600);
+    // Undo of a second joy takes its line back before it is sent.
+    await page.locator('[data-nw-quick="joy"]').click();
+    await page.locator('[data-nw-joy] textarea[aria-label="What happened"]').fill('TEST joy to undo');
+    await page.locator('[data-nw-joy]').getByRole('button', { name: 'Save joy' }).click();
+    await wait(page, 600);
+    await page.locator('[data-nw-savedbar]').first().getByRole('button', { name: 'Undo' }).click();
+    await wait(page, 800);
+    await page.evaluate(() => { window.__offline = false; window.dispatchEvent(new Event('online')); });
+    await waitFor(page, () => window.nwBrainDump.captures().every(c => c.status === 'sent'), null, 15000);
+    let lines = fake.doc.paras.map(p => p.text);
+    ok(lines.filter(x => /^joy: Corky laughed at my joke · with Corky \(from Nikhil's World, 9:1\d AM\)$/.test(x)).length === 1, 'one joy: line, written after the reconnect');
+    ok(lines.filter(x => /^predict: The meeting will run long \(from Nikhil's World/.test(x)).length === 1, 'one predict: line');
+    ok(!lines.some(x => /TEST joy to undo/.test(x)), 'Undo before sending: no line for that joy');
+    // The outcome, online.
+    await page.getByRole('button', { name: 'Practice', exact: true }).click();
+    await page.waitForSelector('.pr-root h1');
+    await page.getByRole('tab', { name: 'Predictions', exact: true }).click();
+    await page.locator('[data-pr-pred-waiting]').filter({ hasText: 'The meeting will run long' }).getByRole('button', { name: 'Add what happened' }).click();
+    await page.locator('[data-pr-pred-outcome] textarea[aria-label="What happened"]').fill('It ran 20 minutes over');
+    await page.locator('[data-pr-pred-outcome]').getByRole('button', { name: 'Came true', exact: true }).click();
+    await page.getByRole('button', { name: 'Save what happened' }).click();
+    await wait(page, 1500);
+    lines = fake.doc.paras.map(p => p.text);
+    ok(lines.filter(x => /^predict outcome: It ran 20 minutes over \(came true\) \(from Nikhil's World/.test(x)).length === 1, 'one predict outcome: line, with came true / partly / didn\'t');
+    // Edit the joy after its line was sent: an edit: line, the first line stays.
+    await page.getByRole('tab', { name: 'Joys', exact: true }).click();
+    await page.locator('[data-pr-joy]').filter({ hasText: 'Corky laughed' }).getByRole('button', { name: 'Edit' }).click();
+    await page.locator('textarea[aria-label="Edit joy"]').fill('Corky laughed so hard at my joke');
+    await page.getByRole('button', { name: 'Save edit' }).click();
+    await wait(page, 1500);
+    lines = fake.doc.paras.map(p => p.text);
+    ok(lines.some(x => /^edit: joy: Corky laughed so hard at my joke · with Corky \(from Nikhil's World/.test(x)) && lines.some(x => /^joy: Corky laughed at my joke/.test(x)), 'an edit after sending adds an edit: line; the earlier line is not rewritten');
+    const joyDoc = await cloudDoc(page, 'practice_joy_2026_11');
+    const j = joyDoc.entries.find(x => /Corky laughed so hard/.test(x.what || ''));
+    ok(j && j.edits && j.edits[0].from.what === 'Corky laughed at my joke', 'the joy keeps what it said before');
+    await page.locator('[data-pr-joy]').filter({ hasText: 'Corky laughed so hard' }).getByRole('button', { name: 'Remove' }).click();
+    await wait(page, 800);
+    ok(!(await page.locator('[data-pr-joy]').filter({ hasText: 'Corky laughed so hard' }).count()), 'Remove takes it off the list');
+    await page.locator('[data-nw-savedbar]').first().getByRole('button', { name: 'Undo' }).click();
+    await wait(page, 1200);
+    ok(await page.locator('[data-pr-joy]').filter({ hasText: 'Corky laughed so hard' }).count() === 1, 'Undo brings it back');
+    await finish(ctx, 'joy predict lines');
+  }
+
+  console.log('\n[v5 3c. "Left to myself, I\'d ___": empty changes nothing; filled compares]');
+  {
+    if (!MAIN_HTML) ok(false, 'main index.html (69a2273) could be read for the snapshot');
+    const before = await askClaudeOnce(MAIN_HTML, null);
+    const now = await askClaudeOnce(null, null);
+    ok(before.proxyCalls.length === 1 && now.proxyCalls.length === 1 && norm(before.proxyCalls[0]) === norm(now.proxyCalls[0]), 'an empty box sends exactly the request main sends (snapshot) → ' + now.proxyCalls.length + ' call(s)');
+    await before.browser.close(); await now.browser.close();
+    const ctx = await askClaudeOnce(null, 'Go outside for air and check my phone');
+    const { page } = ctx;
+    const cmp = ctx.proxyCalls.find(b => b.output_config && b.output_config.format);
+    ok(ctx.proxyCalls.length === 2 && cmp && !cmp.tool_choice && !cmp.tools, 'a filled box adds one structured-output call, no tools, no forced tool choice');
+    const probs = schemaProblems(cmp.output_config.format.schema);
+    ok(probs.length === 0, 'its schema follows the structured-output rules → ' + JSON.stringify(probs));
+    ok(/Left to myself, I'd: Go outside for air and check my phone/.test(cmp.messages[0].content) && /No praise words/.test(cmp.system[0].text) && /someone who asks questions out loud/.test(cmp.system[0].text), 'it sends his try, the no-praise rule and the kind-of-person rule');
+    const view = await page.locator('[data-pr-compare]').innerText();
+    ok(view.includes('Stepping outside for air is what people often do first.') && view.includes('Checking the phone outside') && view.includes('Breathing move') && view.includes('Who helps: Someone who asks questions out loud'), 'the answer shows mine first, then the options');
+    ok(await page.locator('[data-pr-compare-option]').count() === 2, '2 options shown');
+    const asks = await page.evaluate(() => JSON.parse(window.__mem.get('practice:asks:2026_10_04')).entries.map(e => ({ kind: e.kind, myTry: e.myTry })));
+    ok(asks.some(a => a.kind === 'compare' && a.myTry === 'Go outside for air and check my phone'), 'the ask is saved with myTry');
+    await finish(ctx, 'my try');
+    const w = await askClaudeOnce(null, 'Email the ASMP lead');
+    ok(w.proxyCalls.length === 1 && /Work text/.test(await w.page.locator('[data-pr-mytry]').first().evaluate(el => el.parentElement.innerText)), 'a try with work text is not sent to Claude');
+    await w.browser.close();
+  }
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
-  const parts = { 1: part1, 2: part2 };
+  const parts = { 1: part1, 2: part2, 3: part3 };
   for (const [k, fn] of Object.entries(parts)) if (which === 'all' || which === k) await fn();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);

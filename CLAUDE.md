@@ -72,7 +72,7 @@ The app opens and saves without internet (`sw.js`, registered at the end of `ind
      readable): the Ledger link (`__nw_ledger_link`), the last Ledger read with its time (`__nw_ledger_cache`, work
      rows already left out), changes waiting to be sent to the Ledger (`__nw_ledger_pending`), Brain Dump **work**
      captures and their status (`__nw_dump_queue`; every other capture is in `dump:captures:<YYYY_MM>` through
-     `window.storage`, since build v5), the Brain Dump history (`__nw_dump_hist`) and drafts of text that is
+     `window.storage`, since build v5), work Went wrong entries (`__nw_wrong_work`), the Brain Dump history (`__nw_dump_hist`) and drafts of text that is
      Ledger or Brain Dump text (`useDeviceDraft`, `__nw_dev_draft:*`). Those inputs do **not** use `window.useDraft`
      (it saves to Firestore). All keys start with `__nw`, so a fallback backup leaves them out. It is read and written
      through `nwDev.get/set/del`, which stay synchronous: IndexedDB behind an in-memory copy loaded before the first
