@@ -82,7 +82,8 @@ Run worker bridge) and `appsscript.json`. No keys are in these files. The worker
 - **Spoken tags reach the Brain Dump:** a memo that begins with task, note, done, wins, joy, coach, geog, stagecraft, life or
   private (not work), one speaker or several, is copied in full into this month's `Brain Dump <Mon> <yyyy>` under the day
   heading (`Sunday, Nov 15, 2026`), as one paragraph: `task: …` with speaker labels on their own lines, ending
-  `(voice, 2:39 AM)`. Untagged memos stay in the transcript doc only.
+  `(voice, 2:39 AM)`. **Untagged memos go in too** (Nov 16), as said, with no tag in front. A memo that begins with
+  "work" does not go to the Brain Dump.
 - **Speaker labels:** `Speaker 1:`, `Speaker 2:`; a name only when the recording itself says it. In a memo that begins with a
   tag word, the person who says it is **Nikhil** and everyone else is `Speaker 2:`, `Speaker 3:` in the order they speak
   (the script relabels the worker's text itself, so this holds whatever the worker returned). The rule is also sent with

@@ -268,7 +268,7 @@ function part1() {
     ok(where(env, one) === 'Done' && /Skipped: under 3 seconds/.test(one.desc), 'the file is marked and moved to Done, so it is not tried again');
   }
 
-  console.log('\n[V3. Voice: tagged memos reach the Brain Dump in full; untagged ones do not]');
+  console.log('\n[V3. Voice: every memo reaches the Brain Dump (tagged with its tag), except work]');
   {
     const env = cloudEnv();
     env.addAudio('20261115 023900-T1.m4a', 'Task, email Dr. Shobha about Thursday.', 9);
@@ -283,8 +283,8 @@ function part1() {
     const note = bd.filter(x => /^note:/.test(x));
     eq(note, ['note:\nNikhil: we decided to walk instead of drive.\nSpeaker 2: And we leave at four. (voice, 2:45 AM)'], 'a two-speaker tagged memo makes one paragraph with both speaker labels on their own lines; the one who says the tag word is Nikhil');
     ok(env.auto().some(x => /\nNikhil: Note, we decided to walk instead of drive\.\nSpeaker 2: And we leave at four\./.test(x)), 'the transcript doc says Nikhil too');
-    ok(!bd.some(x => /dinner/.test(x)), 'an untagged memo goes to the transcript doc only');
-    ok(env.auto().some(x => /dinner/.test(x)), '...where it is');
+    eq(bd.filter(x => /dinner/.test(x)), ['Just thinking out loud about dinner. (voice, 2:50 AM)'], 'an untagged memo goes into the Brain Dump too, as said, with no tag (Nov 16)');
+    ok(env.auto().some(x => /dinner/.test(x)), '...and stays in the transcript doc');
     ok(!bd.some(x => /survey reminder/.test(x)), 'a memo starting "work" does not go to the Brain Dump');
     // The worker may number him second: he is still Nikhil, and the others are Speaker 2, Speaker 3 in the order they speak.
     const e3 = cloudEnv();
@@ -293,6 +293,7 @@ function part1() {
     e3.twoRuns();
     eq(e3.bdTexts().filter(x => /^joy:/.test(x)), ['joy:\nNikhil: Corky made soup.\nSpeaker 2: It was the lentil one.\nSpeaker 3: I helped.\nSpeaker 2: She did. (voice, 3:00 AM)'], 'the tag speaker is Nikhil wherever the worker numbered him; the others are Speaker 2, Speaker 3');
     ok(e3.auto().some(x => /Speaker 1: So what about dinner\?/.test(x)) && !e3.auto().some(x => /Nikhil: So what/.test(x)), 'an untagged memo keeps the worker\'s labels');
+    eq(e3.bdTexts().filter(x => /dinner/.test(x)), ['Speaker 1: So what about dinner?\nSpeaker 2: Not sure yet. (voice, 3:05 AM)'], 'an untagged two-speaker memo goes into the Brain Dump with its labels on their own lines');
     ok(/label the person who says that first word "Nikhil:"/.test(e3.jobs[0].prompt), 'the rule sent with each job says so');
     env.twoRuns();
     ok(env.bdTexts().filter(x => /^task: /.test(x)).length === 1, 'running again adds nothing to the Brain Dump');

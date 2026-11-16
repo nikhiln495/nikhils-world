@@ -37,7 +37,8 @@ function nwiApplyLabels_(lines, map) {
     return m && map[m[1]] ? map[m[1]] + ': ' + l.slice(m[0].length) : l;
   });
 }
-// Memos that begin with one of these words go to the Brain Dump in full (not "work").
+// Tag words: a memo that begins with one is copied with "<tag>:" in front. Since Nov 16 every memo goes to the Brain Dump
+// (untagged ones as said), except one that begins with "work".
 var NWI_TAGS = ['task', 'note', 'done', 'wins', 'joy', 'coach', 'geog', 'stagecraft', 'life', 'private'];
 var NWI_LABEL_RE = /^(Speaker \d+|[A-Z][A-Za-z.'-]*(?: [A-Z][A-Za-z.'-]*)?):\s*/;
 
@@ -305,17 +306,19 @@ function nwiWriteMemo_(f, text, docRef, notes, seconds) {
     notes.split(/\n+/).forEach(function (l) { if (l.trim()) lines.push(l.trim()); });
   }
   lines.push('Source audio: https://drive.google.com/file/d/' + f.id + '/view');
-  var tag = later ? first.tag : nwiSpokenTag_(body);
+  // Every memo goes to the Brain Dump (Nov 16: untagged ones too), except one that begins with "work".
+  var work = later ? first.tag === 'work' : /^work\b/i.test(String(body[0] || '').replace(NWI_LABEL_RE, ''));
+  var tag = later ? (first.tag === 'work' ? null : first.tag) : nwiSpokenTag_(body);
   if (part && !first) {
-    parts[part.base] = { id: f.id, tag: tag || null, labels: labels || null, at: Date.now() };
+    parts[part.base] = { id: f.id, tag: work ? 'work' : (tag || ''), labels: labels || null, at: Date.now() };
     var keys = Object.keys(parts).sort(function (a, b) { return parts[b].at - parts[a].at; });
     keys.forEach(function (k, i) { if (i >= 40 || Date.now() - parts[k].at > 3 * 86400000) delete parts[k]; });
     nwiSet_('VOICE_PARTS', JSON.stringify(parts));
   }
   if (later) nwiStoreContinuation_(f, lines.join('\n'), docRef, first.id);
   else nwiStoreMemoBlock_(f, lines.join('\n'), docRef);
-  if (tag) {
-    try { nwiToBrainDump_(f, tag, body, later); }
+  if (!work) {
+    try { nwiToBrainDump_(f, tag || '', body, later); }
     catch (e) { nwiLog_(f.name, '', '', '', 'Brain Dump not updated: ' + e.message); }
   }
 }
@@ -355,10 +358,12 @@ function nwiToBrainDump_(f, tag, lines, later) {
   if (!doc) { nwiLog_(f.name, '', '', '', 'Brain Dump not updated: no doc named "Brain Dump ' + nwiFmt_(f.recorded, 'MMM yyyy') + '"'); return; }
   var out = lines.slice();
   var label = (NWI_LABEL_RE.exec(out[0]) || [''])[0];
-  if (!later) out[0] = label + out[0].slice(label.length).replace(/^[A-Za-z]+\b[\s,.:;!-]*/, '');
+  if (tag && !later) out[0] = label + out[0].slice(label.length).replace(/^[A-Za-z]+\b[\s,.:;!-]*/, '');
   if (!out[0].slice(label.length).trim()) out.shift(); // the memo was only the tag word on its first line
   var multi = out.some(function (l) { return NWI_LABEL_RE.test(l); });
-  var text = tag + ':' + (later ? ' (continued)' : '') + (multi ? '\n' : ' ') + out.join('\n') + ' (voice, ' + nwiFmt_(f.recorded, 'h:mm a') + ')';
+  // Tagged: "task: …". Untagged: the text as said (Nov 16). Either way speaker labels stay on their own lines.
+  var head = tag ? tag + ':' + (later ? ' (continued)' : '') : (later ? '(continued)' : '');
+  var text = (head ? head + (multi ? '\n' : ' ') : '') + out.join('\n') + ' (voice, ' + nwiFmt_(f.recorded, 'h:mm a') + ')';
   var heading = Utilities.formatDate(f.recorded, nwiTz_(), 'EEEE, MMM d, yyyy');
   var body = doc.getBody(), paras = body.getParagraphs(), at = -1;
   for (var i = 0; i < paras.length; i++) if (nwiIsH1_(paras[i]) && paras[i].getText().trim() === heading) { at = body.getChildIndex(paras[i]) + 1; break; }
@@ -368,7 +373,7 @@ function nwiToBrainDump_(f, tag, lines, later) {
   doc.saveAndClose();
   written.push(f.id);
   nwiSetList_('VOICE_BD_WRITTEN', written.slice(-300));
-  nwiLog_(f.name, '', '', '', 'Brain Dump: ' + tag + ' line added');
+  nwiLog_(f.name, '', '', '', 'Brain Dump: ' + (tag || 'untagged') + ' line added');
 }
 function nwiStoreMemoBlock_(f, block, docRef) {
   var heading = nwiFmt_(f.recorded, 'EEE, MMM d, yyyy');
