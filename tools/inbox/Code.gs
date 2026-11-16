@@ -1,19 +1,22 @@
 // NW Inbox — a separate Apps Script project ("NW Inbox"), not part of tools/drive-backup.gs.
 // Code.gs: settings, helpers, setupInbox(). Voice.gs: voice memos to text. Fireflies.gs: Fireflies to Drive.
-// No keys or document ids live in this file: they are Script Properties (see docs/INBOX-SETUP.md).
+// Secrets are Script Properties. The dedicated transcript destination is pinned below. See INSTALL.md.
 // No Anthropic / Claude API is called anywhere here. Transcription is Gemini on Vertex AI only.
 
 var NWI_DEFAULTS = {
   GCP_PROJECT: 'nikhils-world',
-  VERTEX_MODEL: 'gemini-2.5-flash',      // Flash tier, GA on Vertex AI, takes audio
-  VERTEX_REGION: 'us-central1',          // or 'global'
+  VERTEX_MODEL: 'gemini-3.5-flash-lite', // supported audio/transcription pilot
+  VERTEX_REGION: 'global',              // supported global endpoint
   TIME_ZONE: 'America/Anchorage',        // India Dec 16 to Mar 5: set TIME_ZONE to Asia/Kolkata
-  DAILY_CAP_MINUTES: '180',
+  DAILY_CAP_MINUTES: '120',
   INLINE_MAX_MB: '20',                   // bigger files go through the Cloud Storage bucket
   AUDIO_KBPS_ESTIMATE: '32',             // low on purpose: guesses a memo longer than it is, so the cap errs safe
+  ENABLE_FIREFLIES: 'false',
+  ENABLE_ACOUSTIC_NOTES: 'true',
   FIREFLIES_DOC_NAME: 'Fireflies Transcript {date} {context}'
 };
-var NWI_TRANSCRIPTS_TITLE = 'Transcripts of Voice Recordings';
+var NWI_TRANSCRIPTS_TITLE = 'NW Inbox — Automatic Voice Memo Transcripts';
+var NWI_AUTO_DOC_ID = '18IPx6CCBQF9otXvNJt7fbMQ5bNfDSFwcuvey_II6Rxs';
 var NWI_ROLLING_TITLE = "Nikhil's World \u2014 Voice, last 7 days";
 var NWI_LOG_TITLE = 'NW Inbox log';
 var NWI_VOICE_FOLDER = "Nikhil's World Voice Inbox";
@@ -94,6 +97,8 @@ function nwiLog_(file, minutes, inTok, outTok, status) {
 
 // ── Setup: safe to run twice ──
 function setupInbox() {
+  nwiPilotPreflight_();
+  if (nwiProp_('RECLY_ROOT_FOLDER_ID') && !nwiProp_('VOICE_IMPORT_AFTER')) nwiSet_('VOICE_IMPORT_AFTER', new Date().toISOString());
   var report = [];
   var folders = nwiVoiceFolders_();
   report.push('Voice Inbox folder, Done and Problem: ready.');
@@ -112,13 +117,26 @@ function setupInbox() {
   });
   missing.forEach(function (m) { report.push('MISSING Script Property: ' + m); });
   nwiSetTriggers_();
-  report.push('Triggers: runVoiceInbox every 15 minutes, runFireflies every 2 hours.');
+  report.push('Voice trigger: every 15 minutes. Fireflies enabled: ' + nwiCfg_('ENABLE_FIREFLIES'));
   Logger.log(report.join('\n'));
   return report;
 }
+function nwiPilotPreflight_() {
+  if (nwiCfg_('VERTEX_MODEL') !== 'gemini-3.5-flash-lite') {
+    throw new Error('This pilot is configured for gemini-3.5-flash-lite. Update VERTEX_MODEL in Script Properties; existing properties override defaults.');
+  }
+  if (nwiCfg_('VERTEX_REGION') !== 'global') {
+    throw new Error('Set VERTEX_REGION to global for this pilot.');
+  }
+  nwiTranscriptsDoc_(); // validate destination before setup changes anything
+}
 function nwiSetTriggers_() {
-  var want = { runVoiceInbox: function (b) { return b.everyMinutes(15); }, runFireflies: function (b) { return b.everyHours(2); } };
-  ScriptApp.getProjectTriggers().forEach(function (t) { if (want[t.getHandlerFunction()]) ScriptApp.deleteTrigger(t); });
+  var enabled = nwiCfg_('ENABLE_FIREFLIES') === 'true';
+  var want = { runVoiceInbox: function (b) { return b.everyMinutes(15); } };
+  if (enabled) want.runFireflies = function (b) { return b.everyHours(2); };
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'runVoiceInbox' || t.getHandlerFunction() === 'runFireflies') ScriptApp.deleteTrigger(t);
+  });
   Object.keys(want).forEach(function (fn) { want[fn](ScriptApp.newTrigger(fn).timeBased()).create(); });
 }
 function nwiEnsureBucket_() {
