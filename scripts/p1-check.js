@@ -202,7 +202,8 @@ async function openPage({ seed = {}, now = null, proxy = null, offline = false, 
 
   await page.route('**/*', async (route) => {
     const url = route.request().url();
-    if (url === ORIGIN + '/' || url === ORIGIN + '/index.html') {
+    const bare = url.split('?')[0]; // the page with a query (e.g. ?start=waking) is the same page
+    if (bare === ORIGIN + '/' || bare === ORIGIN + '/index.html') {
       return route.fulfill({ status: 200, contentType: 'text/html', body: BODY });
     }
     if (url.startsWith(ORIGIN + '/')) {
@@ -235,7 +236,7 @@ async function openPage({ seed = {}, now = null, proxy = null, offline = false, 
   return { browser, page, errors, blocked, proxyCalls };
 }
 
-module.exports = { openPage, pageInit, cdnFulfill, isBlocked, FONTS };
+module.exports = { openPage, pageInit, cdnFulfill, isBlocked, FONTS, ORIGIN };
 
 if (require.main === module) {
   (async () => {

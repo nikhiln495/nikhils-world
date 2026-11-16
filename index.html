@@ -2243,14 +2243,18 @@ function TodayStrip({ data, onPendingClick, theme = 'dark' }) {
         />
         {/* Morning briefing button — always available */}
         <div onClick={() => {
+          // His Nov 9 note: today's three first, then what must happen today, then the sources to read. (Kaizen is dormant since July.)
+          const three = (window.nwThreeBrief && window.nwThreeBrief()) || '';
           const brief = [
             `Morning briefing — ${new Date().toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'})}`,
-            `\nPlease pull: (1) my open Kaizen tasks + anything flagged stuck, (2) Apple Health last 7 days (steps, RHR, sleep, HRV), (3) today's calendar, (4) latest Fireflies transcript if there's a session from the last 3 days.`,
+            `\n1. Today's three (one Academic, one Other, one Self-nourishment, chosen with Dr. Shobha): ${three ? three : 'none chosen yet. Suggest three.'}`,
+            `2. What must happen today: Ledger rows with a deadline today or marked as a hard deadline, and fixed calendar events.`,
+            `3. Then read: the Universal Spark Ledger, the top of this month's Brain Dump, the newest voice transcripts, the latest Fireflies session, Apple Health for the last 3 to 7 days.`,
             `\nDeliver as:`,
-            `• Today's one non-negotiable task`,
+            `• Today's three, or three suggested`,
+            `• What must happen today, with times`,
             `• Body read from health data (1-2 sentences)`,
             `• One-line session insight if applicable`,
-            `• One thing parked that might need a nudge today`
           ].join('\n');
           try { navigator.clipboard.writeText(brief); } catch(e) {}
         }} title="Copy morning briefing prompt" style={{
@@ -11251,6 +11255,7 @@ const P_BLOCKS_Q = [
   { id: 'heavy',   label: "Heavy, can't move" },
   { id: 'cold',    label: 'Cold' },
   { id: 'dread',   label: 'Dread about the day' },
+  { id: 'overwhelm', label: 'Overwhelm' },
   { id: 'phone',   label: 'Phone or video in hand' },
   { id: 'dizzy',   label: 'Dizzy or lightheaded' },
   { id: 'nothing', label: 'Nothing, just not moving' },
@@ -11283,6 +11288,9 @@ function pWakingSteps(where, blocks, playbook, today, homework) {
   const out = [];
   if (blocks.includes('cold')) out.push({ text: 'Pull the sweater or blanket around you first.' });
   if (blocks.includes('phone')) out.push({ text: 'Put the phone face down out of reach.' });
+  // Overwhelm (his Nov 6 note): a breath out first, in place; then only the first step, as for dread.
+  if (blocks.includes('overwhelm')) out.push({ text: 'Breathe out slowly 3 times, longer out than in. You can stay where you are.' });
+  if (blocks.includes('overwhelm') && !blocks.includes('dread')) out.push({ text: 'Name only the first step of the day.' });
   if (blocks.includes('dread')) {
     const ow = has('one-word');
     if (ow) out.push({ text: `${ow.name}: ${pText((ow.steps || []).join(' '))}`.trim(), from: ow.id });
@@ -13981,6 +13989,14 @@ function nwThreeLine() {
     return ` Today's three: ${parts.join('; ')}; parked thoughts: ${parks}.`;
   } catch (_) { return ''; }
 }
+// For the morning briefing: "Academic: …; Other: …; Self-nourishment: not picked", or '' when none is picked today.
+window.nwThreeBrief = () => {
+  try {
+    const mine = nwThreeToday();
+    if (!mine.some(e => e.kind === 'pick')) return '';
+    return P_SLOTS.map(s => { const st = nwSlotState(mine, s.id); return `${s.label}: ${st ? `${st.pick.text}${st.done ? ' (done)' : ''}` : 'not picked'}`; }).join('; ');
+  } catch (_) { return ''; }
+};
 // The longer form for What now?: it is not saved, so a Ledger step is named, with its first physical step and minutes.
 function nwThreeText() {
   try {
@@ -15174,6 +15190,7 @@ const P_SCREENS = [
   { id: 'history',  label: 'History' },
 ];
 
+const NW_START_WAKING_P = () => { try { return new URLSearchParams(location.search).get('start') === 'waking'; } catch (_) { return false; } };
 function PracticeApp() {
   const [screen, setScreen] = useState('today');
   const [detailId, setDetailId] = useState(null);
@@ -15226,6 +15243,13 @@ function PracticeApp() {
   const go = (id) => { setScreen(id); setDetailId(null); setStack([]); load(); setRefreshKey(k => k + 1); toTop(); };
   const push = (o) => { setStack(st => [...st, { ...o, key: `${o.type}-${Date.now()}-${st.length}` }]); toTop(); };
   const pop = () => { setStack(st => st.slice(0, -1)); toTop(); };
+  // "Wake up" on the first screen, or ?start=waking: the existing waking flow (a waking draft in progress resumes).
+  useEffect(() => {
+    const open = () => setStack(st => (st.length && st[st.length - 1].type === 'waking' ? st : [...st, { type: 'waking', key: `waking-${Date.now()}-${st.length}` }]));
+    window.addEventListener('nw-open-waking', open);
+    if (NW_START_WAKING_P()) open();
+    return () => window.removeEventListener('nw-open-waking', open);
+  }, []);
 
   // Puts a changed log doc on screen if it is today's.
   const showLog = (dayKey, doc) => { if (dayKey === pDayKey()) setData(d => ({ ...d, todayLog: doc, todayLogError: null, dayKey })); };
@@ -16131,8 +16155,21 @@ function NwDocSizes({ active }) {
   );
 }
 
+// "Wake up" (Nov 15): ?start=waking opens straight into Waking up (for a Home Screen icon or a Shortcut).
+const NW_START_WAKING = (() => { try { return new URLSearchParams(location.search).get('start') === 'waking'; } catch (_) { return false; } })();
+function NwWakeUpTop() {
+  return (
+    <button data-nw-wakeup onClick={() => window.dispatchEvent(new Event('nw-open-waking'))} style={{ display: 'block', width: 'calc(100% - 32px)', margin: '12px 16px 0', minHeight: 56, fontSize: 20, fontWeight: 700, background: '#3a2a10', color: '#fde68a', border: '1px solid #b45309', borderRadius: 10, fontFamily: 'inherit', cursor: 'pointer' }}>Wake up</button>
+  );
+}
 function App() {
-  const [activeTab, setActiveTab] = useState('roulette');
+  const [activeTab, setActiveTab] = useState(NW_START_WAKING ? 'practice' : 'roulette');
+  // "Wake up" from the first screen opens the waking flow on the Practice tab.
+  useEffect(() => {
+    const onWake = () => setActiveTab('practice');
+    window.addEventListener('nw-open-waking', onWake);
+    return () => window.removeEventListener('nw-open-waking', onWake);
+  }, []);
   const [backupStatus, setBackupStatus] = useState('');
   const fileRef = useRef(null);
   const glance = window.useGlanceData();
@@ -16356,7 +16393,7 @@ function App() {
 
       {window.NwStorageBanners && <window.NwStorageBanners />}
 
-      <div style={paneStyle('roulette')}><CreativeRoulette /></div>
+      <div style={paneStyle('roulette')}><NwWakeUpTop /><CreativeRoulette /></div>
       <div style={paneStyle('kaizen')}><KaizenApp /></div>
       <div style={paneStyle('food')}><FoodLog /></div>
       <div style={paneStyle('health')}><HealthDashboard /></div>
