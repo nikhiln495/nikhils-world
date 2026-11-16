@@ -302,7 +302,10 @@ const COMPARE = { mine: { matches: 'Stepping outside for air is what people ofte
   { approach: 'Tell one person', first_step: 'Text Corky one line about what happened.', person: 'Someone who asks questions out loud' },
 ] };
 const textReply = (obj) => ({ status: 200, json: { model: 'claude-sonnet-5-5', usage: { input_tokens: 10, output_tokens: 5 }, stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(obj) }] } });
-const proxyFor = async (body) => (body.output_config && body.output_config.format ? textReply(COMPARE) : toolUse([{ id: 'thought-stop', why: 'Say stop out loud.' }]));
+const ASKED = { works: 'Stepping outside is a way people often start.', question: 'What is one thing outside that usually helps you?' };
+const proxyFor = async (body) => (body.output_config && body.output_config.format
+  ? textReply(body.output_config.format.schema.properties.works ? ASKED : COMPARE)
+  : toolUse([{ id: 'thought-stop', why: 'Say stop out loud.' }]));
 // A structured-output schema that follows the rules in CLAUDE.md.
 function schemaProblems(node, at = 'schema') {
   const out = [];
@@ -315,7 +318,7 @@ function schemaProblems(node, at = 'schema') {
   (node.anyOf || []).forEach((v, i) => out.push(...schemaProblems(v, `${at}|${i}`)));
   return out;
 }
-async function askClaudeOnce(html, myTry) {
+async function askClaudeOnce(html, myTry, o = {}) {
   const ctx = await openPage({ seed: F.base(), now: '2026-10-04T09:00:00', proxy: proxyFor, ...(html ? { html: () => html } : {}) });
   const { page } = ctx;
   await wait(page, 3500);
@@ -324,6 +327,7 @@ async function askClaudeOnce(html, myTry) {
   await page.getByRole('tab', { name: 'Library' }).click();
   await page.getByRole('button', { name: 'Stuck', exact: true }).click();
   await page.getByLabel('Ask Claude', { exact: true }).fill('I keep rereading the chat from last night');
+  if (o.askFirst === false) await page.locator('[data-pr-mytry] input[aria-label="Ask me first"]').first().uncheck();
   if (myTry) await page.locator('[data-pr-mytry] textarea').first().fill(myTry);
   await page.getByRole('button', { name: 'Pick practices for me' }).click();
   await wait(page, 1500);
@@ -441,30 +445,74 @@ async function part3() {
     await finish(ctx, 'joy predict lines');
   }
 
-  console.log('\n[v5 3c. "Left to myself, I\'d ___": empty changes nothing; filled compares]');
+  console.log('\n[v5 3c. "Left to myself, I\'d ___": empty changes nothing; Ask me first (default); Show me ways; off]');
   {
     if (!MAIN_HTML) ok(false, 'main index.html (69a2273) could be read for the snapshot');
     const before = await askClaudeOnce(MAIN_HTML, null);
     const now = await askClaudeOnce(null, null);
     ok(before.proxyCalls.length === 1 && now.proxyCalls.length === 1 && norm(before.proxyCalls[0]) === norm(now.proxyCalls[0]), 'an empty box sends exactly the request main sends (snapshot) → ' + now.proxyCalls.length + ' call(s)');
     await before.browser.close(); await now.browser.close();
+    // Ask me first is on by default: one line on what works, one question, and it stops.
     const ctx = await askClaudeOnce(null, 'Go outside for air and check my phone');
     const { page } = ctx;
-    const cmp = ctx.proxyCalls.find(b => b.output_config && b.output_config.format);
-    ok(ctx.proxyCalls.length === 2 && cmp && !cmp.tool_choice && !cmp.tools, 'a filled box adds one structured-output call, no tools, no forced tool choice');
-    const probs = schemaProblems(cmp.output_config.format.schema);
-    ok(probs.length === 0, 'its schema follows the structured-output rules → ' + JSON.stringify(probs));
+    ok(await page.locator('input[aria-label="Ask me first"]').first().isChecked(), '"Ask me first" sits beside the box and is on by default');
+    const askCall = ctx.proxyCalls.find(b => b.output_config && b.output_config.format);
+    ok(ctx.proxyCalls.length === 2 && askCall && JSON.stringify(Object.keys(askCall.output_config.format.schema.properties)) === '["works","question"]' && !askCall.tool_choice && !askCall.tools, 'on: one extra structured call that asks only for what works and one question');
+    ok(schemaProblems(askCall.output_config.format.schema).length === 0, 'its schema follows the structured-output rules');
+    ok(/one question that helps him find the next idea himself/.test(askCall.system[0].text) && /Give no options, no steps and no advice\. Stop after the question\./.test(askCall.system[0].text) && /No praise words/.test(askCall.system[0].text), 'the rule: what works, one question, nothing more, no praise');
+    const askView = await page.locator('[data-pr-compare-ask]').innerText();
+    ok(askView.includes('Stepping outside is a way people often start.') && askView.includes('What is one thing outside that usually helps you?') && await page.locator('[data-pr-compare-option]').count() === 0, 'the reply says what works, asks one question, and stops (no approaches yet)');
+    await page.locator('[data-pr-compare-ways]').click();
+    await wait(page, 1200);
+    const ways = ctx.proxyCalls.filter(b => b.output_config && b.output_config.format);
+    ok(ways.length === 2 && JSON.stringify(Object.keys(ways[1].output_config.format.schema.properties)) === '["mine","options"]', '"Show me ways" asks for the approaches');
+    ok(await page.locator('[data-pr-compare-option]').count() === 2 && (await page.locator('[data-pr-compare]').innerText()).includes('Who helps: Someone who asks questions out loud'), 'and shows 2 or 3 of them, with who helps');
+    const asks = await page.evaluate(() => JSON.parse(window.__mem.get('practice:asks:2026_10_04')).entries.map(e => ({ kind: e.kind, mode: e.mode, myTry: e.myTry })));
+    ok(asks.filter(a => a.kind === 'compare' && a.myTry === 'Go outside for air and check my phone').map(a => a.mode).join() === 'ask,ways', 'both asks are saved with myTry (ask, then ways)');
+    await finish(ctx, 'ask me first');
+    // Off: the answer comes as specified, at once.
+    const off = await askClaudeOnce(null, 'Go outside for air and check my phone', { askFirst: false });
+    const cmp = off.proxyCalls.find(b => b.output_config && b.output_config.format);
+    ok(off.proxyCalls.length === 2 && cmp && JSON.stringify(Object.keys(cmp.output_config.format.schema.properties)) === '["mine","options"]', 'off: one structured call for what matches and the approaches');
+    ok(schemaProblems(cmp.output_config.format.schema).length === 0, 'its schema follows the structured-output rules');
     ok(/Left to myself, I'd: Go outside for air and check my phone/.test(cmp.messages[0].content) && /No praise words/.test(cmp.system[0].text) && /someone who asks questions out loud/.test(cmp.system[0].text), 'it sends his try, the no-praise rule and the kind-of-person rule');
-    const view = await page.locator('[data-pr-compare]').innerText();
-    ok(view.includes('Stepping outside for air is what people often do first.') && view.includes('Checking the phone outside') && view.includes('Breathing move') && view.includes('Who helps: Someone who asks questions out loud'), 'the answer shows mine first, then the options');
-    ok(await page.locator('[data-pr-compare-option]').count() === 2, '2 options shown');
-    const asks = await page.evaluate(() => JSON.parse(window.__mem.get('practice:asks:2026_10_04')).entries.map(e => ({ kind: e.kind, myTry: e.myTry })));
-    ok(asks.some(a => a.kind === 'compare' && a.myTry === 'Go outside for air and check my phone'), 'the ask is saved with myTry');
-    await finish(ctx, 'my try');
-    const w = await askClaudeOnce(null, 'Email the ASMP lead');
-    ok(w.proxyCalls.length === 1 && /Work text/.test(await w.page.locator('[data-pr-mytry]').first().evaluate(el => el.parentElement.innerText)), 'a try with work text is not sent to Claude');
+    const view = await off.page.locator('[data-pr-compare]').innerText();
+    ok(view.includes('Stepping outside for air is what people often do first.') && view.includes('Checking the phone outside') && view.includes('Breathing move') && view.includes('Who helps: Someone who asks questions out loud') && await off.page.locator('[data-pr-compare-ways]').count() === 0, 'off: mine first, then the options, with no question step');
+    await finish(off, 'ask me first off');
+    // Work text is sent now (Nov 15); the saved ask leaves it out.
+    const w = await askClaudeOnce(null, 'Email the ASMP lead', { askFirst: false });
+    ok(w.proxyCalls.length === 2 && w.proxyCalls.some(c => c.output_config && c.output_config.format && /ASMP/.test(c.messages[0].content)), 'a try with work text is sent to Claude');
+    const saved = await w.page.evaluate(() => JSON.parse(window.__mem.get('practice:asks:2026_10_04')).entries.filter(e => e.kind === 'compare'));
+    ok(saved.length === 1 && !/ASMP/.test(JSON.stringify(saved)), 'the saved ask has no work text → ' + JSON.stringify(saved[0] && { words: saved[0].words, prompt: saved[0].prompt }));
     await w.browser.close();
   }
+
+  console.log('\n[v5 3d. Work rows go to What now?; nothing from them is saved to appdata]');
+  {
+    const plan = { patterns: ['The consent form and the tax folder both wait'], options: [{ title: 'Start with the call', steps: [
+      { text: 'Phone Maria Lopez about the consent form', ledger_row: 8, minutes: 5, est: false, start: '09:15', kind: 'other' },
+      { text: 'Put the tax folder on the desk', ledger_row: 2, minutes: 2, est: false, start: '09:20', kind: 'academic' },
+    ] }], parked: [], new_tasks: [], question: null };
+    const fake = G.makeGoogle({ sheet: { Ledger: G.ledgerValues(), Rules: G.RULES_ROWS } });
+    const ctx = await open({ fakeFirestore: null, seed: F.base(), token: true, google: fake.handler, device: { __nw_ledger_link: JSON.stringify(SHEET_URL) }, proxy: async () => textReply(plan) });
+    const { page } = ctx;
+    await page.getByRole('button', { name: 'Practice', exact: true }).click();
+    await page.waitForSelector('[data-pr-ledger-open]');
+    ok(!(await page.locator('[data-pr-ledger]').innerText()).includes('Maria Lopez'), 'work rows are still not listed on the strip');
+    await page.locator('textarea[aria-label="What is in your head"]').fill('The consent form call and the tax folder are both on my mind');
+    await page.getByRole('button', { name: 'What now?', exact: true }).click();
+    await page.waitForSelector('[data-pr-now-patterns]');
+    const call = ctx.proxyCalls[ctx.proxyCalls.length - 1];
+    ok(/Phone Maria Lopez about the consent form/.test(call.messages[0].content) && /Email the ASMP report/.test(call.messages[0].content) && /Open the STARR deck/.test(call.messages[0].content), 'What now? sends the work rows with the other open rows');
+    ok((await page.locator('[data-pr-whatnow]').innerText()).includes('Phone Maria Lopez'), 'the answer shows the work step on screen');
+    await wait(page, 800);
+    const db = await page.evaluate(() => JSON.stringify([...window.__mem.entries()].filter(([k]) => !/^drafts:|^practice:drafts$/.test(k))));
+    const leak = (db.match(/.{0,60}(Maria Lopez|VINE|ASMP|STARR|Phone Maria).{0,60}/gi) || []);
+    ok(!leak.length, 'nothing from a work row is saved to appdata (the What now? record says "work, kept on this device") → ' + JSON.stringify(leak));
+    ok(/\(work, kept on this device\)/.test(db) && /Put the tax folder on the desk/.test(db), 'the saved record keeps the other steps');
+    await finish(ctx, 'work rows');
+  }
+
 }
 
 (async () => {

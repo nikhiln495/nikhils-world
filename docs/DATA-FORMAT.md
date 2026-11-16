@@ -303,7 +303,7 @@ full text of a long capture is already in the Pastes doc (so a retry only writes
 Since build v5 (Nov 15, 2026). `{ "month", "entries": [{ id, at, time, what, did, who[], part, myTry, compare, bd, edits? }] }`,
 one doc per month, append-only, merged by `id` (`ENTRIES_KEY`). Only `what` is required; the rest may be empty. `did` may be
 `Nothing yet`; `who` may be `["Nobody"]`. `myTry` and `compare` (`{ mine: { matches, problem }, options: [{ approach,
-first_step, person }] }`) are filled by Compare. `bd` is the id of its Brain Dump capture. An edit keeps what it said before in
+first_step, person }] }`, or with "Ask me first" `{ works, question }`) are filled by Compare. `bd` is the id of its Brain Dump capture. An edit keeps what it said before in
 `edits: [{ at, from }]`. **A work entry** (work:, VINE, ASMP, STARR, RTI) is never written here: it stays on the device that
 made it in `__nw_wrong_work` (NW-DEVICE-CACHE), `{ entries: [...] }`, and is never sent to Claude.
 
@@ -319,8 +319,19 @@ already in the Doc are never rewritten.
 ## "Left to myself, I'd ___" (asks)
 
 An answer to his own try is saved in `practice:asks:<day>` like any answer, with `kind: "compare"`, `of` (the screen: `stuck`,
-`stuck-else`, `outside`, `coach-me`, `what-now`, `wrong`, `joy-more`) and `myTry`. When the box is empty nothing is added and
-the request is the same as before.
+`stuck-else`, `outside`, `coach-me`, `what-now`, `wrong`, `joy-more`), `mode` and `myTry`. "Ask me first" (beside the box,
+on by default) first saves `mode: "ask"` (one line on what works, one question); "Show me ways" then saves `mode: "ways"`
+(the approaches). With it off, only `mode: "ways"`. When the box is empty nothing is added and the request is the same as
+before. Work text in the try is sent to Claude, but the saved ask then has no prompt, text or try (`words` says
+"(work, kept on this device)").
+
+## Work rows (Nov 15)
+
+Ledger work rows (Bucket, Domain or Trello_Board naming VINE, ASMP, STARR, RTI or Work, and every row of such a task) are
+sent to What now? with the other open rows, kept in this device's Ledger copy (`workRows`), and can be marked done from What
+now?. They are not listed on the strip and not offered for Today's three. Nothing from them is saved to appdata: in the
+saved What now? record (`practice:ramp`) a work step's text is `(work, kept on this device)` with no `ledger` ref, and any
+other line that names work is replaced the same way. Past Brain Dump lines are no longer filtered for work.
 
 ## Feedback for the app (feedback:app)
 

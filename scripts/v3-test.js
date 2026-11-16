@@ -326,7 +326,7 @@ async function part2() {
     ok(/today spark/i.test(t) && t.includes('File the tax form') && /this week/i.test(t) && t.includes('Book the dentist') && t.includes('Homework help') && t.includes('Renew passport'), 'strip: Spark, this week, and a task due in 12 days');
     ok(!t.includes('Paint the shelf'), 'a task due in 2027 is not shown');
     ok(!/Maria|Call participant|ASMP|STARR|VINE|Prep STARR/i.test(t), 'work rows (VINE, ASMP, STARR, Work) are not shown');
-    ok(/3 work rows kept out|work rows kept out/.test(t), 'says how many were kept out');
+    ok(/3 work rows not listed here \(What now\? uses them\)/.test(t), 'says how many are not listed, and that What now? uses them (Nov 15)');
     ok(t.indexOf('Book the dentist') < t.indexOf('Homework help'), 'ordered by Flow_Order (1 before 5)');
     ok(t.includes('Next: Put the tax folder on the desk') && !t.includes('Find the login'), 'a task shows its next open step; done steps are not "next"');
     await page.locator('[data-pr-ledger-open]').first().click();
@@ -338,7 +338,7 @@ async function part2() {
     const dumpMem = await page.evaluate(() => JSON.stringify([...window.__mem.entries()]));
     ok(!/tax form|Maria|dentist|ASMP/.test(dumpMem), 'no Ledger text anywhere in the database (storage)');
     const cache = await page.evaluate(() => window.storage.dev.getItem('__nw_ledger_cache'));
-    ok(cache && cache.includes('File the tax form') && !/Maria|ASMP|STARR/.test(cache), 'this device keeps the last read, without work rows');
+    ok(cache && cache.includes('File the tax form') && /Maria/.test(cache), 'this device keeps the last read, work rows too (this device only, for What now?)');
     const link = await page.evaluate(() => window.storage.dev.getItem('__nw_ledger_link'));
     ok(link && link.includes(G.SHEET_ID) && !dumpMem.includes(G.SHEET_ID), 'the link is on this device only');
     await finish(ctx, 'ledger strip');
@@ -654,7 +654,7 @@ async function part3() {
     ok(text.includes(WORDS) && text.includes('row 2 | File the tax form | step 1 | Put the tax folder on the desk') && text.includes('Homework help'), 'sends his words and the allowed Ledger rows (with row numbers)');
     ok(text.includes('The first physical step is Step 1.') && text.includes('Park a worry'), "sends the Rules tab's rule texts");
     ok(/Local time now: 08:1\d\./.test(text) && /Context: local time/.test(text), 'sends the local time and what he logged today');
-    ok(!/Maria|ASMP|STARR|VINE|participant/i.test(text), 'no work row reaches Claude');
+    ok(/Phone Maria Lopez about the consent form/.test(text) && /Email the ASMP report/.test(text), 'work rows reach Claude with the other open rows (Nov 15)');
     ok(!/row 4 /.test(text), 'a done row is not sent');
     const sys = call.system[0].text;
     ok(/vessel/.test(sys) && /Never ask whether he should move/.test(sys) && /never held until after/.test(sys) && /Academic step, an Other step and a Self-nourishment/.test(sys) && /2 to 3 times/.test(sys) && /Do not invent/.test(sys) && /synthesize/.test(sys), 'prompt rules are in the system text');
@@ -671,7 +671,8 @@ async function part3() {
     const e = ramp && ramp.entries[0];
     ok(e && e.words === WORDS && e.result.patterns.length === 2 && e.result.options.length === 2 && e.result.parked[0] === 'I worry about the lease' && e.result.newTasks[0] === 'Call Dana about the move', 'dump and result saved append-only to practice:ramp:2026_11_03');
     const s0 = e.result.options[0].steps;
-    ok(s0[0].ledger && s0[0].ledger.row === 2 && s0[0].ledger.task === 'File the tax form' && s0[3].ledger === undefined, 'Ledger row refs kept only for rows that were sent (the work row ref was dropped)');
+    ok(s0[0].ledger && s0[0].ledger.row === 2 && s0[0].ledger.task === 'File the tax form' && s0[3].ledger === undefined, 'the saved copy keeps Ledger refs for ordinary rows; a work row step is saved as "work, kept on this device", with no ref');
+    ok(s0[3].text === '(work, kept on this device)' && !JSON.stringify(e).includes('Maria'), 'no work row text is saved');
     ok(s0[2].est === true && s0[2].minutes === 40 && s0[1].est === false, 'est. set in code for steps over 10 minutes');
     const asks = await mem(page, 'practice:asks:2026_11_03');
     ok(asks && !/tax|dentist|lease/i.test(asks) && JSON.parse(asks).entries[0].kind === 'what-now', 'the ask record keeps kind and usage only, no Ledger text');
@@ -1304,7 +1305,7 @@ async function part7() {
   const text = ctx.proxyCalls[ctx.proxyCalls.length - 1].messages[0].content;
   ok(/Older Brain Dump lines that match/.test(text) && text.includes('Friday, Oct 30, 2026: task: call the dentist about the crown before the cleaning') && text.includes('Monday, Sep 14, 2026: note: the dentist moved my appointment twice'), 'lines from earlier months (Oct and Sep) that match what he wrote are sent');
   ok(text.includes('the lease is confusing'), 'a match in any month, not only the last 30 days');
-  ok(!/Maria|ASMP|work:/.test(text.split('Older Brain Dump lines')[1].split('Context:')[0]), 'work lines (work: tag, ASMP) never go to Claude');
+  ok(!/Maria|ASMP|work:/.test(text.split('Older Brain Dump lines')[1].split('Context:')[0]), 'work lines that do not match are not sent (work lines are no longer filtered out, Nov 15)');
   ok(!text.includes('buy a new bike light') && !text.includes("from Nikhil's World, 9:00 AM"), 'unrelated lines are not sent; the app\'s own suffix is trimmed');
   ok(/Past Brain Dumps: 3 matching lines sent/.test(await page.locator('[data-pr-now-past]').innerText()), 'the screen says how many lines were sent → ' + await page.locator('[data-pr-now-past]').innerText());
   const driveCalls = fake.calls.filter(c => /drive\/v3\/files/.test(c.url));
@@ -1324,7 +1325,7 @@ async function part7() {
   await wait(page, 1200);
   ok(fake.reads.extra === 3, 'a changed doc is read again, the other is not (' + fake.reads.extra + ')');
   const cache = await page.evaluate(() => window.storage.dev.getItem('__nw_dump_hist'));
-  ok(cache && !/Maria|ASMP/.test(cache), 'the device copy has no work lines');
+  ok(cache && /Maria/.test(cache), 'the device copy keeps work lines too (this device only)');
   await finish(ctx, 'past dumps');
 
   // no token / API off / offline: What now still works and says why
