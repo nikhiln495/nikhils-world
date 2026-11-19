@@ -346,7 +346,8 @@ async function part3() {
     const msg = call.messages[0].content;
     ok(/Fixed events today/.test(msg) && msg.includes('10:00–10:50 | Dr. Shobha session (Nikhil, Dr. Shobha)') && msg.includes('15:30–16:20 | Class'), 'the request lists the fixed events with times');
     ok(msg.includes('11:00–11:30 | Work event, busy') && msg.includes('13:00–14:00 | Work event, busy'), 'work events go as "Work event, busy" with times only');
-    ok(!/Staff meeting|Maria|ASMP|VINE/.test(msg), 'no work title or work calendar name in the request');
+    const calPart = msg.split('Fixed events today')[1].split('\n\n')[0];
+    ok(!/Staff meeting|Maria|ASMP|VINE/.test(calPart), 'no work event title or work calendar name in the request (Ledger work rows are sent since Nov 15; calendar work titles are not)');
     ok(/tomorrow 09:00–09:30 \| Tomorrow early/.test(msg), 'tomorrow before noon is included');
     const sys = call.system[0].text;
     ok(/events are fixed|Calendar events .* are fixed/i.test(sys) && /Plan steps in the gaps/.test(sys) && /No step starts inside an event/.test(sys), 'P_NOW_RULES say events are fixed, steps go in the gaps, no step starts inside an event');

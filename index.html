@@ -217,7 +217,7 @@
       // never overwrite each other. Entries are joined by id and none is dropped: the newer `u` (else `at`)
       // wins per id. A removed entry is left as { id, deleted: true, u } so another device cannot bring it back.
       // An entry saved before ids gets one from its own text (the same on every device).
-      const ENTRIES_KEY = /^(practice:(asks|log|ramp):\d{4}_\d\d_\d\d|practice:(joy|three):\d{4}_\d\d|dump:captures:\d{4}_\d\d|feedback:app)$/;
+      const ENTRIES_KEY = /^(practice:(asks|log|ramp):\d{4}_\d\d_\d\d|practice:(joy|three|wrong):\d{4}_\d\d|dump:captures:\d{4}_\d\d|feedback:app)$/;
       const hasId = (e) => e.id !== undefined && e.id !== null && e.id !== '';
       const entryIdOf = (e) => (hasId(e) ? String(e.id) : 'h_' + hashOf(JSON.stringify(e)));
       const entryU = (e) => Number(e.u) || Date.parse(e.at) || 0;
@@ -685,6 +685,7 @@
         [/^practice:ramp:(\d{4})_(\d\d)_(\d\d)$/, m => `What now results for ${m[1]}-${m[2]}-${m[3]}`],
         [/^practice:joy:(\d{4})_(\d\d)$/, m => `Joys for ${m[1]}-${m[2]}`],
         [/^practice:three:(\d{4})_(\d\d)$/, m => `Today's three for ${m[1]}-${m[2]}`],
+        [/^practice:wrong:(\d{4})_(\d\d)$/, m => `Went wrong for ${m[1]}-${m[2]}`],
         [/^dump:captures:(\d{4})_(\d\d)$/, m => `Brain Dump captures for ${m[1]}-${m[2]}`],
         [/^feedback:app$/, 'Feedback for the app'],
         [/^practice:seeds$/, 'Practice seeds (done markers)'], [/^creative-reps$/, 'Creative reps'],
@@ -10010,6 +10011,7 @@ const P_KEYS = {
   asks:  (dayKey) => `practice:asks:${dayKey}`,
   ramp:  (dayKey) => `practice:ramp:${dayKey}`,   // What now? dumps and results (append-only, merged by id)
   joy:   (monthKey) => `practice:joy:${monthKey}`, // Joys, one doc per month (append-only, merged by id)
+  wrong: (monthKey) => `practice:wrong:${monthKey}`, // Went wrong, one doc per month (append-only, merged by id)
   seeds: 'practice:seeds',                          // which one-time seeds are done
   three: (monthKey) => `practice:three:${monthKey}`, // Today's three (Dr. Shobha's 21 days), one doc per month (append-only)
   threeStart: 'practice:three-start',               // { start: 'YYYY-MM-DD' }: the date Day 1 was
@@ -10033,7 +10035,7 @@ const pCheckKey = (key) => {
 // Reads the whole history (sealed parts included) through window.storage.getAll.
 // Log and answer docs (practice:log:<day>, practice:asks:<day>) keep a removed entry as { id, deleted, u }
 // so another device cannot bring it back; pRead leaves those out unless opts.withRemoved.
-const P_ENTRIES_KEY = /^(practice:(asks|log|ramp):\d{4}_\d\d_\d\d|practice:(joy|three):\d{4}_\d\d|dump:captures:\d{4}_\d\d)$/;
+const P_ENTRIES_KEY = /^(practice:(asks|log|ramp):\d{4}_\d\d_\d\d|practice:(joy|three|wrong):\d{4}_\d\d|dump:captures:\d{4}_\d\d)$/;
 const pLive = (list) => list.filter(e => !(e && e.deleted === true));
 async function pRead(key, opts = {}) {
   pCheckKey(key);
@@ -10798,7 +10800,7 @@ const pContextLine = (log) => {
 
 const pOnline = () => (typeof navigator === 'undefined' || navigator.onLine !== false);
 
-const P_ASK_KINDS = { 'stuck': 'Ask Claude', 'stuck-else': 'Something else', 'coach-me': 'Coach me', 'outside': 'Look outside', 'draft-shobha': 'Draft for Dr. Shobha', 'kaizen-foci': 'Kaizen session patterns', 'what-now': 'What now?', 'what-now-again': 'What now? (again)', 'ask-step': 'Ask about a step' };
+const P_ASK_KINDS = { 'compare': 'My try, compared', 'stuck': 'Ask Claude', 'stuck-else': 'Something else', 'coach-me': 'Coach me', 'outside': 'Look outside', 'draft-shobha': 'Draft for Dr. Shobha', 'kaizen-foci': 'Kaizen session patterns', 'what-now': 'What now?', 'what-now-again': 'What now? (again)', 'ask-step': 'Ask about a step' };
 
 // Appends one record of a Claude reply to practice:asks:<today>. Append-only; never throws.
 // Returns 'cloud', 'device-only' or false (not saved).
@@ -10824,6 +10826,9 @@ async function pSaveAsk(ask, prompt, data, model) {
       sources, model: data?.model || model, usage,
     };
     if (ask?.feedback) rec.feedback = ask.feedback;
+    if (ask?.myTry && !ask?.redact) rec.myTry = ask.myTry;
+    if (ask?.mode) rec.mode = ask.mode;
+    if (ask?.of) rec.of = ask.of;
     if (ask?.redact) { rec.prompt = ''; rec.text = ''; rec.tools = []; rec.sources = []; } // the What now? dump and result live in practice:ramp, not here
     const doc = await pUpdate(P_KEYS.asks(pDayKey(now)), () => ({ date: pLocalISO(now), entries: [] }), (doc) => {
       if (!Array.isArray(doc.entries)) doc.entries = [];
@@ -11393,6 +11398,7 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
   const setStage = (v) => upd({ stage: v });
   const setIdx = (v) => upd({ idx: v });
   const [coach, setCoach] = useState({ busy: false, err: '', picks: null });
+  const mtCoach = usePMyTry('coach-me');
   const [showDump, setShowDump] = useState(false);
   const [busy, wrap] = window.useBusy();
   // Step notes: { q1, q2, <step index>: { text, note } }. Numbered in the order shown: Q1 = 1, Q2 = 2, steps from 3.
@@ -11475,6 +11481,7 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
     const words = answers();
     const again = typeof feedback === 'string';
     const text = `${words}\nContext: local time ${pClock()}${lo ? `; last night's lights-out: ${pTimeOf(lo)}` : ''}.${again ? `\nThe picks I just got did not fit${feedback ? `. Why: ${feedback}` : ''}. Pick different practices.` : ''}`;
+    if (!again) mtCoach.run(words, 'coach-me', 'waking');
     try {
       const { picks, saved } = await pChoosePractices({
         playbook, text, ask: { kind: 'coach-me', words, ...(again ? { feedback: feedback || '(no reason given)' } : {}) }, screen: 'waking',
@@ -11594,7 +11601,9 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
               <button style={pBtn('ghost', { width: '100%', marginBottom: 14 })} onClick={startOver}>Not yet, start over</button>
             </>
           )}
+          {mtCoach.box}
           <button style={pBtn('ghost', { width: '100%' })} disabled={!online || coach.busy} onClick={() => coachMe()}>{coach.busy ? 'Asking…' : 'Coach me'}</button>
+          {mtCoach.view}
           {!online && <div style={{ fontSize: 12, color: PC.muted, marginTop: 6 }}>Coach me needs the internet. The steps above still work offline.</div>}
           {coach.err && <><PNote msg={`❌ ${coach.err} The steps above still work.`} /><PSaved saved={coach.saved} /></>}
           {coach.picks && <div style={{ marginTop: 12 }}><PPicks picks={coach.picks} misfitId="coach" disabled={!online || coach.busy} onMisfit={(why) => coachMe(why)} onStart={(id, pick) => onStart(id, 'app-waking', pPickNote(coach.words, pick))} /><PSaved saved={coach.saved} /></div>}
@@ -11709,6 +11718,8 @@ function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onW
   const askRef = useRef(null);
   const [asksTick, setAsksTick] = useState(0);
   const online = pOnline();
+  // "Left to myself, I'd ___" (optional) above Ask Claude, Something else and Look outside. Empty: the asks are as before.
+  const mtAsk = usePMyTry('stuck'), mtElse = usePMyTry('stuck-else'), mtOut = usePMyTry('outside');
 
   // Waking levels only matter while he's waking up: in-bed situations skip after-level-4 practices;
   // every other situation (including ones with a minimum level) shows its practices at any time.
@@ -11726,6 +11737,7 @@ function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onW
     setAsk({ busy: true, err: '', picks: null });
     const again = typeof feedback === 'string';
     const fb = again ? `\nThe picks I just got did not fit${feedback ? `. Why: ${feedback}` : ''}. Pick different practices.` : '';
+    if (!again) (kind === 'stuck-else' ? mtElse : mtAsk).run(w, kind, 'stuck');
     try {
       const { picks, saved } = await pChoosePractices({ playbook, text: `${w}\n${pContextLine(todayLog)}${fb}`, ask: { kind, words: w, ...(again ? { feedback: feedback || '(no reason given)' } : {}) }, screen: 'stuck' });
       setAsk({ busy: false, err: '', picks, saved, words: w, kind });
@@ -11739,6 +11751,7 @@ function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onW
     const w = askText.trim() || elseText.trim();
     if (!w) return;
     setOut({ busy: true, err: '', res: null, saved: false });
+    mtOut.run(w, 'outside', 'stuck');
     try { setOut({ busy: false, err: '', res: await pLookOutside(w, todayLog), saved: false, words: w }); }
     catch (e) { setOut({ busy: false, err: e.message, res: null, saved: false, askSaved: e.saved }); }
     setAsksTick(t => t + 1);
@@ -11780,8 +11793,10 @@ function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onW
         {open === '_else' && (
           <div style={{ paddingTop: 8 }}>
             <textarea aria-label="Something else, in your words" rows={3} value={elseText} onChange={e => setElseText(e.target.value)} placeholder="In your words" style={{ ...pInput, minHeight: 80, marginBottom: 8, resize: 'vertical' }} />
+            {mtElse.box}
             <button style={pBtn('solid', { width: '100%' })} disabled={!elseText.trim() || !online || ask.busy}
               onClick={() => { runAsk(elseText, 'stuck-else'); setTimeout(() => askRef.current?.scrollIntoView({ block: 'start' }), 0); }}>Ask Claude</button>
+            {mtElse.view}
           </div>
         )}
       </div>
@@ -11789,8 +11804,10 @@ function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onW
       <div ref={askRef} style={pCard()}>
         <div style={pLabel}>Ask Claude</div>
         <textarea aria-label="Ask Claude" rows={3} value={askText} onChange={e => setAskText(e.target.value)} placeholder="What's going on, in your words" style={{ ...pInput, minHeight: 80, marginBottom: 8, resize: 'vertical' }} />
+        {mtAsk.box}
         <button style={pBtn('solid', { width: '100%' })} disabled={!online || !askText.trim() || ask.busy || !playbook} onClick={() => runAsk()}>{ask.busy ? 'Asking…' : 'Pick practices for me'}</button>
         {!online && <div style={{ fontSize: 12, color: PC.muted, marginTop: 6 }}>Ask Claude needs the internet. The list above works offline.</div>}
+        {mtAsk.view}
         {ask.err && <div style={{ marginTop: 10 }}><PNote msg={`❌ ${ask.err}`} /><div style={{ fontSize: 13, color: PC.muted }}>Pick from the list above instead; those practices work offline.</div><PSaved saved={ask.saved} /></div>}
         {ask.picks && <div style={{ marginTop: 12 }}><PPicks picks={ask.picks} misfitId="stuck" disabled={!online || ask.busy} onMisfit={(why) => runAsk(ask.words, ask.kind || 'stuck', why)} onStart={(id, pick) => onStart(id, 'app-stuck', pPickNote(ask.words, pick))} /><PSaved saved={ask.saved} /></div>}
       </div>
@@ -11798,7 +11815,9 @@ function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onW
       <div style={pCard()}>
         <div style={pLabel}>Look outside the playbook</div>
         <div style={{ fontSize: 13, color: PC.muted, marginBottom: 8 }}>Uses the words in the Ask Claude box and a web search. Results can be saved as a proposal for Gaps; they never go into the playbook.</div>
+        {mtOut.box}
         <button style={pBtn('ghost', { width: '100%' })} disabled={!online || out.busy || !(askText.trim() || elseText.trim())} onClick={runOutside}>{out.busy ? 'Searching…' : 'Look outside the playbook'}</button>
+        {mtOut.view}
         {out.err && <div style={{ marginTop: 10 }}><PNote msg={`❌ ${out.err}`} /><PSaved saved={out.askSaved} /></div>}
         {out.res && (
           <div style={{ marginTop: 12 }}>
@@ -12217,11 +12236,11 @@ const pMonthKey = (d = new Date()) => `${d.getFullYear()}_${pTwo(d.getMonth() + 
 const P_JOY_WHO = ['Corky', 'Bubbess', 'Flora', 'Dolly', 'Diah', 'Rob', 'Kristy'];
 
 // Joys: practice:joy:<YYYY_MM>, { month, entries: [{ id, at, time, what, who[] }] }. Append-only (merged by id).
-function pAddJoy({ what, who, time, date = new Date() }) {
+function pAddJoy({ what, who, time, date = new Date(), bd }) {
   const d = new Date(date);
   if (/^\d\d:\d\d$/.test(time || '')) d.setHours(+time.slice(0, 2), +time.slice(3), 0, 0);
   const id = `joy_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-  const entry = { id, at: d.toISOString(), time: pTimeHM(d), what: String(what).trim(), who: (who || []).filter(Boolean) };
+  const entry = { id, at: d.toISOString(), time: pTimeHM(d), what: String(what).trim(), who: (who || []).filter(Boolean), ...(bd ? { bd } : {}) };
   return pUpdate(P_KEYS.joy(pMonthKey(d)), () => ({ month: pMonthKey(d), entries: [] }), (doc) => {
     doc.entries = Array.isArray(doc.entries) ? doc.entries : [];
     doc.entries.push(entry);
@@ -12279,11 +12298,13 @@ function JoyPanel({ tab, onDone }) {
       tab, what: summary, scope: 'joy', sig: JSON.stringify([what.trim(), names2]),
       run: async () => {
         try {
-          const { doc, entry } = await pAddJoy({ what, who: names2, time });
+          const bd = nwDumpLineId();
+          const { doc, entry } = await pAddJoy({ what, who: names2, time, bd });
           const mk = pMonthKey(new Date(entry.at));
+          nwDumpLine('joy:', nwJoyLine(entry), { id: bd });
           return {
             where: pWhere.get(doc) || 'cloud', ref: { id: entry.id, what: summary },
-            undo: async () => { const d = await pUpdate(P_KEYS.joy(mk), null, (x) => { x.entries = (x.entries || []).filter(e => e.id !== entry.id); return x; }); return pWhere.get(d) || 'cloud'; },
+            undo: async () => { const d = await pUpdate(P_KEYS.joy(mk), null, (x) => { x.entries = (x.entries || []).filter(e => e.id !== entry.id); return x; }); nwDumpLineTakeBack(bd); return pWhere.get(d) || 'cloud'; },
           };
         } catch (e) { setMsg(`Not saved: ${e.message}`); return null; }
       },
@@ -12315,7 +12336,8 @@ function JoyPanel({ tab, onDone }) {
 function JoysScreen({ refreshKey }) {
   const [joys, setJoys] = useState(null);
   const [shown, setShown] = useState(30);
-  useEffect(() => { let live = true; pReadJoys().then(j => { if (live) setJoys(j); }).catch(() => { if (live) setJoys([]); }); return () => { live = false; }; }, [refreshKey]);
+  const [tick, setTick] = useState(0);
+  useEffect(() => { let live = true; pReadJoys().then(j => { if (live) setJoys(j); }).catch(() => { if (live) setJoys([]); }); return () => { live = false; }; }, [refreshKey, tick]);
   window.nwSetContext && window.nwSetContext('practice', { screen: 'Joys' });
   if (!joys) return <div style={{ fontSize: 14, color: PC.muted }}>Reading joys…</div>;
   const today = pLocalISO(), weekStart = pLocalISO(pDaysAgo(6));
@@ -12335,6 +12357,7 @@ function JoysScreen({ refreshKey }) {
               <div key={j.id} data-pr-joy style={pCard({ marginBottom: 8 })}>
                 <div style={{ fontSize: 12, color: PC.muted, fontFamily: pMono }}>{j.iso}{j.time ? ` ${j.time}` : ''}{j.approx ? ' (about)' : ''}{(j.who || []).length ? ` · ${j.who.join(', ')}` : ''}{j.seeded ? ' · seeded, typed by Nikhil' : ''}</div>
                 <div style={{ fontSize: 15, color: PC.text, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{j.what}</div>
+                {window.NwJoyRow && !j.seeded && <window.NwJoyRow j={j} onChanged={() => setTick(t => t + 1)} />}
               </div>
             ))}
           </div>
@@ -12403,6 +12426,7 @@ async function pDayItems(iso, playbook) {
     items.push({ t: pHM(n.at) || null, kind: 'Note', title: `${n.tab || ''}${n.screen ? ` · ${n.screen}` : ''}${n.practice ? ` · ${n.practice}` : ''}`.replace(/^ · /, ''), lines: [n.text] });
   });
   (await pReadJoys().catch(() => [])).filter(j => j.iso === iso).forEach(j => items.push({ t: j.time || null, kind: 'Joy', title: `${(j.who || []).join(', ') || 'Joy'}`, lines: [j.what] }));
+  (await (window.nwReadWrongs ? window.nwReadWrongs(iso) : []).catch(() => [])).forEach(w => items.push({ t: w.time || null, kind: 'Went wrong', title: w.what, lines: [w.did ? `What I did next: ${w.did}` : '', (w.who || []).length ? `Who was there: ${w.who.join(', ')}` : '', w.part ? `Which part: ${w.part}` : ''].filter(Boolean) }));
   (await pReadThree(iso).catch(() => [])).forEach(e => items.push({ t: pHM(e.at) || null, kind: "Today's three", title: nwThreeTitle(e), lines: e.ledger ? [`Ledger: ${e.ledger.task} · ${nwStepLabel(e.ledger.stepNum)}`] : [] }));
   (rp.data?.entries || []).forEach(r => {
     if (!r) return;
@@ -12593,7 +12617,9 @@ const nwColLetter = (i) => { let n = i + 1, s = ''; while (n > 0) { const m = (n
 // ── Ledger: read ──
 const L_BUCKET_SPARK = 'TODAY SPARK', L_BUCKET_WEEK = 'THIS WEEK';
 const L_WORK = /\b(vine|asmp|starr|rti|work)\b/i;
-// Work rows never enter the app: Bucket, Domain or Trello_Board mentions VINE, ASMP, STARR, RTI or Work.
+// Work rows: Bucket, Domain or Trello_Board mentions VINE, ASMP, STARR, RTI or Work. Since Nov 15 they go to What now? (and any
+// other AI prompt that reads the Ledger), but they are not listed on the strip, and text from them is never saved to appdata:
+// what is saved from an answer has it replaced (nwScrubWork). They stay on this device otherwise (the Ledger copy is device-only).
 const nwIsWorkRow = (r) => L_WORK.test(`${r.Bucket || ''}\n${r.Domain || ''}\n${r.Trello_Board || ''}`);
 // Header row 1 gives each column's place by name; rows come back as objects { row: <sheet row>, <Header>: text }.
 function nwParseLedger(values) {
@@ -12610,7 +12636,8 @@ function nwParseLedger(values) {
   // A task with any work row is left out whole (a task's steps share a bucket, but a stray row must not leak a name).
   const workTasks = new Set(all.filter(nwIsWorkRow).map(r => r.Parent_Task));
   const rows = all.filter(r => !nwIsWorkRow(r) && !workTasks.has(r.Parent_Task));
-  return { head, idx, rows, hidden: all.length - rows.length };
+  const workRows = all.filter(r => nwIsWorkRow(r) || workTasks.has(r.Parent_Task));
+  return { head, idx, rows, workRows, hidden: workRows.length };
 }
 // Hands_On_Mins may already say "10 mins"; only add "min" to a bare number.
 const nwMinsText = (v) => (/[a-z]/i.test(String(v)) ? String(v) : `${v} min`);
@@ -12648,7 +12675,7 @@ function nwLedgerGroups(rows, now = new Date()) {
 }
 
 // The shared Ledger state (the strip, What now? and the System tab read it).
-const NWL = { state: { rows: [], rules: [], head: [], idx: {}, hidden: 0, readAt: null, fromCache: false, error: '', loading: false, linked: false }, subs: new Set(), loaded: false };
+const NWL = { state: { rows: [], workRows: [], rules: [], head: [], idx: {}, hidden: 0, readAt: null, fromCache: false, error: '', loading: false, linked: false }, subs: new Set(), loaded: false };
 const nwLSet = (patch) => { NWL.state = { ...NWL.state, ...patch }; NWL.subs.forEach(fn => fn(NWL.state)); };
 function useLedger() {
   const [st, setSt] = useState(NWL.state);
@@ -12661,7 +12688,7 @@ async function nwLedgerLoad({ force } = {}) {
   const link = nwDev.get(NW_DEV.link, '');
   const cache = nwDev.get(NW_DEV.cache, null);
   nwLSet({ linked: !!link });
-  if (cache && cache.rows) nwLSet({ rows: cache.rows, rules: cache.rules || [], head: cache.head || [], idx: cache.idx || {}, hidden: cache.hidden || 0, readAt: cache.at, fromCache: true });
+  if (cache && cache.rows) nwLSet({ rows: cache.rows, workRows: cache.workRows || [], rules: cache.rules || [], head: cache.head || [], idx: cache.idx || {}, hidden: cache.hidden || 0, readAt: cache.at, fromCache: true });
   if (!link) { nwLSet({ error: nwGErr({ code: 'no-link' }), loading: false }); return; }
   if (!nwGoogleOnline()) { nwLSet({ error: cache ? '' : 'No internet and nothing read yet.', loading: false }); return; }
   if (!(window.nwGoogle && window.nwGoogle.token())) { nwLSet({ error: nwGErr({ code: 'no-token' }), loading: false }); return; }
@@ -12673,8 +12700,8 @@ async function nwLedgerLoad({ force } = {}) {
     const parsed = nwParseLedger((vr[0] && vr[0].values) || []);
     const rules = ((vr[1] && vr[1].values) || []).map(r => (r || []).map(c => String(c == null ? '' : c).trim()).filter(Boolean).join(' — ')).filter(Boolean);
     const at = new Date().toISOString();
-    nwDev.set(NW_DEV.cache, { at, rows: parsed.rows, rules, head: parsed.head, idx: parsed.idx, hidden: parsed.hidden });
-    nwLSet({ rows: parsed.rows, rules, head: parsed.head, idx: parsed.idx, hidden: parsed.hidden, readAt: at, fromCache: false, error: '', loading: false });
+    nwDev.set(NW_DEV.cache, { at, rows: parsed.rows, workRows: parsed.workRows, rules, head: parsed.head, idx: parsed.idx, hidden: parsed.hidden });
+    nwLSet({ rows: parsed.rows, workRows: parsed.workRows, rules, head: parsed.head, idx: parsed.idx, hidden: parsed.hidden, readAt: at, fromCache: false, error: '', loading: false });
   } catch (e) { nwLSet({ error: nwGErr(e, 'Sheets'), loading: false }); }
 }
 
@@ -12730,9 +12757,11 @@ async function nwLedgerLocate(id, op) {
   const res = await nwGFetch(`https://sheets.googleapis.com/v4/spreadsheets/${id}/values/Ledger?valueRenderOption=FORMATTED_VALUE`);
   const parsed = nwParseLedger(res.values || []);
   // Work rows are never matched or written: re-parse without the filter only to refuse them.
-  const rowAt = op.row ? parsed.rows.find(r => r.row === op.row) : null;
+  // Work rows are found too (Nov 15: they reach What now?, so a step from one can be marked done there).
+  const all = parsed.rows.concat(parsed.workRows || []);
+  const rowAt = op.row ? all.find(r => r.row === op.row) : null;
   if (rowAt && same(rowAt)) return { row: rowAt, parsed };
-  const hits = parsed.rows.filter(same);
+  const hits = all.filter(same);
   if (hits.length !== 1) throw Object.assign(new Error(hits.length ? 'More than one row matches that step, so nothing was written.' : 'That step is not in the Ledger any more (or its row changed), so nothing was written.'), { code: 'no-match' });
   return { row: hits[0], parsed };
 }
@@ -12794,7 +12823,7 @@ async function nwLedgerApply(op) {
     if (op.actualMins) cells.push({ col: 'Actual_Mins', row: row.row, value: op.actualMins });
     // Last open step of the task (checked again on this fresh read): the task moves to the Done Log bucket.
     if (op.moveTo) {
-      const sib = parsed.rows.filter(x => String(x.Parent_Task).trim() === String(row.Parent_Task).trim());
+      const sib = parsed.rows.concat(parsed.workRows || []).filter(x => String(x.Parent_Task).trim() === String(row.Parent_Task).trim());
       if (sib.every(x => x.row === row.row || nwIsDone(x))) sib.forEach(x => cells.push({ col: 'Bucket', row: x.row, value: op.moveTo }));
     }
     await nwLedgerBatchWrite(id, parsed, cells);
@@ -13213,11 +13242,11 @@ function LedgerStrip() {
       {need && <div style={{ marginBottom: 8 }}><ConnectGoogle onDone={() => nwLedgerLoad({ force: true })} /></div>}
       <LedgerFind />
       {!L.linked && !need && !L.finding && !L.pick && window.nwGoogle && window.nwGoogle.token() && <div style={{ marginBottom: 8 }}><button data-pr-ledger-findbtn style={pBtn('solid', { width: '100%' })} onClick={() => nwLedgerAutoFind()}>Find the Ledger in my Drive</button></div>}
-      {L.readAt && <div style={{ fontSize: 12, color: PC.muted, marginBottom: 6 }}>{L.fromCache ? 'From this device, read' : 'Read'} {pTimeHM(new Date(L.readAt))}{L.hidden ? ` · ${L.hidden} work rows kept out` : ''}</div>}
+      {L.readAt && <div style={{ fontSize: 12, color: PC.muted, marginBottom: 6 }}>{L.fromCache ? 'From this device, read' : 'Read'} {pTimeHM(new Date(L.readAt))}{L.hidden ? ` · ${L.hidden} work rows not listed here (What now? uses them)` : ''}</div>}
       {L.readAt && L.hidden > 0 && (
         <details data-pr-ledger-hidden style={{ fontSize: 12, color: PC.muted, marginBottom: 6 }}>
-          <summary style={{ cursor: 'pointer' }}>Which rows are kept out, and why</summary>
-          <div style={{ lineHeight: 1.5, marginTop: 4 }}>A row is kept out when its Bucket, Domain or Trello_Board names VINE, ASMP, STARR, RTI or Work, or when another step of the same task does. They are dropped on this phone as soon as the sheet is read, so they are never shown here and never sent to Claude. They are not meant to be brought in; open the sheet itself to see them. Google's Sheets service does the reading, signed in as you. Claude only sees the open rows that remain.</div>
+          <summary style={{ cursor: 'pointer' }}>Which rows are not listed, and why</summary>
+          <div style={{ lineHeight: 1.5, marginTop: 4 }}>A work row is one whose Bucket, Domain or Trello_Board names VINE, ASMP, STARR, RTI or Work, or whose task has such a step. They are not listed on this strip, but What now? sends them to Claude with the other open rows, and a step from one can be marked done there. Text from them is not saved to the cloud: what is saved from an answer says "work, kept on this device" instead. Google's Sheets service does the reading, signed in as you.</div>
         </details>
       )}
       {L.readAt && !total && <div style={{ fontSize: 14, color: PC.muted }}>Nothing open in Today Spark, This Week, or due in 14 days.</div>}
@@ -13332,13 +13361,26 @@ function nwDumpShape(text, tag, d = new Date(), words) {
 // The paragraphs to add (see nwDumpShape).
 const nwDumpParas = (text, tag, d = new Date(), words) => nwDumpShape(text, tag, d, words).paras;
 // What gets written, and where, for a doc read: { requests, heading, underToday }.
-function nwDumpPlan(doc, paras, now = new Date()) {
+function nwDumpPlan(doc, paras, now = new Date(), day = null) {
   const content = (doc.body && doc.body.content) || [];
   const para = (el) => el.paragraph;
   const textOf = (p) => ((p.elements || []).map(e => (e.textRun && e.textRun.content) || '').join('')).replace(/\n$/, '');
-  const firstHeading = content.find(el => para(el) && /^HEADING_/.test((para(el).paragraphStyle || {}).namedStyleType || ''));
-  const head = nwDumpHeading(now);
+  const isHead = (el) => para(el) && /^HEADING_/.test((para(el).paragraphStyle || {}).namedStyleType || '');
   const body = paras.join('\n') + '\n';
+  // An edit of an earlier entry goes under that day's heading, when the doc has it (earlier lines are never rewritten).
+  if (day) {
+    const dayHead = nwDumpHeading(new Date(`${day}T12:00:00`));
+    const hit = content.find(el => isHead(el) && textOf(para(el)).trim() === dayHead);
+    if (hit) {
+      const at = hit.endIndex;
+      return { heading: dayHead, underToday: dayHead === nwDumpHeading(now), requests: [
+        { insertText: { location: { index: at }, text: body } },
+        { updateParagraphStyle: { range: { startIndex: at, endIndex: at + body.length }, paragraphStyle: { namedStyleType: 'NORMAL_TEXT' }, fields: 'namedStyleType' } },
+      ] };
+    }
+  }
+  const firstHeading = content.find(isHead);
+  const head = nwDumpHeading(now);
   if (firstHeading && textOf(para(firstHeading)).trim() === head) {
     const at = firstHeading.endIndex;
     return { heading: head, underToday: true, requests: [
@@ -13386,7 +13428,7 @@ async function nwDumpAdd(paras, now = new Date(), opts = {}) {
   let last = null;
   for (let tries = 0; tries < 3; tries++) {
     const doc = await nwDumpRead(f.id);
-    const plan = nwDumpPlan(doc, paras, now);
+    const plan = nwDumpPlan(doc, paras, now, opts.day || null);
     if (opts.dryRun) return { title: f.name, fallback: !!f.fallback, ...plan };
     try {
       await nwGFetch(`https://docs.googleapis.com/v1/documents/${f.id}:batchUpdate`, { method: 'POST', body: JSON.stringify({ requests: plan.requests, writeControl: { requiredRevisionId: doc.revisionId } }) });
@@ -13414,8 +13456,8 @@ const nwCapMe = () => { try { return window.storage.deviceLabel(); } catch (_) {
 // Every capture this device knows of (all devices, the months read so far, plus this device's work captures), oldest first.
 const nwCaptures = () => {
   const all = [];
-  Object.values(NWC.cloud).forEach(list => (list || []).forEach(e => { if (e && !e.deleted) all.push(e); }));
-  nwCapDevice().forEach(e => all.push({ ...e, onlyHere: true }));
+  Object.values(NWC.cloud).forEach(list => (list || []).forEach(e => { if (e && !e.deleted && e.status !== 'removed') all.push(e); }));
+  nwCapDevice().forEach(e => { if (e && e.status !== 'removed') all.push({ ...e, onlyHere: true }); });
   return all.sort((a, b) => String(a.at).localeCompare(String(b.at)));
 };
 const nwCapEmit = () => { const l = nwCaptures(); NWC.subs.forEach(fn => fn(l)); };
@@ -13483,7 +13525,7 @@ async function nwCapMark(c, patch) {
 }
 const nwCapMarkSent = (c) => nwCapMark(c, { status: 'sent', sentAt: new Date().toISOString() });
 // The captures this device sends: its own (and its work captures), oldest first, so the newest ends up on top.
-const nwCapMine = () => { const me = nwCapMe(); return nwCaptures().filter(c => c.status !== 'sent' && (c.onlyHere || !c.dev || c.dev === me)); };
+const nwCapMine = () => { const me = nwCapMe(); return nwCaptures().filter(c => c.status === 'device' && (c.onlyHere || !c.dev || c.dev === me)); };
 // Sends the waiting captures. Returns { sent, error }.
 let nwDumpSending = null;
 function nwDumpSendWaiting() {
@@ -13500,7 +13542,7 @@ function nwDumpSendWaiting() {
           c.pasted = true;
           await nwCapMark(c, { pasted: true }).catch(() => {});
         }
-        if (shape.paras.length) { const w = await nwDumpAdd(shape.paras, new Date()); doc = { title: w.title, fallback: w.fallback }; }
+        if (shape.paras.length) { const w = await nwDumpAdd(shape.paras, new Date(), { day: c.day || null }); doc = { title: w.title, fallback: w.fallback }; }
         await nwCapMarkSent(c).catch(() => {});
         sent++;
       } catch (e) { error = nwGErr(e, 'Docs'); break; }
@@ -13731,7 +13773,7 @@ function pNowClean(input, rows) {
     steps: (Array.isArray(o?.steps) ? o.steps : []).filter(s => s && typeof s.text === 'string' && s.text.trim()).map(s => {
       const r = Number.isInteger(s.ledger_row) ? byRow.get(s.ledger_row) : null;
       const minutes = Math.max(1, Math.round(Number(s.minutes) || 1));
-      return { text: s.text.trim(), minutes, est: !!s.est || minutes > 10, start: /^\d{1,2}:\d\d$/.test(String(s.start || '')) ? String(s.start).padStart(5, '0') : '', kind: s.kind === 'recovery' ? 'nourishment' : ['academic', 'other', 'nourishment'].includes(s.kind) ? s.kind : null,
+      return { text: s.text.trim(), minutes, ...(r && nwIsWorkRow(r) || (r && (NWL.state.workRows || []).some(w => w.row === r.row)) ? { work: true } : {}), est: !!s.est || minutes > 10, start: /^\d{1,2}:\d\d$/.test(String(s.start || '')) ? String(s.start).padStart(5, '0') : '', kind: s.kind === 'recovery' ? 'nourishment' : ['academic', 'other', 'nourishment'].includes(s.kind) ? s.kind : null,
         ...(r ? { ledger: { row: r.row, task: r.Parent_Task, stepNum: r.Step_Num, stepAction: r.Step_Action } } : {}) };
     }),
   })).filter(o => o.steps.length);
@@ -13752,8 +13794,26 @@ async function pWhatNow({ words, rows, rules, log, feedback, past, three, givens
   if (!result.options.length) throw pAskError('Claude sent no usable options. Your words are still in the box. Try again.', saved);
   return { result, saved, usage: data?.usage || null };
 }
-// practice:ramp:<day>: his words and the result, append-only, merged by id.
-function pAddRamp({ words, result, usage, kind = 'what-now', feedback, of }) {
+// Text from work rows, or naming work, never reaches appdata (Nov 15: work rows go to Claude, but the saved copy of an
+// answer says "work, kept on this device" instead). Returns a copy.
+const P_WORK_NOTE = '(work, kept on this device)';
+function nwScrubWork(result, words) {
+  const wr = (NWL.state.workRows || []);
+  const names = new Set(wr.flatMap(r => [r.Parent_Task, r.Step_Action, r.First_Physical_Step]).map(x => String(x || '').trim().toLowerCase()).filter(x => x.length > 3));
+  const bad = (t) => { const s = String(t || ''); const l = s.toLowerCase(); return P_WORK_TEXT_ANY.test(s) || [...names].some(n => l.includes(n)); };
+  const clean = (t) => (bad(t) ? P_WORK_NOTE : t);
+  const out = JSON.parse(JSON.stringify(result || {}));
+  out.patterns = (out.patterns || []).map(clean);
+  out.parked = (out.parked || []).map(clean);
+  out.newTasks = (out.newTasks || []).map(clean);
+  if (out.question) out.question = clean(out.question);
+  (out.options || []).forEach(o => { o.title = clean(o.title); (o.steps || []).forEach(st => { if (st.work || bad(st.text) || (st.ledger && bad(`${st.ledger.task}\n${st.ledger.stepAction}`))) { st.text = P_WORK_NOTE; delete st.ledger; st.work = true; } }); });
+  return { result: out, words: bad(words) ? P_WORK_NOTE : words };
+}
+const P_WORK_TEXT_ANY = /(^|\s)work:|\b(vine|asmp|starr|rti)\b/i;
+// practice:ramp:<day>: his words and the result, append-only, merged by id. Work text is replaced (nwScrubWork).
+function pAddRamp({ words: words0, result: result0, usage, kind = 'what-now', feedback, of }) {
+  const { result, words } = nwScrubWork(result0, words0);
   const now = new Date();
   const id = `r_${now.getTime().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   const entry = { id, at: now.toISOString(), time: pTimeHM(now), kind, words, ...(feedback ? { feedback } : {}), ...(of ? { of } : {}), result, ...(usage ? { usage } : {}) };
@@ -13781,7 +13841,7 @@ async function pDumpQuick(text, tag) {
 const pAddMin = (hm, min) => { const m = /^(\d\d?):(\d\d)$/.exec(hm || ''); if (!m) return ''; const t = (+m[1] * 60 + +m[2] + min) % 1440; return `${pTwo(Math.floor(t / 60))}:${pTwo(t % 60)}`; };
 
 // ── Past Brain Dumps: the phone fetches them through the Google APIs and picks the matching lines itself; Claude only
-// gets those few lines and does the thinking. Work lines (tagged "work:" or naming VINE, ASMP, STARR, RTI) are left out.
+// gets those few lines and does the thinking. Work lines are included since Nov 15 (they are not saved anywhere new).
 // The docs are kept on this device (NW-DEVICE-CACHE) and read again only when Drive says a doc changed.
 const P_STOP = new Set('that this with have from what about there their would could should then them they just like really because still again when where which while been being into over some more much very also only even than your mine dont cant wont didnt isnt need want going know think feel make made'.split(' '));
 const pWordList = (t) => [...new Set((String(t || '').toLowerCase().match(/[a-z0-9']{4,}/g) || []).map(w => w.replace(/'/g, '')).filter(w => w.length >= 4 && !P_STOP.has(w)))];
@@ -13794,7 +13854,6 @@ function pDocParas(doc) {
       const txt = (el.paragraph.elements || []).map(e => (e.textRun && e.textRun.content) || '').join('').replace(/\n$/, '').trim();
       if (!txt) return;
       if (/^HEADING_/.test((el.paragraph.paragraphStyle || {}).namedStyleType || '')) { head = txt; return; }
-      if (/^\s*work:/i.test(txt) || P_DUMP_WORK.test(txt)) return;
       out.push({ h: head, t: txt });
     } else if (el.table) (el.table.tableRows || []).forEach(r => (r.tableCells || []).forEach(c => walk(c.content)));
   });
@@ -13898,7 +13957,7 @@ function nwThreeLog(entries, what, setMsg) {
 // The What now? options he can pick a slot from. Set when What now? answers.
 function nwThreeOffer(options) {
   const steps = [];
-  (options || []).forEach(o => (o.steps || []).forEach(s => steps.push({ text: s.text, minutes: s.minutes, kind: s.kind || null, ledger: s.ledger || null })));
+  (options || []).forEach(o => (o.steps || []).forEach(s => { if (!s.work) steps.push({ text: s.text, minutes: s.minutes, kind: s.kind || null, ledger: s.ledger || null }); })); // work steps are not saved to appdata
   nw3Set({ offer: steps });
 }
 const nwThreePark = (text, setMsg) => nwThreeLog([{ kind: 'park', text: String(text).trim() }], `Parked: ${String(text).trim().slice(0, 40)}`, setMsg);
@@ -14158,10 +14217,12 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
   const [misfit, setMisfit, clearMisfit] = window.useDraft('practice', 'whatnow-misfit', '');
   const [busy2, wrap] = window.useBusy();
   const online = pOnline();
-  const sentRows = L.rows;
+  const sentRows = L.rows.concat(L.workRows || []);
+  const mtNow = usePMyTry('what-now');
 
   const ask = async (feedback) => {
     setSt(s => ({ ...s, busy: true, err: '' }));
+    if (!feedback) mtNow.run(words, 'what-now', 'what-now');
     try {
       const past = feedback && st.past ? st.past : await pPastDumps(words);
       const { result, saved, usage } = await pWhatNow({ words, rows: sentRows, rules: L.rules, log: todayLog, feedback, past, givens: nwGivensText(), three: nwThreeText() });
@@ -14209,7 +14270,9 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
     <div data-pr-whatnow style={pCard()}>
       <div style={pLabel}>What now?</div>
       <textarea aria-label="What is in your head" rows={4} value={words} onChange={e => setWords(e.target.value)} placeholder="Type, or use the mic on your keyboard: everything that is in your head" style={{ ...pInput, minHeight: 90, marginBottom: 8, resize: 'vertical' }} />
+      {mtNow.box}
       <button style={pBtn('solid', { width: '100%' })} disabled={!online || st.busy || !words.trim()} onClick={() => ask()}>{st.busy ? 'Thinking…' : 'What now?'}</button>
+      {mtNow.view}
       {!online && <div style={{ fontSize: 12, color: PC.muted, marginTop: 6 }}>What now needs internet. Your words are kept in the box.</div>}
       {P_ALL_OR_NOTHING.test(`${words} ${st.askedWords || ''}`) && NW_QUICK.some(q => q.id === 'mirror') && (
         <button data-pr-now-mirror style={pBtn('ghost', { width: '100%', marginTop: 6 })} onClick={() => window.dispatchEvent(new CustomEvent('nw-open-quick', { detail: 'mirror' }))}>Compare with your record (Mirror)</button>
@@ -14219,7 +14282,7 @@ function WhatNow({ todayLog, onLog, feedbackWords }) {
       {msg && <div role="status" style={{ fontSize: 13, color: PC.text, marginTop: 8 }}>{msg}</div>}
       {res && (
         <div style={{ marginTop: 12 }}>
-          {st.past && <div data-pr-now-past style={{ fontSize: 12, color: PC.muted, marginBottom: 8 }}>{st.past.note || `Past Brain Dumps: ${st.past.lines.length} matching line${st.past.lines.length === 1 ? '' : 's'} sent (${st.past.matched} matched in ${st.past.docs} doc${st.past.docs === 1 ? '' : 's'}; work lines left out).`}</div>}
+          {st.past && <div data-pr-now-past style={{ fontSize: 12, color: PC.muted, marginBottom: 8 }}>{st.past.note || `Past Brain Dumps: ${st.past.lines.length} matching line${st.past.lines.length === 1 ? '' : 's'} sent (${st.past.matched} matched in ${st.past.docs} doc${st.past.docs === 1 ? '' : 's'}).`}</div>}
           {res.patterns.length > 0 && (
             <div data-pr-now-patterns style={{ marginBottom: 12 }}>
               <div style={pLabel}>Patterns</div>
@@ -14401,7 +14464,9 @@ function PredOutcome({ p, onSaved }) {
         hit.stepNotes = sn.sort((a, b) => a.step - b.step);
         return d;
       });
+      const said = text.trim();
       clearText();
+      nwDumpLine('predict outcome:', `${said || '–'}${result ? ` (${result})` : ''}`);
       window.nwShowBar({ tab: 'practice', mode: 'saved', what: 'Prediction outcome', where: pWhere.get(doc) || 'cloud', ref: { what: `Prediction: ${p.prediction.slice(0, 40)}` } });
       onSaved && onSaved();
     } catch (e) { setErr(e.message); }
@@ -14495,10 +14560,12 @@ function PredictPanel({ tab, onDone }) {
       tab, what, scope: 'prediction', sig: pEntrySig({ ...entry, note: text.trim() }),
       run: async () => {
         try {
-          const doc = await pAppendLog(entry, when, { force: true });
+          const bd = nwDumpLineId();
+          const doc = await pAppendLog({ ...entry, bd }, when, { force: true });
           const id = pAdded.get(doc);
+          nwDumpLine('predict:', entry.prediction, { id: bd });
           return { where: pWhere.get(doc) || 'cloud', ref: { id, what, day: dayKey },
-            undo: async () => { const d = await pRemoveEntry(dayKey, { id }); return pWhere.get(d) || 'cloud'; },
+            undo: async () => { const d = await pRemoveEntry(dayKey, { id }); nwDumpLineTakeBack(bd); return pWhere.get(d) || 'cloud'; },
             addNote: async (note) => { const d = await pUpdate(P_KEYS.log(dayKey), null, (x) => { const hit = pFindEntry(x, { id }); if (!hit) throw new Error('That entry is no longer there.'); hit.myNote = hit.myNote ? `${hit.myNote}\n${note}` : note; return x; }); return pWhere.get(d) || 'cloud'; } };
         } catch (e) { setMsg(`Not saved: ${e.message}`); return null; }
       },
@@ -14603,6 +14670,401 @@ function FeedbackPanel({ tab, onDone }) {
   );
 }
 NW_QUICK.push({ id: 'feedback', label: 'Feedback', Panel: FeedbackPanel });
+
+// ─────────────────────────────────────────────────────
+// BUILD v5 · PART 3 (Nov 15) — Joy, Predict and Went wrong reach the Brain Dump; his own answer first
+// ─────────────────────────────────────────────────────
+
+// ── One Brain Dump line per joy, prediction, outcome and Went wrong entry (his Nov 7 and Nov 14 notes) ──
+// It goes through the Dump's own path: a capture (in the database, or on this device for work text), written at once
+// when online and signed in to Google, else when back online. Each is written once.
+const nwDumpLineId = () => `d_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+function nwDumpLine(tag, text, extra) {
+  const c = window.nwBrainDump.add(text, tag, extra);
+  c.saved.then(() => { if (nwGoogleOnline() && window.nwGoogle && window.nwGoogle.token()) nwDumpSendWaiting().catch(() => {}); });
+  return c;
+}
+// Undo of a save: a line not sent yet is taken back; a line already in the Doc stays (the Doc is never edited).
+function nwDumpLineTakeBack(id) {
+  const c = id && nwCaptures().find(x => x.id === id);
+  if (c && c.status === 'device') nwCapMark(c, { status: 'removed' }).catch(() => {});
+}
+// An edit: a line not sent yet is changed; a line already sent gets "edit: <new text>" under that entry's day.
+function nwDumpLineEdit(id, tag, text, iso) {
+  const c = id && nwCaptures().find(x => x.id === id);
+  if (c && c.status === 'device') return nwCapMark(c, { text }).catch(() => {});
+  nwDumpLine('edit:', `${tag} ${text}`, iso ? { day: iso } : null);
+}
+const nwJoyLine = (j) => `${j.what}${(j.who || []).length ? ` · with ${j.who.join(', ')}` : ''}`;
+const nwWrongLine = (w) => `${w.what}${w.did ? ` · did: ${w.did}` : ''}${(w.who || []).length ? ` · with: ${w.who.join(', ')}` : ''}`;
+
+// ── "Left to myself, I'd ___" (Nov 15): his own try first, then how it compares with how people usually handle this ──
+// Added to the shared voice rules for every answer that has his try in it.
+const P_MYTRY_RULE = [
+  'He wrote what he would do, left to himself, before asking. Answer in two parts:',
+  '- mine.matches: one plain sentence on what in his try already matches how people usually handle this.',
+  '- mine.problem: one plain sentence if something in his try would likely cause a problem; otherwise null.',
+  '- options: 2 or 3 approaches that differ in principle from his try and from each other (for example a breathing move, a change of place, telling one person). Each has a short name (approach) and its first physical step (first_step).',
+  '- person: when an option involves another person, say what kind of person helps, for example someone who asks questions out loud, or someone who shares their own not-knowing. Otherwise null.',
+  '- No praise words (great, amazing, well done, good job, proud of). Plain literal words. No metaphors.',
+].join('\n');
+// "Ask me first" (Nov 15, on by default): one line on what in his try already works, then one question that helps him find
+// the next idea himself, and nothing more. "Show me ways" then asks for the approaches (P_MYTRY_RULE).
+const P_MYTRY_ASK_RULE = [
+  'He wrote what he would do, left to himself, before asking. He wants to find the next idea himself.',
+  '- works: one plain sentence on what in his try already works.',
+  '- question: one question that helps him find the next idea himself. One question only, not a hint in disguise.',
+  '- Give no options, no steps and no advice. Stop after the question.',
+  '- No praise words (great, amazing, well done, good job, proud of). Plain literal words. No metaphors.',
+].join('\n');
+const P_MYTRY_ASK_FORMAT = { type: 'json_schema', schema: {
+  type: 'object', additionalProperties: false, required: ['works', 'question'],
+  properties: { works: { type: 'string' }, question: { type: 'string' } },
+} };
+const P_MYTRY_JOY_RULE = 'This is about a joy he had. options: 2 or 3 other ways people get this kind of joy, each different in principle from his try.';
+const P_MYTRY_NULL = { type: 'null' };
+const P_MYTRY_FORMAT = { type: 'json_schema', schema: {
+  type: 'object', additionalProperties: false, required: ['mine', 'options'],
+  properties: {
+    mine: { type: 'object', additionalProperties: false, required: ['matches', 'problem'], properties: { matches: { type: 'string' }, problem: { anyOf: [{ type: 'string' }, P_MYTRY_NULL] } } },
+    options: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['approach', 'first_step', 'person'], properties: { approach: { type: 'string' }, first_step: { type: 'string' }, person: { anyOf: [{ type: 'string' }, P_MYTRY_NULL] } } } },
+  },
+} };
+const P_WORK_TEXT = /(^|\s)work:|\b(vine|asmp|starr|rti)\b/i;
+// mode 'ways' (default): returns { result: { mine: { matches, problem }, options: [...] }, saved }.
+// mode 'ask' ("Ask me first"): returns { result: { works, question }, saved }.
+// Work text is sent (Nov 15); the copy of the ask saved to appdata leaves it out.
+async function pCompareTry({ words, myTry, of, screen, joy, mode = 'ways' }) {
+  const work = P_WORK_TEXT.test(`${words}\n${myTry}`);
+  const ask = mode === 'ask';
+  const system = `${P_VOICE}\n\n${ask ? P_MYTRY_ASK_RULE : P_MYTRY_RULE}${joy && !ask ? `\n${P_MYTRY_JOY_RULE}` : ''}`;
+  const text = `${joy ? 'The joy' : "What's going on"}: ${words || '(not written)'}\nLeft to myself, I'd: ${myTry}`;
+  const rec = work ? { kind: 'compare', of, mode, words: P_WORK_NOTE, redact: true } : { kind: 'compare', of, mode, words, myTry };
+  const { data, saved } = await pCallClaude({ system, text, format: ask ? P_MYTRY_ASK_FORMAT : P_MYTRY_FORMAT, ask: rec, screen: `${screen || of}-compare` });
+  const raw = (data?.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
+  let result;
+  try { result = JSON.parse(raw); } catch (_) { throw pAskError('Claude sent something that could not be read.', saved); }
+  if (ask) {
+    if (!result || typeof result.works !== 'string' || typeof result.question !== 'string') throw pAskError('Claude sent something that could not be read.', saved);
+    return { result: { works: result.works.trim(), question: result.question.trim() }, saved };
+  }
+  if (!result || !result.mine || !Array.isArray(result.options)) throw pAskError('Claude sent something that could not be read.', saved);
+  result.options = result.options.filter(o => o && o.approach).slice(0, 3);
+  return { result, saved };
+}
+// The optional box. Its text is a draft (useDraft) and is saved with the ask as myTry.
+function PMyTryBox({ value, onChange, label, askFirst, onAskFirst }) {
+  return (
+    <div data-pr-mytry style={{ marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+        <label style={{ ...pLabel, display: 'block', marginBottom: 0 }}>{label || "Left to myself, I'd ___ (optional)"}</label>
+        {onAskFirst && <label style={{ fontSize: 12, color: PC.muted, display: 'flex', alignItems: 'center', gap: 4 }}><input type="checkbox" aria-label="Ask me first" checked={askFirst !== false} onChange={e => onAskFirst(e.target.checked)} /> Ask me first</label>}
+      </div>
+      <textarea aria-label={label || "Left to myself, I'd"} rows={2} value={value} onChange={e => onChange(e.target.value)} placeholder="What you would do, before asking" style={{ ...pInput, minHeight: 56, resize: 'vertical', marginTop: 4 }} />
+    </div>
+  );
+}
+function PCompareView({ st, onWays }) {
+  if (!st || (!st.busy && !st.err && !st.result && !st.ask)) return null;
+  const askPart = st.ask && (
+    <div data-pr-compare-ask style={pCard({ borderLeft: `3px solid ${PC.accent}`, marginTop: 8 })}>
+      <div style={pLabel}>Your try</div>
+      <div data-pr-compare-works style={{ fontSize: 14, color: PC.text, lineHeight: 1.5 }}>{st.ask.works}</div>
+      <div data-pr-compare-question style={{ fontSize: 15, color: PC.text, lineHeight: 1.5, marginTop: 6, fontWeight: 600 }}>{st.ask.question}</div>
+      {!st.result && <button data-pr-compare-ways style={pBtn('ghost', { marginTop: 8 })} disabled={!!st.busy || !pOnline()} onClick={onWays}>Show me ways</button>}
+      <PSaved saved={st.askSaved} />
+    </div>
+  );
+  if (st.busy) return <>{askPart}<div style={{ fontSize: 13, color: PC.muted, marginTop: 8 }}>{st.ask ? 'Finding ways…' : 'Comparing your try…'}</div></>;
+  if (st.err) return <>{askPart}<div style={{ marginTop: 8 }}><PNote msg={`❌ ${st.err}`} /><PSaved saved={st.saved} /></div></>;
+  if (!st.result) return askPart;
+  const r = st.result;
+  if (st.ask) return (
+    <>{askPart}
+      <div data-pr-compare style={pCard({ marginTop: 8 })}>
+        <div style={pLabel}>Other ways</div>
+        {r.options.map((o, i) => (
+          <div key={i} data-pr-compare-option style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, marginBottom: 6 }}>
+            <strong>{o.approach}</strong>. First step: {o.first_step}{o.person ? <span style={{ color: PC.muted }}> · Who helps: {o.person}</span> : null}
+          </div>
+        ))}
+        <PSaved saved={st.saved} />
+      </div>
+    </>
+  );
+  return (
+    <div data-pr-compare style={pCard({ borderLeft: `3px solid ${PC.accent}`, marginTop: 8 })}>
+      <div style={pLabel}>Your try</div>
+      <div data-pr-compare-mine style={{ fontSize: 14, color: PC.text, lineHeight: 1.5 }}>{r.mine.matches}</div>
+      {r.mine.problem && <div style={{ fontSize: 14, color: PC.warn, lineHeight: 1.5, marginTop: 4 }}>{r.mine.problem}</div>}
+      <div style={{ ...pLabel, marginTop: 10 }}>Other ways</div>
+      {r.options.map((o, i) => (
+        <div key={i} data-pr-compare-option style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, marginBottom: 6 }}>
+          <strong>{o.approach}</strong>. First step: {o.first_step}{o.person ? <span style={{ color: PC.muted }}> · Who helps: {o.person}</span> : null}
+        </div>
+      ))}
+      <PSaved saved={st.saved} />
+    </div>
+  );
+}
+// For a screen: the box, and a run() that compares when the box is filled. An empty box changes nothing.
+// "Ask me first" is on by default, per box (kept like a draft). On: run() returns { ask, myTry } and the view offers
+// "Show me ways", which fetches the approaches. Off: run() returns { result, myTry } with the approaches at once.
+function usePMyTry(id) {
+  const [myTry, setMyTry, clearMyTry] = window.useDraft('practice', `mytry:${id}`, '');
+  const [askFirst, setAskFirst] = window.useDraft('practice', `mytry-askfirst:${id}`, true);
+  const [st, setSt] = useState(null);
+  const run = async (words, of, screen, extra) => {
+    const t = (myTry || '').trim();
+    if (!t) { setSt(null); return null; }
+    const first = askFirst !== false;
+    setSt({ busy: true });
+    try {
+      const { result, saved } = await pCompareTry({ words, myTry: t, of, screen, ...(extra || {}), mode: first ? 'ask' : 'ways' });
+      setSt(first ? { ask: result, askSaved: saved, myTry: t, words, of, screen, extra } : { result, saved, myTry: t });
+      clearMyTry();
+      return first ? { ask: result, myTry: t } : { result, myTry: t };
+    } catch (e) { setSt({ err: e.message, saved: e.saved }); return null; }
+  };
+  const ways = async () => {
+    if (!st || !st.ask) return null;
+    const keep = st;
+    setSt({ ...keep, busy: true, err: '' });
+    try { const { result, saved } = await pCompareTry({ words: keep.words, myTry: keep.myTry, of: keep.of, screen: keep.screen, ...(keep.extra || {}), mode: 'ways' }); setSt({ ...keep, busy: false, result, saved }); return { result, myTry: keep.myTry }; }
+    catch (e) { setSt({ ...keep, busy: false, err: e.message, saved: e.saved }); return null; }
+  };
+  return { myTry, setMyTry, askFirst: askFirst !== false, setAskFirst,
+    box: <PMyTryBox value={myTry} onChange={setMyTry} askFirst={askFirst !== false} onAskFirst={setAskFirst} />,
+    view: <PCompareView st={st} onWays={ways} />, run, ways, st };
+}
+
+// ── Went wrong (Nov 15): practice:wrong:<YYYY_MM> = { month, entries: [{ id, at, time, what, did, who, part, myTry, compare, bd }] } ──
+// Append-only, merged by id. A work entry (work:, VINE, ASMP, STARR, RTI) stays on this device only (__nw_wrong_work).
+const NW_WRONG_WORK = '__nw_wrong_work';
+const nwWrongIsWork = (e) => P_WORK_TEXT.test(`${e.what || ''}\n${e.did || ''}\n${e.part || ''}`);
+async function pReadWrongs(iso) {
+  const out = [];
+  const months = iso ? [pMonthKey(new Date(`${iso}T12:00:00`))] : [0, 1, 2].map(k => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - k); return pMonthKey(d); });
+  for (const mk of months) { const r = await pRead(P_KEYS.wrong(mk)); (r.data && Array.isArray(r.data.entries) ? r.data.entries : []).forEach(e => e && e.what && out.push({ ...e, mk })); }
+  (nwDev.get(NW_WRONG_WORK, { entries: [] }).entries || []).forEach(e => e && e.what && !e.deleted && out.push({ ...e, onlyHere: true }));
+  const withIso = out.map(e => ({ ...e, iso: pLocalISO(new Date(e.at)) }));
+  return (iso ? withIso.filter(e => e.iso === iso) : withIso).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+}
+window.nwReadWrongs = pReadWrongs;
+// Saves, changes or removes one entry where it is kept. Returns where it was saved ('cloud' | 'device-only').
+async function pWrongWrite(entry, mutate) {
+  if (entry.onlyHere || nwWrongIsWork(entry)) {
+    const cur = nwDev.get(NW_WRONG_WORK, { entries: [] });
+    const list = mutate((cur.entries || []).slice());
+    if (!nwDev.set(NW_WRONG_WORK, { entries: list })) throw new Error('This device is full; nothing was stored.');
+    return 'device-only';
+  }
+  const mk = pMonthKey(new Date(entry.at));
+  const doc = await pUpdate(P_KEYS.wrong(mk), () => ({ month: mk, entries: [] }), (d) => { d.entries = mutate(Array.isArray(d.entries) ? d.entries : []); return d; });
+  return pWhere.get(doc) || 'cloud';
+}
+const P_NOBODY = 'Nobody';
+
+function WrongPanel({ tab, onDone }) {
+  const [what, setWhat, clearWhat] = window.useDraft(tab, 'wrong-what', '');
+  const [did, setDid, clearDid] = window.useDraft(tab, 'wrong-did', '');
+  const [who, setWho, clearWho] = window.useDraft(tab, 'wrong-who', []);
+  const [typed, setTyped, clearTyped] = window.useDraft(tab, 'wrong-newname', '');
+  const [part, setPart, clearPart] = window.useDraft(tab, 'wrong-part', '');
+  const names = pUseJoyNames();
+  const [busy, wrap] = window.useBusy();
+  const [msg, setMsg] = useState('');
+  const [list, setList] = useState(null);
+  const [tick, setTick] = useState(0);
+  useEffect(() => { let live = true; pReadWrongs().then(l => { if (live) setList(l); }).catch(() => { if (live) setList([]); }); return () => { live = false; }; }, [tick]);
+  const chips = [...names, P_NOBODY, ...who.filter(n => !names.includes(n) && n !== P_NOBODY)];
+  const toggle = (n) => setWho(n === P_NOBODY ? (who.includes(P_NOBODY) ? [] : [P_NOBODY]) : (who.includes(n) ? who.filter(x => x !== n) : [...who.filter(x => x !== P_NOBODY), n]));
+  const save = wrap(async () => {
+    if (!what.trim()) return;
+    const names2 = typed.trim() && !who.includes(typed.trim()) ? [...who, typed.trim()] : who;
+    const now = new Date();
+    const entry = { id: `w_${now.getTime().toString(36)}${Math.random().toString(36).slice(2, 6)}`, at: now.toISOString(), time: pTimeHM(now), what: what.trim(), did: did.trim(), who: names2, part: part.trim(), myTry: '', compare: null };
+    const summary = `Went wrong: ${entry.what.slice(0, 40)}${entry.what.length > 40 ? '…' : ''}`;
+    const r = await window.nwLog({
+      tab, what: summary, scope: 'wrong', sig: JSON.stringify([entry.what, entry.did, names2, entry.part]),
+      run: async () => {
+        try {
+          entry.bd = nwDumpLineId();
+          const where = await pWrongWrite(entry, (l) => l.concat([entry]));
+          nwDumpLine('wrong:', nwWrongLine(entry), { id: entry.bd });
+          setTick(t => t + 1);
+          return { where, ref: { id: entry.id, what: summary },
+            undo: async () => { const w = await pWrongWrite(entry, (l) => l.filter(e => e.id !== entry.id)); nwDumpLineTakeBack(entry.bd); setTick(t => t + 1); return w; } };
+        } catch (e) { setMsg(`Not saved: ${e.message}`); return null; }
+      },
+    });
+    if (r && r.where) {
+      clearWhat(); clearDid(); clearWho(); clearTyped(); clearPart(); setMsg('');
+    }
+  });
+  return (
+    <div data-nw-wrong>
+      <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>Went wrong</div>
+      <input aria-label="What went wrong" value={what} onChange={e => setWhat(e.target.value)} placeholder="What went wrong (one line)" style={nwQuickInput} />
+      <div style={{ ...nwQuickLabel, marginTop: 8 }}>WHAT I DID NEXT (OPTIONAL)</div>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        <input aria-label="What I did next" value={did} onChange={e => setDid(e.target.value)} placeholder="What I did next" style={{ ...nwQuickInput, flex: 1 }} />
+        <button aria-pressed={did === 'Nothing yet'} onClick={() => setDid(did === 'Nothing yet' ? '' : 'Nothing yet')} style={{ ...nwQuickBtn, ...(did === 'Nothing yet' ? nwQuickBtnOn : {}) }}>Nothing yet</button>
+      </div>
+      <div style={{ ...nwQuickLabel, marginTop: 8 }}>WHO WAS THERE (OPTIONAL)</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {chips.map(n => <button key={n} aria-pressed={who.includes(n)} onClick={() => toggle(n)} style={{ ...nwQuickBtn, ...(who.includes(n) ? nwQuickBtnOn : {}) }}>{n}</button>)}
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+        <input aria-label="Someone else was there" value={typed} onChange={e => setTyped(e.target.value)} placeholder="Someone else" style={{ ...nwQuickInput, minHeight: 36, flex: 1 }} />
+        <button style={nwQuickBtn} onClick={() => { const n = typed.trim(); if (!n) return; if (!who.includes(n)) setWho([...who.filter(x => x !== P_NOBODY), n]); clearTyped(); }}>Add name</button>
+      </div>
+      <div style={{ ...nwQuickLabel, marginTop: 8 }}>WHICH PART (OPTIONAL)</div>
+      <input aria-label="Which part" value={part} onChange={e => setPart(e.target.value)} placeholder="Which part" style={nwQuickInput} />
+      <div style={{ display: 'flex', marginTop: 8 }}>
+        <button style={{ ...nwQuickBtn, ...nwQuickBtnOn, marginLeft: 'auto' }} disabled={busy || !what.trim()} onClick={save}>Save</button>
+      </div>
+      {msg && <div role="alert" style={{ fontSize: 13, color: '#fca5a5', marginTop: 6 }}>{msg}</div>}
+      <div style={{ ...nwQuickLabel, margin: '10px 0 4px' }}>WHAT WENT WRONG, AND WHAT YOU DID NEXT</div>
+      {!list ? <div style={{ fontSize: 13, color: '#9ca3af' }}>Reading…</div> : !list.length ? <div style={{ fontSize: 13, color: '#9ca3af' }}>None yet.</div>
+        : list.slice(0, 20).map(e => <WrongRow key={e.id} e={e} tab={tab} names={names} onChanged={() => setTick(t => t + 1)} />)}
+    </div>
+  );
+}
+
+// One Went wrong entry: Edit, Remove (with Undo), Compare.
+function WrongRow({ e, tab, names, onChanged }) {
+  const [open, setOpen, clearOpen] = window.useDraft(tab, `wrong-edit-open:${e.id}`, false);
+  const [form, setForm, clearForm] = window.useDraft(tab, open ? `wrong-edit:${e.id}` : null, { what: e.what, did: e.did || '', part: e.part || '' });
+  const [cmp, setCmp] = useState(false);
+  const mt = usePMyTry(`wrong:${e.id}`);
+  const [busy, wrap] = window.useBusy();
+  const [err, setErr] = useState('');
+  const f = form || {};
+  const saveEdit = wrap(async () => {
+    if (!(f.what || '').trim()) return;
+    const next = { what: f.what.trim(), did: (f.did || '').trim(), part: (f.part || '').trim() };
+    try {
+      const where = await pWrongWrite(e, (l) => l.map(x => (x.id === e.id ? { ...x, ...next, edits: [...(x.edits || []), { at: new Date().toISOString(), from: { what: x.what, did: x.did, part: x.part } }] } : x)));
+      nwDumpLineEdit(e.bd, 'wrong:', nwWrongLine({ ...e, ...next }), e.iso);
+      window.nwShowBar({ tab, mode: 'saved', what: 'Went wrong: edit', where, ref: { id: e.id, what: 'Went wrong' } });
+      clearForm(); clearOpen(); onChanged();
+    } catch (x) { setErr(x.message); }
+  });
+  const remove = wrap(async () => {
+    try {
+      const where = await pWrongWrite(e, (l) => l.filter(x => x.id !== e.id));
+      nwDumpLineTakeBack(e.bd);
+      window.nwShowBar({ tab, mode: 'saved', what: `Removed: ${e.what.slice(0, 40)}`, where, ref: { id: e.id, what: 'Went wrong' },
+        undo: async () => { const { iso, mk, onlyHere, ...back } = e; const w = await pWrongWrite(e, (l) => l.concat([{ ...back }])); onChanged(); return w; } });
+      onChanged();
+    } catch (x) { setErr(x.message); }
+  });
+  const compare = wrap(async () => {
+    const r = await mt.run(`${e.what}${e.part ? ` (which part: ${e.part})` : ''}${e.did ? `. What I did next: ${e.did}` : ''}`, 'wrong', 'wrong');
+    if (r) { try { await pWrongWrite(e, (l) => l.map(x => (x.id === e.id ? { ...x, myTry: r.myTry, compare: r.result || r.ask } : x))); } catch (_) {} }
+  });
+  return (
+    <div data-nw-wrong-row style={{ fontSize: 13, padding: '6px 0', borderBottom: '1px solid #262626', overflowWrap: 'anywhere' }}>
+      <div><span style={{ color: '#9ca3af' }}>{e.iso.slice(5)} {e.time}{e.onlyHere ? ' · on this device only' : ''}</span> · {e.what}</div>
+      {(e.did || (e.who || []).length || e.part) && <div style={{ color: '#ccc' }}>{[e.did ? `Did next: ${e.did}` : '', (e.who || []).length ? `With: ${e.who.join(', ')}` : '', e.part ? `Part: ${e.part}` : ''].filter(Boolean).join(' · ')}</div>}
+      {e.compare && (e.compare.mine || e.compare.works) && <div style={{ color: '#9ca3af' }}>Compared: {e.compare.mine ? e.compare.mine.matches : e.compare.works}</div>}
+      {!open ? (
+        <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+          <button style={{ ...nwQuickBtn, minHeight: 30, padding: '2px 8px' }} onClick={() => setOpen(true)}>Edit</button>
+          <button style={{ ...nwQuickBtn, minHeight: 30, padding: '2px 8px' }} disabled={busy} onClick={remove}>Remove</button>
+          <button aria-expanded={cmp} style={{ ...nwQuickBtn, minHeight: 30, padding: '2px 8px' }} onClick={() => setCmp(!cmp)}>Compare</button>
+        </div>
+      ) : (
+        <div style={{ marginTop: 6 }}>
+          <input aria-label="Edit what went wrong" value={f.what || ''} onChange={ev => setForm({ ...f, what: ev.target.value })} style={{ ...nwQuickInput, marginBottom: 6 }} />
+          <input aria-label="Edit what I did next" value={f.did || ''} onChange={ev => setForm({ ...f, did: ev.target.value })} placeholder="What I did next" style={{ ...nwQuickInput, marginBottom: 6 }} />
+          <input aria-label="Edit which part" value={f.part || ''} onChange={ev => setForm({ ...f, part: ev.target.value })} placeholder="Which part" style={{ ...nwQuickInput, marginBottom: 6 }} />
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button style={{ ...nwQuickBtn, ...nwQuickBtnOn }} disabled={busy || !(f.what || '').trim()} onClick={saveEdit}>Save edit</button>
+            <button style={nwQuickBtn} onClick={() => { clearForm(); clearOpen(); }}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {cmp && (
+        <div style={{ marginTop: 6 }}>
+          {mt.box}
+          <button style={{ ...nwQuickBtn, ...nwQuickBtnOn }} disabled={busy || !pOnline() || !(mt.myTry || '').trim()} onClick={compare}>Compare my try</button>
+          {!pOnline() && <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 4 }}>Compare needs the internet. Your try stays in the box.</div>}
+          {mt.view}
+        </div>
+      )}
+      {err && <div role="alert" style={{ color: '#fca5a5' }}>{err}</div>}
+    </div>
+  );
+}
+NW_QUICK.push({ id: 'wrong', label: 'Went wrong', Panel: WrongPanel });
+// The quick row's order: Joy, Went wrong, Predict, Dump, Feedback (anything else after them).
+{
+  const order = ['joy', 'wrong', 'predict', 'dump', 'feedback'];
+  const rank = (q) => { const i = order.indexOf(q.id); return i < 0 ? order.length : i; };
+  NW_QUICK.sort((a, b) => rank(a) - rank(b));
+}
+
+// ── Joys: edit and remove (with Undo), and "More like this" ──
+function JoyRow({ j, onChanged }) {
+  const [open, setOpen, clearOpen] = window.useDraft('practice', `joy-edit-open:${j.id}`, false);
+  const [form, setForm, clearForm] = window.useDraft('practice', open ? `joy-edit:${j.id}` : null, { what: j.what, time: j.time || '' });
+  const [more, setMore] = useState(false);
+  const mt = usePMyTry(`joy:${j.id}`);
+  const [busy, wrap] = window.useBusy();
+  const [err, setErr] = useState('');
+  const mk = pMonthKey(new Date(j.at || `${j.iso}T12:00:00`));
+  const f = form || {};
+  const saveEdit = wrap(async () => {
+    if (!(f.what || '').trim()) return;
+    try {
+      const d = await pUpdate(P_KEYS.joy(mk), null, (x) => { const hit = (x.entries || []).find(e => e.id === j.id); if (!hit) throw new Error('That joy is no longer there.'); hit.edits = [...(hit.edits || []), { at: new Date().toISOString(), from: { what: hit.what, time: hit.time } }]; hit.what = f.what.trim(); if (/^\d\d:\d\d$/.test(f.time || '')) hit.time = f.time; return x; });
+      nwDumpLineEdit(j.bd, 'joy:', nwJoyLine({ ...j, what: f.what.trim() }), j.iso);
+      window.nwShowBar({ tab: 'practice', mode: 'saved', what: 'Joy: edit', where: pWhere.get(d) || 'cloud', ref: { id: j.id, what: 'Joy' } });
+      clearForm(); clearOpen(); onChanged();
+    } catch (e) { setErr(e.message); }
+  });
+  const remove = wrap(async () => {
+    try {
+      const { iso, ...back } = j;
+      const d = await pUpdate(P_KEYS.joy(mk), null, (x) => { x.entries = (x.entries || []).filter(e => e.id !== j.id); return x; });
+      nwDumpLineTakeBack(j.bd);
+      window.nwShowBar({ tab: 'practice', mode: 'saved', what: `Removed joy: ${j.what.slice(0, 40)}`, where: pWhere.get(d) || 'cloud', ref: { id: j.id, what: 'Joy' },
+        undo: async () => { const r = await pUpdate(P_KEYS.joy(mk), null, (x) => { x.entries = [...(x.entries || []), { ...back }]; return x; }); onChanged(); return pWhere.get(r) || 'cloud'; } });
+      onChanged();
+    } catch (e) { setErr(e.message); }
+  });
+  return (
+    <div style={{ marginTop: 6 }}>
+      {!open ? (
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button style={pBtn('ghost', { fontSize: 13, minHeight: 34, padding: '2px 10px' })} onClick={() => setOpen(true)}>Edit</button>
+          <button style={pBtn('ghost', { fontSize: 13, minHeight: 34, padding: '2px 10px' })} disabled={busy} onClick={remove}>Remove</button>
+          <button aria-expanded={more} style={pBtn('ghost', { fontSize: 13, minHeight: 34, padding: '2px 10px' })} onClick={() => setMore(!more)}>More like this</button>
+        </div>
+      ) : (
+        <div>
+          <textarea aria-label="Edit joy" rows={2} value={f.what || ''} onChange={ev => setForm({ ...f, what: ev.target.value })} style={{ ...pInput, minHeight: 56, marginBottom: 6 }} />
+          <input aria-label="Edit joy time" type="time" value={f.time || ''} onChange={ev => setForm({ ...f, time: ev.target.value })} style={{ ...pInput, marginBottom: 6 }} />
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button style={pBtn('solid', { flex: 1 })} disabled={busy || !(f.what || '').trim()} onClick={saveEdit}>Save edit</button>
+            <button style={pBtn()} onClick={() => { clearForm(); clearOpen(); }}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {more && (
+        <div style={{ marginTop: 6 }}>
+          <PMyTryBox value={mt.myTry} onChange={mt.setMyTry} label="Left to myself, I'd get more of this by ___" askFirst={mt.askFirst} onAskFirst={mt.setAskFirst} />
+          <button style={pBtn('solid', { width: '100%' })} disabled={busy || !pOnline() || !(mt.myTry || '').trim()} onClick={wrap(() => mt.run(j.what, 'joy-more', 'joy', { joy: true }))}>Compare my try</button>
+          {mt.view}
+        </div>
+      )}
+      {err && <div role="alert" style={{ fontSize: 13, color: PC.bad }}>{err}</div>}
+    </div>
+  );
+}
+window.NwJoyRow = JoyRow;
 
 function NwFeedbackList({ active }) {
   const [list, setList] = useState(null);
@@ -15547,7 +16009,7 @@ function NwAppInfo({ active }) {
 const NW_CLAUDE_PRICES_USD_PER_MTOK = { input: 2, output: 10, cacheWrite: 2 * 1.25, cacheRead: 2 * 0.1 };
 // The monthly spend limit set in the Anthropic Console.
 const MONTHLY_LIMIT_USD = 5;
-const NW_ASK_KIND_NAMES = { 'stuck': 'Ask Claude (Stuck)', 'stuck-else': 'Something else', 'coach-me': 'Coach me', 'outside': 'Look outside', 'draft-shobha': 'Draft for Dr. Shobha', 'kaizen-foci': 'Kaizen session patterns', 'what-now': 'What now?', 'what-now-again': 'What now? (again)', 'ask-step': 'Ask about a step' };
+const NW_ASK_KIND_NAMES = { 'compare': 'My try, compared', 'stuck': 'Ask Claude (Stuck)', 'stuck-else': 'Something else', 'coach-me': 'Coach me', 'outside': 'Look outside', 'draft-shobha': 'Draft for Dr. Shobha', 'kaizen-foci': 'Kaizen session patterns', 'what-now': 'What now?', 'what-now-again': 'What now? (again)', 'ask-step': 'Ask about a step' };
 
 // Every saved Claude answer this month (practice:asks:<YYYY_MM_DD>), counted by kind.
 function nwClaudeCost(records, prices = NW_CLAUDE_PRICES_USD_PER_MTOK) {
