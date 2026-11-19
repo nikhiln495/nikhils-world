@@ -12,6 +12,8 @@
 // 8. v3-test.js all          — build v3 (Nov 2026): waking step record, count attempts, Joy, Lights out, Day history,
 //                             the Ledger and Brain Dump (Google requests faked), What now?, predictions, small fixes
 // 9. v4a-test.js all         — build v4-A (Nov 2026): What now? structured output, Ledger found by name, calendar givens, Today's three
+// 10. v5-test.js all         — build v5 (Nov 15 2026): captures on every device, the Dump's shape and who said it, Went wrong,
+//                             his own answer first, Wake up, the return card
 // Plus: index.html must not call api.anthropic.com directly (everything goes through the AI proxy), and must never
 // send tool_choice of type 'tool' or 'any'.
 // The live Firestore is never touched: every run uses an in-memory mock or fake Firestore.
@@ -31,6 +33,7 @@ const steps = [
   ['drafts, notes, saved bar, cost, device room', ['notes-test.js', 'all']],
   ['build v3: waking record, counts, joy, Ledger, Brain Dump, What now, predictions', ['v3-test.js', 'all']],
   ['build v4-A: What now fix, Ledger on any device, calendar givens, Today\'s three', ['v4a-test.js', 'all']],
+  ['build v5: captures on every device, Dump shape, who said it, Went wrong, your answer first', ['v5-test.js', 'all']],
 ];
 const results = [];
 const html = fs.readFileSync(path.join(dir, '..', 'index.html'), 'utf8');

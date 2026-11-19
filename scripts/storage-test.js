@@ -1066,7 +1066,7 @@ async function part14() {
     ok(r.first === null, 'a refused first write leaves nothing behind');
     ok(r.sync === true && r.after === 'old', 'a write that fails after returning true puts the old value back');
     ok(r.none === false && r.hasHuge === null, 'when the browser says there is less room than the value needs, it returns false at once and stores nothing');
-    ok(/This does not clear when things upload\. To free room: System tab, then Clear caches\.$/.test(r.banner || ''), 'the message says it does not clear on upload and names the one thing to do → ' + (r.banner || '').slice(0, 90));
+    ok(/What uses the room: .+ To free room: System tab, then Clear caches; it removes only the caches\. This message closes by itself when there is room again\.$/.test(r.banner || ''), 'the message says what uses the room, the one thing to do, and that it closes by itself → ' + (r.banner || '').slice(0, 90));
     await done(ctx, '14 full');
   }
 
@@ -1110,7 +1110,7 @@ async function part14() {
     const at = (usage, quota = 1000) => page.evaluate(async ([u, q]) => { window.__est = { usage: u, quota: q }; await window.storage.dev.refreshEstimate(); await new Promise(r => setTimeout(r, 450)); return window.storage.status().banners.filter(b => b.kind === 'device-full').map(b => b.text); }, [usage, quota]);
     ok((await at(780)).length === 0 && (await at(849)).length === 0, '78% and 84.9%: no message');
     const t85 = await at(850);
-    ok(t85.length === 1 && /^This device is running out of room for saved data \(85% of what the browser allows\)\. This does not clear when things upload\. To free room: System tab, then Clear caches\.$/.test(t85[0]), 'at 85% the message says what it is, that it does not clear on upload, and what to do → ' + (t85[0] || '').slice(0, 70));
+    ok(t85.length === 1 && /^This device is running out of room for saved data \(85% of what the browser allows\)\. What uses the room: your data's offline copy [\d.]+ MB \(already in the cloud\), caches [\d.]+ MB \(already in Google, read again when needed\), waiting to upload [\d.]+ MB \(only on this device until it uploads\)\. To free room: System tab, then Clear caches; it removes only the caches\. This message closes by itself when there is room again\.$/.test(t85[0]), 'at 85% the message says what uses the room, what is already uploaded, what to do, and that it closes by itself → ' + (t85[0] || '').slice(0, 70));
     ok(await page.locator('[data-nw-banner="device-full"]').isVisible(), 'and it is on screen');
     await page.evaluate(() => window.storage.dismiss('device-full'));
     ok((await at(850)).length === 0 && (await at(892)).length === 0, 'OK hides it, and a rise under 5 points does not bring it back');
@@ -1124,6 +1124,9 @@ async function part14() {
     await page.evaluate(() => window.storage.dismiss('device-full'));
     const afterFull = await page.evaluate(async () => { const real = IDBObjectStore.prototype.put; IDBObjectStore.prototype.put = function (v, k) { if (k === '__nw_cache:q') throw new DOMException('full', 'QuotaExceededError'); return real.apply(this, arguments); }; window.storage.dev.setItem('__nw_cache:q', 'x'); await window.storage.dev.flushed(); IDBObjectStore.prototype.put = real; await new Promise(r => setTimeout(r, 450)); return window.storage.status().banners.filter(b => b.kind === 'device-full').map(b => b.text); });
     ok(afterFull.length === 1 && /did not fit on this device/.test(afterFull[0]), 'a save that does not fit shows it again even right after OK');
+    // His Nov 4 / Nov 8 notes: the message closes by itself once there is room again (use drops below 85% after the save that did not fit).
+    ok((await at(890)).length === 1, 'still short of room: the "did not fit" message stays');
+    ok((await at(500)).length === 0 && (await at(500)).length === 0, 'room is back (50%): the message closes by itself, without OK');
     await done(ctx, '14 banner');
   }
 

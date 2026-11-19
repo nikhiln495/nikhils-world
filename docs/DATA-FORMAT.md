@@ -287,6 +287,16 @@ filter allows are ever in it (see Ledger below). A step's `kind` is `academic`, 
 may say `recovery`, which is shown as Self-nourishment. Claude's answer is requested as structured output
 (`output_config.format`), not a forced tool.
 
+## Brain Dump captures (dump:captures:<YYYY_MM>)
+
+Since Nov 15, 2026 (build v5). `{ "month": "YYYY_MM", "entries": [{ id, at, u, text, tag, status: device|sent, sentAt?, dev }] }`,
+one doc per month (by the capture's local date), append-only, merged by `id` like `practice:joy` (`ENTRIES_KEY`). `status`
+`device` means waiting to go to the Brain Dump Doc. `dev` is the device that made it (`window.storage.deviceLabel()`); only
+that device sends it, so a capture is never sent twice. Nothing is trimmed. **Work captures** (tag `work:`, text starting
+`work:`, or naming VINE, ASMP, STARR or RTI) are never written here: they stay in `__nw_dump_queue` on the device that made
+them. Captures from before this change were in `__nw_dump_queue` only; the first load moves the non-work ones here with
+their status. Who said what (`words`, from build v5 PR 2) is kept on the capture.
+
 ## Feedback for the app (feedback:app)
 
 `{ "entries": [{ id, at, date, screen, text, status: new|planned|done }] }`, append-only, merged by `id`.
@@ -432,10 +442,10 @@ From Dr. Shobha's 21 days: one Academic, one Other and one Self-nourishment step
 never part of the three.
 
 `practice:three:<YYYY_MM>` is `{ "month", "entries": [{ id, at (ISO), date (local YYYY-MM-DD), kind, slot?, text, ledger? }] }`.
-One doc per month, append-only. The entries are meant to be merged by `id` like `practice:joy`; the merge list
-(`ENTRIES_KEY`) is inside the storage layer, which this build did not touch, so until `practice:three:` is added to it two
-devices that save at the same moment get the storage layer's usual conflict copy instead of a merge (the Mirror reads with
-`listPrefix('practice:three:')` and should skip conflict copies). Undo from the Saved bar removes exactly that entry.
+One doc per month, append-only, merged by `id` like `practice:joy` (in `ENTRIES_KEY` since build v5), so two devices that
+save at the same moment both keep their entries. Undo from the Saved bar removes exactly that entry (it stays as
+`{ id, deleted: true, u }` so another device cannot bring it back). Docs written before v5 may have conflict copies; the
+Mirror reads with `listPrefix('practice:three:')` and should skip them.
 
 - `kind`: `checkin` (the optional two-minute check-in), `pick` (a slot was filled or changed; the last pick for a slot on a day
   is the current one), `done` (the slot's step was marked done), `appreciate` ("I appreciate that I…", same `slot`), `park`
