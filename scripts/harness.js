@@ -5,7 +5,7 @@
 // 4. storage-test.js all    — honest saves, upload queue, opt-in sealing, deletes, fold-back, split values,
 //                             sizes and banners, the device meter, offline reads
 // 5. backup-test.js all     — backup format 3, safe Drive sync, local-time file names, the Apps Script
-// 5b. inbox-test.js        — tools/inbox/*.gs (voice memos to text, Fireflies to Drive), every Google service mocked
+// 5b. inbox-test.js        — tools/inbox/*.gs (voice memos through the Cloud Run worker, Fireflies to Drive), every Google service mocked
 // 6. sw-test.js             — opens offline at / and /nikhils-world/ (service worker, manifest, new deploys)
 // 7. notes-test.js all      — drafts in every tab, notes, the Saved / Add note / Undo bar, log tidy, Kaizen
 //                             doneAt, two-device merges, the Claude cost tracker, room on this device, offline

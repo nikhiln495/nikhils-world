@@ -1,5 +1,5 @@
-// Checks for tools/inbox/*.gs (the "NW Inbox" Apps Script project): voice memos to text with Gemini on Vertex AI,
-// Fireflies transcripts to Drive. The .gs files run in a Node sandbox with DriveApp, DocumentApp, SpreadsheetApp,
+// Checks for tools/inbox/*.gs (the "NW Inbox" Apps Script project): voice memos to text through the Cloud Run worker
+// (faked here: it answers from env.worker), Fireflies transcripts to Drive. The .gs files run in a Node sandbox with DriveApp, DocumentApp, SpreadsheetApp,
 // UrlFetchApp, PropertiesService, LockService, ScriptApp, Session and Utilities mocked. No real network, no real Google.
 // Run: NODE_PATH=$(npm root -g) node scripts/inbox-test.js [all]
 const fs = require('fs');
@@ -50,6 +50,7 @@ function makeEnv(opts = {}) {
     return {
       getId: () => rec.id, getName: () => rec.name, isTrashed: () => false,
       getFiles: () => mkIter(Object.values(drive.files).filter(f => f.parent === rec.id).map(fileObj)),
+      getFolders: () => mkIter(Object.values(drive.folders).filter(f => f.parent === rec.id).map(folderObj)),
       getFoldersByName: (nm) => mkIter(Object.values(drive.folders).filter(f => f.parent === rec.id && f.name === nm).map(folderObj)),
       createFolder: (nm) => { const r = { id: 'fo' + n++, name: nm, parent: rec.id }; drive.folders[r.id] = r; return folderObj(r); },
     };
@@ -58,6 +59,7 @@ function makeEnv(opts = {}) {
     return {
       getId: () => rec.id, getName: () => rec.name, getMimeType: () => rec.mime, getSize: () => rec.size || 0,
       getLastUpdated: () => rec.updated || new Date('2026-11-03T20:00:00Z'), getDescription: () => rec.desc || '',
+      getDateCreated: () => rec.created || rec.updated || new Date('2026-11-03T20:00:00Z'), isTrashed: () => false,
       setDescription: (d) => { rec.desc = d; }, moveTo: (fo) => { rec.parent = fo.getId(); },
       getOwner: () => ({ getEmail: () => rec.owner || 'me@x.com' }),
       getBlob: () => ({ getBytes: () => Array.from(Buffer.alloc(rec.size || 0)) }),
@@ -78,7 +80,7 @@ function makeEnv(opts = {}) {
   function paraObj(r) {
     const p = {
       _r: r,
-      getText: () => r.text, setText: (t) => { r.text = t; return p; },
+      getText: () => r.text, setText: (t) => { r.text = t; return p; }, asParagraph: () => p,
       getHeading: () => r.heading, setHeading: (h) => { r.heading = h; return p; },
       getAttributes: () => Object.assign({}, r.attrs), setAttributes: (a) => { r.attrs = Object.assign({}, a); return p; },
       removeFromParent: () => { const d = r.doc; d.children = d.children.filter(c => c !== r); },
@@ -96,9 +98,10 @@ function makeEnv(opts = {}) {
       appendParagraph: (t) => { const r = mk(t); d.children.push(r); return wrap(r); },
       insertHorizontalRule: (i) => { const r = mk('', true); d.children.splice(i, 0, r); return wrap(r); },
       getText: () => d.children.map(c => c.text).join('\n'),
+      findText: (pattern) => { const re = new RegExp(pattern); const r = d.children.find(c => re.test(c.text)); return r ? { getElement: () => ({ getParent: () => wrap(r) }) } : null; },
       setText: (t) => { d.children = t.split('\n').map(x => mk(x)); },
     };
-    return { getId: () => d.id, getBody: () => body, saveAndClose: () => {}, _d: d };
+    return { getId: () => d.id, getName: () => d.name, getBody: () => body, saveAndClose: () => {}, _d: d };
   }
   const newDoc = (name, lines, extra = {}) => {
     const d = { id: 'doc' + n++, name, children: [] };
@@ -142,9 +145,10 @@ function makeEnv(opts = {}) {
     SDate = class extends Date { constructor(...a) { if (a.length === 0) super(fixed + (Date.now() - start)); else super(...a); } static now() { return fixed + (Date.now() - start); } };
   }
   const ctx = {
-    console, Date: SDate, JSON, Math, Object, Array, String, Number, Error, RegExp, Promise,
+    console, Date: SDate, JSON, isFinite, Buffer, Math, Object, Array, String, Number, Error, RegExp, Promise,
     PropertiesService: { getScriptProperties: () => ({
       getProperty: (k) => (k in props ? props[k] : null), setProperty: (k, v) => { props[k] = String(v); }, deleteProperty: (k) => { delete props[k]; },
+      getProperties: () => Object.assign({}, props),
     }) },
     LockService: { getScriptLock: () => ({ tryLock: () => env.lockOk !== false, releaseLock: () => {} }) },
     ScriptApp: {
@@ -156,6 +160,8 @@ function makeEnv(opts = {}) {
     Utilities: {
       formatDate: (d, z, p) => fmt(d, z, p), parseDate: (s, z) => parseLocal(s, z), sleep: (ms) => log.sleeps.push(ms),
       base64Encode: (b) => Buffer.from(b).toString('base64'),
+      computeDigest: (alg, s) => Array.from(require('crypto').createHash('sha256').update(String(s)).digest()).map(b => (b > 127 ? b - 256 : b)),
+      DigestAlgorithm: { SHA_256: 'SHA_256' }, Charset: { UTF_8: 'UTF_8' },
     },
     DriveApp, DocumentApp, SpreadsheetApp, UrlFetchApp,
   };
@@ -168,264 +174,177 @@ function makeEnv(opts = {}) {
   return env;
 }
 
-// A Voice Inbox with audio files. Returns folder ids.
-function voiceSetup(env, files) {
+// ── The live voice pipeline (since Nov 11): audio is uploaded to the worker bucket, a Cloud Run job transcribes it, and
+// the next run writes the result. The fake below is the bucket, the job and Drive's ranged reads in one route.
+const AUTO_DOC = '18IPx6CCBQF9otXvNJt7fbMQ5bNfDSFwcuvey_II6Rxs';
+const ROLLING = "Nikhil's World — Voice, last 7 days";
+function cloudEnv(opts = {}) {
+  const env = makeEnv({ now: opts.now || '2026-11-15T18:00:00Z', props: Object.assign({ TRANSCRIPTS_DOC_ID: AUTO_DOC, WORKER_BUCKET: 'test-worker-bucket', CLOUD_RUN_JOB: 'test-job', CLOUD_RUN_REGION: 'us-central1' }, opts.props || {}) });
+  // The automatic-transcript doc has the pinned id; the rolling doc and the month's Brain Dump are test docs.
+  env.docs[AUTO_DOC] = { id: AUTO_DOC, name: 'NW Inbox — Automatic Voice Memo Transcripts', children: [] };
+  env.docs[AUTO_DOC].children = [{ text: '', heading: 'NORMAL', attrs: {}, doc: env.docs[AUTO_DOC] }];
+  env.addFile({ id: AUTO_DOC, name: 'NW Inbox — Automatic Voice Memo Transcripts', mime: DOC });
+  env.bd = env.newDoc('Brain Dump Nov 2026', [{ text: 'Saturday, Nov 14, 2026', heading: 'HEADING1' }, 'older line (from Nikhil\'s World, 9:00 PM)']);
   const inbox = env.DriveApp.createFolder("Nikhil's World Voice Inbox");
-  const done = inbox.createFolder('Done'), problem = inbox.createFolder('Problem');
-  const recs = files.map(f => env.addFile({ name: f.name, mime: f.mime || 'audio/x-m4a', size: f.size || 1000, parent: inbox.getId(), updated: new Date('2026-11-04T01:00:00Z') }));
-  return { inbox: inbox.getId(), done: done.getId(), problem: problem.getId(), recs };
-}
-const where = (env, rec) => env.drive.folders[rec.parent].name;
-const U = (minutes) => minutes * 60 * 32; // audio tokens for N minutes
-function vertexOk(env, texts, minutes = 1) {
-  const q = texts.slice();
+  env.inbox = inbox; env.done = inbox.createFolder('Done'); env.problem = inbox.createFolder('Problem');
+  if (!env.props.VOICE_INBOX_FOLDER_ID) env.props.VOICE_INBOX_FOLDER_ID = inbox.getId();
+  env.worker = {};      // source file id -> { text, seconds } (what the fake job "hears")
+  env.objects = {};     // bucket object name -> { size, generation, json }
+  env.jobs = [];
   env.route = (c) => {
-    if (/aiplatform\.googleapis\.com/.test(c.url)) {
-      const t = q.length ? q.shift() : 'Plain transcript.';
-      if (t && t.code) return t;
-      return { code: 200, body: { candidates: [{ content: { parts: [{ text: t }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: U(minutes) + 20, candidatesTokenCount: 300, promptTokensDetails: [{ modality: 'AUDIO', tokenCount: U(minutes) }, { modality: 'TEXT', tokenCount: 20 }] } } };
+    let m;
+    if ((m = /^https:\/\/storage\.googleapis\.com\/upload\/storage\/v1\/b\/[^/]+\/o\?uploadType=resumable&name=(.+)$/.exec(c.url))) return { code: 200, body: '', headers: { Location: 'https://upload.test/' + m[1] } };
+    if ((m = /^https:\/\/upload\.test\/(.+)$/.exec(c.url))) { const name = decodeURIComponent(m[1]); const total = Number(/\/(\d+)$/.exec(c.headers['Content-Range'])[1]); env.objects[name] = { size: total, generation: 'g1' }; return { code: 200, body: '{}' }; }
+    if (/^https:\/\/www\.googleapis\.com\/drive\/v3\/files\//.test(c.url)) return { code: 200, body: '', bytes: [1, 2, 3] };
+    if ((m = /^https:\/\/storage\.googleapis\.com\/upload\/storage\/v1\/b\/[^/]+\/o\?uploadType=media&name=(.+)$/.exec(c.url))) { env.objects[decodeURIComponent(m[1])] = { json: c.body }; return { code: 200, body: '{}' }; }
+    if ((m = /^https:\/\/storage\.googleapis\.com\/storage\/v1\/b\/[^/]+\/o\/([^?]+)(\?alt=media)?$/.exec(c.url))) {
+      const o = env.objects[decodeURIComponent(m[1])];
+      if (!o) return { code: 404, body: '' };
+      return m[2] ? { code: 200, body: o.json } : { code: 200, body: { size: String(o.size), generation: o.generation } };
     }
-    return null;
+    if (/^https:\/\/run\.googleapis\.com\/v2\/.+:run$/.test(c.url)) {
+      const key = c.body.overrides.containerOverrides[0].env[0].value;
+      const req = env.objects['jobs/' + key + '/request.json'].json;
+      env.jobs.push(req);
+      const w = env.worker[req.source_id];
+      if (w) env.objects['jobs/' + key + '/result.json'] = { json: { status: 'complete', pipeline: 'nw-cloud-v1', source_id: req.source_id, source_generation: req.source_generation, intervals_verified: true, completed_sections: 1, expected_sections: 1, text: w.text, duration_seconds: w.seconds } };
+      return { code: 200, body: { name: 'op-' + env.jobs.length } };
+    }
+    return { code: 404, body: 'no route ' + c.url };
   };
+  env.addAudio = (name, text, seconds, extra = {}) => { const rec = env.addFile(Object.assign({ name, mime: 'audio/x-m4a', size: 4000, parent: inbox.getId(), updated: new Date('2026-11-15T10:00:00Z') }, extra)); env.worker[rec.id] = { text, seconds }; return rec; };
+  // The bridge keeps at most two jobs in flight, so run until nothing is waiting (at most 8 runs).
+  env.twoRuns = () => { for (let i = 0; i < 8; i++) { env.run('runVoiceInbox'); if (!Object.keys(env.props).some(k => k.startsWith('NWI_CLOUD_')) && i > 0) break; } };
+  env.auto = () => env.docs[AUTO_DOC].children.map(c => c.text).filter(Boolean);
+  env.bdTexts = () => env.bd.children.map(c => c.text);
+  return env;
 }
-const SAMPLE_A = [
-  'All caught up with pasting transcriptions!',
-  { text: 'Tue, Nov 3, 2026', heading: 'HEADING1', attrs: { fontSize: 20 } },
-  'rock climbing interactions (where is where there\'s this other guy standing by in front of whom I accidentally or like purposely or whatever said, oh my life is not worth much anyway, … because this can be something that really helps physical activity we know that):',
-  'So, you\'re back up the pen. First thing you need to do is secure yourself. Okay. So take your PS.. If you try, you\'re right. And leave the locker on it. …',
-];
+// Recly names: "<UTC stamp>Z_<title>_p001.m4a".
+const RECLY_A = '20261115T113900Z_Walk_home_p001.m4a', RECLY_B = '20261115T113900Z_Walk_home_p002.m4a'; // 2:39 AM in Anchorage
+const where = (env, rec) => env.drive.folders[rec.parent].name;
 const texts = (d) => d.children.map(c => c.text);
 const emptyCount = (d) => d.children.filter(c => !c.text && !c.hr).length;
 const isSubsequence = (small, big) => { let i = 0; for (const x of big) if (i < small.length && x === small[i]) i++; return i === small.length; };
-const NAME_NOV3 = '20261103 091400-AB12.m4a';   // Nov 3, 2026 9:14 AM in Anchorage
-const NAME_NOV3_PM = '20261103 143000-CD34.m4a'; // 2:30 PM
-const NAME_NOV4 = '20261104 080500-EF56.m4a';
 
 // ── Part 1 ──
 function part1() {
-  console.log('\n[1. Voice Inbox: headings, text above the first heading, order, empty paragraphs]');
-  // a. same date as the first Heading 1: added under it, status line kept
+  console.log('\n[V1. Voice: one header line per memo; parts of one recording are one entry]');
   {
-    const env = makeEnv({ now: '2026-11-04T12:00:00Z' }); const s = voiceSetup(env, [{ name: NAME_NOV3 }]);
-    const main = env.newDoc('Transcripts of Voice Recordings', SAMPLE_A);
-    const before = texts(main), empties = emptyCount(main);
-    vertexOk(env, ['First paragraph.\n\nSecond paragraph.']);
+    const env = cloudEnv();
+    const a = env.addAudio(RECLY_A, 'First part of the walk.', 300);
+    const b = env.addAudio(RECLY_B, 'Second part of the walk.', 137);
     env.run('runVoiceInbox');
-    const after = texts(main);
-    eq(after.slice(0, 5), [SAMPLE_A[0], 'Tue, Nov 3, 2026', '(voice memo, 9:14 AM, auto-transcribed from ' + NAME_NOV3 + ')', 'First paragraph.', 'Second paragraph.'], 'same date: entry goes directly under the first Heading 1, status line stays on top');
-    eq(after.slice(5), before.slice(2), 'existing memo text below is untouched and in order');
-    ok(after.length === before.length + 3, 'only the 3 entry lines were added');
-    ok(emptyCount(main) === empties, 'no empty paragraphs added');
-    ok(main.children[2].heading === 'NORMAL' && main.children[1].heading === 'HEADING1', 'entry lines are Normal; the heading is still Heading 1');
-    ok(where(env, s.recs[0]) === 'Done' && /Transcribed .*gemini-2\.5-flash.*us-central1.*nikhils-world/.test(s.recs[0].desc), 'audio moved to Done; description says when and where it was transcribed');
-    const rolling = env.docs[env.props.ROLLING_DOC_ID];
-    eq(texts(rolling), ['Tue, Nov 3, 2026', after[2], 'First paragraph.', 'Second paragraph.'], 'the same entry went into the rolling "last 7 days" doc (no empty first paragraph)');
-    ok(rolling.name === "Nikhil's World — Voice, last 7 days", 'rolling doc has the exact title');
-    const req = env.log.fetches.find(c => /aiplatform/.test(c.url));
-    ok(/us-central1-aiplatform\.googleapis\.com\/v1\/projects\/nikhils-world\/locations\/us-central1\/publishers\/google\/models\/gemini-2\.5-flash:generateContent$/.test(req.url), 'Vertex AI generateContent URL uses the project, region and model');
-    ok(req.headers.Authorization === 'Bearer gas-token', 'uses ScriptApp.getOAuthToken()');
-    ok(req.body.contents[0].parts[0].inlineData && req.body.contents[0].parts[0].inlineData.mimeType === 'audio/mp4', 'small file goes inline');
-    ok(/verbatim/i.test(req.body.contents[0].parts[1].text) && /Never guess/i.test(req.body.contents[0].parts[1].text) && /Speaker 1/.test(req.body.contents[0].parts[1].text), 'prompt asks for verbatim text, speaker labels only for several speakers, no guessed names');
-    ok(!env.log.fetches.some(c => /anthropic|claude\.ai/i.test(c.url)), 'no Anthropic or Claude call');
-    const row = env.logRows().find(r => r[5] === 'done');
-    ok(row && row[1] === NAME_NOV3 && row[2] === 1 && row[3] > 0 && row[4] === 300, 'log sheet row has file, minutes, input and output tokens, status');
-  }
-  // b. new date: a Heading 1 in the same style, directly above the first one, below the status line
-  {
-    const env = makeEnv(); voiceSetup(env, [{ name: NAME_NOV4 }]);
-    const main = env.newDoc('Transcripts of Voice Recordings', SAMPLE_A);
-    vertexOk(env, ['Hello.']);
+    ok(env.jobs.length === 2 && env.jobs.every(j => j.prompt && /Speaker 1:/.test(j.prompt) && /Never guess a name/.test(j.prompt) && /that was Corky/.test(j.prompt)), 'each job carries the speaker rule (Speaker 1:, names only when the recording says them, never guessed)');
     env.run('runVoiceInbox');
-    const t = texts(main);
-    eq(t.slice(0, 5), [SAMPLE_A[0], 'Wed, Nov 4, 2026', '(voice memo, 8:05 AM, auto-transcribed from ' + NAME_NOV4 + ')', 'Hello.', 'Tue, Nov 3, 2026'], 'new date: new Heading 1 directly above the first Heading 1');
-    ok(main.children[1].heading === 'HEADING1' && main.children[1].attrs.fontSize === 20, 'new heading copies the first heading\'s style');
-    ok(isSubsequence(texts({ children: SAMPLE_A.map(x => ({ text: x.text || x })) }), t), 'every original line is still there, in order');
-  }
-  // c. nothing above the first heading / several lines above / no Heading 1 / empty doc
-  const variants = [
-    ['nothing above the first heading', [SAMPLE_A[1], SAMPLE_A[2]], 0, 'Tue, Nov 3, 2026'],
-    ['several lines above the first heading', ['one', 'two', '', 'three', SAMPLE_A[1], SAMPLE_A[2]], 4, 'Tue, Nov 3, 2026'],
-  ];
-  for (const [label, doc, hIdx] of variants) {
-    const env = makeEnv(); voiceSetup(env, [{ name: NAME_NOV3 }]);
-    const main = env.newDoc('Transcripts of Voice Recordings', doc);
-    const before = texts(main), empties = emptyCount(main);
-    vertexOk(env, ['Hi.']);
-    env.run('runVoiceInbox');
-    const t = texts(main);
-    eq(t.slice(0, hIdx + 1), before.slice(0, hIdx + 1), label + ': everything above and including the heading is untouched');
-    eq(t.slice(hIdx + 1, hIdx + 3), ['(voice memo, 9:14 AM, auto-transcribed from ' + NAME_NOV3 + ')', 'Hi.'], label + ': entry directly under the heading');
-    ok(emptyCount(main) === empties, label + ': no empty paragraphs added');
-  }
-  {
-    const env = makeEnv(); voiceSetup(env, [{ name: NAME_NOV3 }]);
-    const main = env.newDoc('Transcripts of Voice Recordings', ['Just my own words', 'More words']);
-    vertexOk(env, ['Hi.']);
-    env.run('runVoiceInbox');
-    eq(texts(main), ['Just my own words', 'More words', 'Tue, Nov 3, 2026', '(voice memo, 9:14 AM, auto-transcribed from ' + NAME_NOV3 + ')', 'Hi.'], 'no Heading 1 at all: heading and entry are appended at the end');
-    ok(main.children[2].heading === 'HEADING1', '...and the appended date is a Heading 1');
-  }
-  {
-    const env = makeEnv(); voiceSetup(env, [{ name: NAME_NOV3 }]);
-    const main = env.newDoc('Transcripts of Voice Recordings', ['']);
-    vertexOk(env, ['Hi.']);
-    env.run('runVoiceInbox');
-    eq(texts(main), ['Tue, Nov 3, 2026', '(voice memo, 9:14 AM, auto-transcribed from ' + NAME_NOV3 + ')', 'Hi.'], 'a completely empty doc is filled without leaving an empty first paragraph');
-  }
-  // d. memo order: oldest processed first, newest at the top of the day
-  {
-    const env = makeEnv(); voiceSetup(env, [{ name: NAME_NOV3_PM }, { name: NAME_NOV3 }]);
-    const main = env.newDoc('Transcripts of Voice Recordings', SAMPLE_A);
-    vertexOk(env, ['Morning words.', 'Afternoon words.']);
-    env.run('runVoiceInbox');
-    eq(texts(main).slice(1, 6), ['Tue, Nov 3, 2026', '(voice memo, 2:30 PM, auto-transcribed from ' + NAME_NOV3_PM + ')', 'Afternoon words.', '(voice memo, 9:14 AM, auto-transcribed from ' + NAME_NOV3 + ')', 'Morning words.'], 'two memos on one day: the newest is at the top of the day');
-  }
-  // e. wrong owner / missing doc: nothing is touched, file stays
-  {
-    const env = makeEnv(); const s = voiceSetup(env, [{ name: NAME_NOV3 }]);
-    env.newDoc('Transcripts of Voice Recordings', SAMPLE_A, { owner: 'someone@else.com' });
-    vertexOk(env, ['x']);
-    env.run('runVoiceInbox');
-    ok(where(env, s.recs[0]) === "Nikhil's World Voice Inbox" && !env.log.fetches.length, 'a doc owned by someone else is not used; the audio stays in the inbox and nothing is sent');
-  }
-  // f. TRANSCRIPTS_DOC_ID override, other time zone
-  {
-    const env = makeEnv({ props: { TIME_ZONE: 'Asia/Kolkata' } }); voiceSetup(env, [{ name: 'Memo.m4a' }]); // modified 2026-11-04 01:00 UTC
-    const other = env.newDoc('Some other title', SAMPLE_A);
-    env.props.TRANSCRIPTS_DOC_ID = other.id;
-    vertexOk(env, ['Hi.']);
-    env.run('runVoiceInbox');
-    eq(texts(other).slice(1, 3), ['Wed, Nov 4, 2026', '(voice memo, 6:30 AM, auto-transcribed from Memo.m4a)'], 'TRANSCRIPTS_DOC_ID and TIME_ZONE are Script Properties; a name without a date uses the file time in the script time zone');
+    const auto = env.auto();
+    ok(auto[0] === 'Sun, Nov 15, 2026', 'the day heading as before');
+    const entries = auto.filter(x => x.startsWith('(voice memo, '));
+    ok(entries.length === 1, 'a two-part recording makes one entry → ' + entries.length);
+    const lines = auto[1].split('\n');
+    eq(lines[0], '(voice memo, 2:39 AM, 5 min 0 s, automatic draft, speakers as heard)', 'one header line: time, length, automatic draft, speakers as heard');
+    ok(!/Automatic draft —|auto-transcribed from/.test(auto.join('\n')), 'the old extra header lines are gone');
+    ok(lines[1] === 'First part of the walk.' && /Source audio: .*\/d\/fi\d+\/view$/.test(lines[2]), 'its text, then its source line');
+    ok(auto[2].startsWith('(continued, part 2, 2 min 17 s)\nSecond part of the walk.') && auto[2].endsWith('/d/' + b.id + '/view'), 'part 2 goes directly under it, as a continuation');
+    ok(env.logRows().filter(r => /cloud draft saved/.test(r[5])).length === 2, 'both parts are logged as saved');
+    // A part that arrives later still goes under the same entry.
+    const c = env.addAudio('20261115T113900Z_Walk_home_p003.m4a', 'Third part, later.', 20);
+    env.twoRuns();
+    const auto2 = env.auto();
+    ok(auto2.filter(x => x.startsWith('(voice memo, ')).length === 1 && auto2[3].startsWith('(continued, part 3, 20 s)') && auto2[3].endsWith('/d/' + c.id + '/view'), 'a part that arrives later goes under the same entry, after part 2');
+    env.twoRuns();
+    ok(env.auto().length === auto2.length, 'running again writes nothing twice');
   }
 
-  console.log('\n[2. Voice Inbox: big file via the bucket, retries, daily cap, rolling doc]');
+  console.log('\n[V2. Voice: empties are skipped and logged]');
   {
-    const env = makeEnv(); const s = voiceSetup(env, [{ name: NAME_NOV3, size: 25 * 1024 * 1024 }]);
-    env.newDoc('Transcripts of Voice Recordings', SAMPLE_A);
-    const orig = vertexOk; orig(env, ['Long memo text.']);
-    const vertexRoute = env.route; let puts = 0;
-    env.route = (c) => {
-      if (c.method === 'post' && /storage\.googleapis\.com\/upload\/storage\/v1\/b\/nikhils-world-nw-inbox-temp\/o\?uploadType=resumable/.test(c.url)) return { code: 200, body: '', headers: { Location: 'https://storage.googleapis.com/resumable/abc' } };
-      if (/^https:\/\/www\.googleapis\.com\/drive\/v3\/files\/.*alt=media/.test(c.url)) { const m = /bytes=(\d+)-(\d+)/.exec(c.headers.Range); return { code: 206, bytes: Buffer.alloc(+m[2] - +m[1] + 1) }; }
-      if (c.method === 'put' && c.url === 'https://storage.googleapis.com/resumable/abc') { puts++; return { code: /-26214399\/26214400$/.test(c.headers['Content-Range']) ? 200 : 308, body: '' }; }
-      if (c.method === 'delete' && /storage\.googleapis\.com\/storage\/v1\/b\/.*\/o\//.test(c.url)) return { code: 204, body: '' };
-      return vertexRoute(c);
-    };
-    env.run('runVoiceInbox');
-    const v = env.log.fetches.find(c => /aiplatform/.test(c.url)), p0 = v.body.contents[0].parts[0];
-    ok(p0.fileData && /^gs:\/\/nikhils-world-nw-inbox-temp\/voice-/.test(p0.fileData.fileUri) && !p0.inlineData, 'file over the inline limit goes to Vertex as a gs:// object, not inline');
-    ok(puts === 4 && env.log.fetches.filter(c => /alt=media/.test(c.url)).length === 4, 'copied to the bucket in four 8 MiB pieces (no single call near the 50 MB limit)');
-    ok(env.log.fetches.some(c => c.method === 'delete' && /\/o\/voice-/.test(c.url)), 'the bucket copy is deleted afterwards');
-    ok(where(env, s.recs[0]) === 'Done', 'big file ends in Done');
-    ok(Math.max(...env.log.fetches.map(c => (typeof c.payload === 'string' ? c.payload.length : 0))) < 50 * 1024 * 1024, 'no request payload near the 50 MB limit');
-  }
-  {
-    const env = makeEnv(); const s = voiceSetup(env, [{ name: NAME_NOV3 }]);
-    const main = env.newDoc('Transcripts of Voice Recordings', SAMPLE_A); const before = texts(main);
-    env.route = (c) => (/aiplatform/.test(c.url) ? { code: 500, body: 'Backend Error' } : null);
-    env.run('runVoiceInbox');
-    ok(where(env, s.recs[0]) === "Nikhil's World Voice Inbox", 'failure 1: file stays in the inbox for a retry');
-    env.run('runVoiceInbox');
-    ok(where(env, s.recs[0]) === "Nikhil's World Voice Inbox", 'failure 2: still in the inbox');
-    env.run('runVoiceInbox');
-    ok(where(env, s.recs[0]) === 'Problem' && /Backend Error/.test(s.recs[0].desc) && /3 times/.test(s.recs[0].desc), 'after the 2 retries it moves to Problem with the error in its description');
-    ok(env.drive.files[s.recs[0].id] && true, 'the audio file is never deleted');
-    eq(texts(main), before, 'nothing was written to the doc');
-    ok(env.logRows().filter(r => /failed|problem/.test(r[5])).length === 3, 'each try is in the log sheet');
-    env.route = (c) => (/aiplatform/.test(c.url) ? { code: 200, body: { candidates: [{ content: { parts: [{ text: 'cut' }] }, finishReason: 'MAX_TOKENS' }] } } : null);
-  }
-  {
-    // a cut-off answer is never written
-    const env = makeEnv(); const s = voiceSetup(env, [{ name: NAME_NOV3 }]);
-    const main = env.newDoc('Transcripts of Voice Recordings', SAMPLE_A); const before = texts(main);
-    env.route = (c) => ({ code: 200, body: { candidates: [{ content: { parts: [{ text: 'cut' }] }, finishReason: 'MAX_TOKENS' }] } });
-    env.run('runVoiceInbox');
-    eq(texts(main), before, 'a cut-off transcript (MAX_TOKENS) is not written');
-    ok(/cut off/.test(JSON.stringify(env.logRows())), '...and the log says why');
-  }
-  {
-    // a retry after a good write does not write twice
-    const env = makeEnv(); const s = voiceSetup(env, [{ name: NAME_NOV3 }]);
-    const main = env.newDoc('Transcripts of Voice Recordings', SAMPLE_A);
-    vertexOk(env, ['Once.']);
-    const rec = s.recs[0]; let broke = true; const mv = rec;
-    const origSet = env.DriveApp.getFileById;
-    env.run('runVoiceInbox');
-    const once = texts(main).filter(x => x === 'Once.').length;
-    // simulate: put the file back and run again => it is transcribed again only if not recorded as written
-    rec.parent = s.inbox; env.run('runVoiceInbox');
-    ok(once === 1 && texts(main).filter(x => x === 'Once.').length === 1, 'a file whose text was already written is only moved, not written twice');
-  }
-  {
-    const env = makeEnv({ props: { DAILY_CAP_MINUTES: '10' } });
-    const s = voiceSetup(env, [{ name: NAME_NOV3, size: 5 * 240000 }, { name: NAME_NOV3_PM, size: 8 * 240000 }]); // 5 and 8 minutes at the 32 kbps guess
-    env.newDoc('Transcripts of Voice Recordings', SAMPLE_A);
-    vertexOk(env, ['one', 'two'], 5);
-    env.run('runVoiceInbox');
-    ok(where(env, s.recs[0]) === 'Done' && where(env, s.recs[1]) === "Nikhil's World Voice Inbox", 'daily cap: the second memo waits (5 + 8 > 10 minutes)');
-    ok(env.log.fetches.filter(c => /aiplatform/.test(c.url)).length === 1, '...and Vertex is not called for it');
-    ok(env.logRows().some(r => /waiting: daily cap/.test(r[5])), '...and the log says so');
-    env.run('runVoiceInbox');
-    ok(where(env, s.recs[1]) === "Nikhil's World Voice Inbox", 'still waiting later the same day');
-    const u = JSON.parse(env.props.VOICE_USED); u.day = '2000-01-01'; env.props.VOICE_USED = JSON.stringify(u);
-    env.run('runVoiceInbox');
-    ok(where(env, s.recs[1]) === 'Done', 'next day the count starts again and it goes through');
-  }
-  {
-    const env = makeEnv({ props: { DAILY_CAP_MINUTES: '10' } });
-    const s = voiceSetup(env, [{ name: NAME_NOV3, size: 20 * 240000 }]);
-    env.newDoc('Transcripts of Voice Recordings', SAMPLE_A); vertexOk(env, ['x']);
-    env.run('runVoiceInbox');
-    ok(where(env, s.recs[0]) === 'Problem' && /daily cap/.test(s.recs[0].desc) && !env.log.fetches.length, 'a memo longer than the whole daily cap goes to Problem with the reason (it could never run)');
-  }
-  {
-    const env = makeEnv(); const s = voiceSetup(env, [{ name: NAME_NOV3 }, { name: 'notes.pdf', mime: 'application/pdf' }, { name: 'song.mp3', mime: 'audio/mpeg' }]);
-    env.newDoc('Transcripts of Voice Recordings', SAMPLE_A); vertexOk(env, ['a', 'b']);
-    env.run('runVoiceInbox');
-    ok(where(env, s.recs[1]) === "Nikhil's World Voice Inbox" && where(env, s.recs[0]) === 'Done' && where(env, s.recs[2]) === 'Done', 'm4a and mp3 are picked up; a PDF is left alone');
-    env.lockOk = false; s.recs[0].parent = s.inbox; const before = env.log.fetches.length;
-    env.run('runVoiceInbox');
-    ok(env.log.fetches.length === before, 'if another run holds the lock, this run does nothing');
-  }
-  {
-    const env = makeEnv(); voiceSetup(env, [{ name: NAME_NOV3 }]);
-    env.newDoc('Transcripts of Voice Recordings', SAMPLE_A); vertexOk(env, ['Fresh.']);
-    const d = (days) => { const t = new Date(Date.now() - days * DAY); return env.fmt(t, 'EEE, MMM d, yyyy'); };
-    const H = (x) => ({ text: x, heading: 'HEADING1' });
-    const rolling = env.newDoc("Nikhil's World — Voice, last 7 days", [H(d(2)), 'recent entry', H(d(9)), 'old entry', 'old entry 2', H(d(30)), 'ancient']);
-    env.props.ROLLING_DOC_ID = rolling.id;
-    const stamp = env.fmt(new Date(Date.now() - 1 * DAY), 'yyyyMMdd HHmmss').replace(/^(\d{4})(\d{2})(\d{2})/, '$1$2$3');
-    const rec = Object.values(env.drive.files).find(f => f.name === NAME_NOV3); rec.name = env.fmt(new Date(Date.now() - 1 * DAY), 'yyyy-MM-dd').replace(/-/g, '') + ' 091400-ZZ.m4a';
-    env.run('runVoiceInbox');
-    const t = texts(rolling);
-    ok(!t.includes('old entry') && !t.includes('old entry 2') && !t.includes('ancient') && !t.includes(d(9)) && !t.includes(d(30)), 'rolling doc: days older than 7 days are dropped');
-    ok(t.includes('recent entry') && t.includes('Fresh.') && t[0] === d(1), 'rolling doc: recent days stay and the new entry is on top under its date');
-    ok(texts(env.docs[Object.keys(env.docs).find(k => env.docs[k].name === 'Transcripts of Voice Recordings')]).includes('Tue, Nov 3, 2026'), 'trimming never touches his own doc');
+    const env = cloudEnv();
+    const one = env.addAudio('20261115 022200-AB12.m4a', 'Hello.', 1);
+    const mute = env.addAudio('20261115 022500-CD34.m4a', '[No intelligible speech]', 40);
+    const mute2 = env.addAudio('20261115 022600-EF56.m4a', 'Speaker 1: [inaudible]\nSpeaker 2: [inaudible]', 12);
+    env.twoRuns();
+    ok(env.auto().filter(x => x.startsWith('(voice memo, ')).length === 0, 'a 1-second memo and memos with no intelligible speech make no entry');
+    const rows = env.logRows().filter(r => /skipped: under 3 seconds or no intelligible speech/.test(r[5])).map(r => r[1]);
+    ok(rows.includes(one.name) && rows.includes(mute.name) && rows.includes(mute2.name), 'each is logged in the log sheet → ' + JSON.stringify(rows));
+    ok(where(env, one) === 'Done' && /Skipped: under 3 seconds/.test(one.desc), 'the file is marked and moved to Done, so it is not tried again');
   }
 
-  console.log('\n[3. setupInbox]');
+  console.log('\n[V3. Voice: every memo reaches the Brain Dump (tagged with its tag), except work]');
   {
-    const env = makeEnv();
-    env.route = (c) => {
-      if (c.method === 'get' && /storage\/v1\/b\/nikhils-world-nw-inbox-temp$/.test(c.url)) return { code: env.bucketMade ? 200 : 404, body: {} };
-      if (c.method === 'post' && /storage\/v1\/b\?project=nikhils-world/.test(c.url)) { env.bucketMade = true; env.bucketBody = c.body; return { code: 200, body: {} }; }
-      if (c.method === 'patch') { env.patched = c.body; return { code: 200, body: {} }; }
-      return null;
-    };
-    const rep = env.run('setupInbox');
-    const names = Object.values(env.drive.folders).map(f => f.name);
-    ok(['Nikhil\'s World Voice Inbox', 'Done', 'Problem', 'Fireflies Meetings'].every(n => names.includes(n)), 'creates the Voice Inbox with Done and Problem, and Fireflies Meetings');
-    ok(env.bucketBody && env.bucketBody.lifecycle.rule[0].action.type === 'Delete' && env.bucketBody.lifecycle.rule[0].condition.age === 1, 'creates the bucket with a 1-day delete rule');
-    ok(Object.values(env.drive.files).some(f => f.name === 'NW Inbox log'), 'creates the log sheet');
-    ok(env.log.triggers.length === 2 && env.log.triggers.some(t => t.fn === 'runVoiceInbox' && t.minutes === 15) && env.log.triggers.some(t => t.fn === 'runFireflies' && t.hours === 2), 'two triggers: voice every 15 minutes, Fireflies every 2 hours');
-    ok(/MISSING Script Property: FIREFLIES_API_KEY/.test(env.log.logs.join('\n')), 'names the missing Script Property');
-    ok(env.props.FIREFLIES_START_DATE === env.fmt(new Date(), 'yyyy-MM-dd'), 'FIREFLIES_START_DATE defaults to the day setup runs');
-    const folders = Object.keys(env.drive.folders).length, files = Object.keys(env.drive.files).length;
-    env.run('setupInbox');
-    ok(env.log.triggers.length === 2 && Object.keys(env.drive.folders).length === folders && Object.keys(env.drive.files).length === files, 'safe to run twice: no duplicate triggers, folders or files');
-    ok(env.patched && env.patched.lifecycle, 'second run re-applies the bucket delete rule');
-    ok(!/AIza|sk-|private_key|Bearer [A-Za-z0-9]{20,}/.test(SRC.map(x => x.s).join('\n')), 'no keys or tokens in the .gs files');
-    ok(!/anthropic|api\.claude/i.test(SRC.map(x => x.s).join('\n').replace(/Anthropic \/ Claude API is called anywhere here|No Anthropic or Claude/g, '')), 'no Anthropic or Claude API calls in the .gs files');
+    const env = cloudEnv();
+    env.addAudio('20261115 023900-T1.m4a', 'Task, email Dr. Shobha about Thursday.', 9);
+    env.addAudio('20261115 024500-T2.m4a', 'Speaker 1: Note, we decided to walk instead of drive.\nSpeaker 2: And we leave at four.', 30);
+    env.addAudio('20261115 025000-T3.m4a', 'Just thinking out loud about dinner.', 15);
+    env.addAudio('20261115 025500-T4.m4a', 'Work, send the survey reminder.', 6);
+    env.twoRuns();
+    const bd = env.bdTexts();
+    ok(bd[0] === 'Sunday, Nov 15, 2026' && env.bd.children[0].heading === 'HEADING1' && bd.includes('Saturday, Nov 14, 2026'), "a new day heading in the app's format (Sunday, Nov 15, 2026) at the top; older text kept");
+    const task = bd.filter(x => /^task: /.test(x));
+    eq(task, ['task: email Dr. Shobha about Thursday. (voice, 2:39 AM)'], 'a memo starting "task" makes one Brain Dump paragraph, the tag in front, ending (voice, 2:39 AM)');
+    const note = bd.filter(x => /^note:/.test(x));
+    eq(note, ['note:\nNikhil: we decided to walk instead of drive.\nSpeaker 2: And we leave at four. (voice, 2:45 AM)'], 'a two-speaker tagged memo makes one paragraph with both speaker labels on their own lines; the one who says the tag word is Nikhil');
+    ok(env.auto().some(x => /\nNikhil: Note, we decided to walk instead of drive\.\nSpeaker 2: And we leave at four\./.test(x)), 'the transcript doc says Nikhil too');
+    eq(bd.filter(x => /dinner/.test(x)), ['Just thinking out loud about dinner. (voice, 2:50 AM)'], 'an untagged memo goes into the Brain Dump too, as said, with no tag (Nov 16)');
+    ok(env.auto().some(x => /dinner/.test(x)), '...and stays in the transcript doc');
+    ok(!bd.some(x => /survey reminder/.test(x)), 'a memo starting "work" does not go to the Brain Dump');
+    // The worker may number him second: he is still Nikhil, and the others are Speaker 2, Speaker 3 in the order they speak.
+    const e3 = cloudEnv();
+    e3.addAudio('20261115 030000-T5.m4a', 'Speaker 2: Joy, Corky made soup.\nSpeaker 1: It was the lentil one.\nSpeaker 3: I helped.\nSpeaker 1: She did.', 20);
+    e3.addAudio('20261115 030500-T6.m4a', 'Speaker 1: So what about dinner?\nSpeaker 2: Not sure yet.', 10);
+    e3.twoRuns();
+    eq(e3.bdTexts().filter(x => /^joy:/.test(x)), ['joy:\nNikhil: Corky made soup.\nSpeaker 2: It was the lentil one.\nSpeaker 3: I helped.\nSpeaker 2: She did. (voice, 3:00 AM)'], 'the tag speaker is Nikhil wherever the worker numbered him; the others are Speaker 2, Speaker 3');
+    ok(e3.auto().some(x => /Speaker 1: So what about dinner\?/.test(x)) && !e3.auto().some(x => /Nikhil: So what/.test(x)), 'an untagged memo keeps the worker\'s labels');
+    eq(e3.bdTexts().filter(x => /dinner/.test(x)), ['Speaker 1: So what about dinner?\nSpeaker 2: Not sure yet. (voice, 3:05 AM)'], 'an untagged two-speaker memo goes into the Brain Dump with its labels on their own lines');
+    ok(/label the person who says that first word "Nikhil:"/.test(e3.jobs[0].prompt), 'the rule sent with each job says so');
+    env.twoRuns();
+    ok(env.bdTexts().filter(x => /^task: /.test(x)).length === 1, 'running again adds nothing to the Brain Dump');
+    const env2 = cloudEnv();
+    env2.bd.name = 'Brain Dump Oct 2026'; env2.drive.files[env2.bd.id].name = 'Brain Dump Oct 2026';
+    env2.addAudio('20261115 023900-T1.m4a', 'Task, call the bank.', 5);
+    env2.twoRuns();
+    ok(env2.auto().some(x => /call the bank/.test(x)) && env2.logRows().some(r => /Brain Dump not updated: no doc named "Brain Dump Nov 2026"/.test(r[5])), "no Brain Dump doc for this month: the transcript is still written and the log says why");
+  }
+
+  console.log('\n[V4. Time zone by date (TZ_SCHEDULE)]');
+  {
+    const sched = JSON.stringify([{ from: '2026-12-16', tz: 'Asia/Kolkata' }, { from: '2027-03-06', tz: 'America/Anchorage' }]);
+    const tzAt = (now) => { const e = makeEnv({ now, props: { TZ_SCHEDULE: sched } }); return e.run('nwiTz_'); };
+    ok(tzAt('2026-11-15T18:00:00Z') === 'America/Anchorage', 'before Dec 16: TIME_ZONE (America/Anchorage)');
+    ok(tzAt('2026-12-20T06:00:00Z') === 'Asia/Kolkata', 'from Dec 16: Asia/Kolkata');
+    ok(tzAt('2027-03-10T06:00:00Z') === 'America/Anchorage', 'from Mar 6: America/Anchorage again');
+    const bad = makeEnv({ props: { TZ_SCHEDULE: 'not json', TIME_ZONE: 'Asia/Kolkata' } });
+    ok(bad.run('nwiTz_') === 'Asia/Kolkata', 'an unreadable schedule falls back to TIME_ZONE');
+    const env = cloudEnv({ now: '2026-12-20T06:00:00Z', props: { TZ_SCHEDULE: sched } });
+    env.addAudio('20261220 093000-IN1.m4a', 'Task, buy a SIM card.', 8, { updated: new Date('2026-12-20T05:00:00Z') });
+    env.bd.name = 'Brain Dump Dec 2026'; env.drive.files[env.bd.id].name = 'Brain Dump Dec 2026';
+    env.twoRuns();
+    ok(env.auto()[1].startsWith('(voice memo, 9:30 AM,') && env.bdTexts()[0] === 'Sunday, Dec 20, 2026', 'in India the memo name and the headings use Asia/Kolkata time');
+  }
+
+  console.log('\n[V5. installCloudInbox leaves ENABLE_FIREFLIES and ENABLE_ACOUSTIC_NOTES alone]');
+  {
+    const env = cloudEnv({ props: { ENABLE_FIREFLIES: 'true', ENABLE_ACOUSTIC_NOTES: 'true', VOICE_INBOX_FOLDER_ID: '1eK3WUc2Xzms-BryXZOnI4JPbZkJVmSVl', RECLY_ROOT_FOLDER_ID: '1b1150ALWKLMQssqBl-biUAZS4O7sA_7z' } });
+    env.drive.folders['1eK3WUc2Xzms-BryXZOnI4JPbZkJVmSVl'] = { id: '1eK3WUc2Xzms-BryXZOnI4JPbZkJVmSVl', name: "Nikhil's World Voice Inbox", parent: 'root' };
+    env.drive.folders['1b1150ALWKLMQssqBl-biUAZS4O7sA_7z'] = { id: '1b1150ALWKLMQssqBl-biUAZS4O7sA_7z', name: 'Recly', parent: 'root' };
+    const r = env.route;
+    env.route = (c) => (/run\.googleapis\.com\/v2\/.+\/jobs\/[^:]+$/.test(c.url) || /storage\/v1\/b\/[^/]+$/.test(c.url) ? { code: 200, body: '{}' } : r(c));
+    let err = null;
+    try { env.run('installCloudInbox'); } catch (e) { err = e; }
+    ok(!err, 'installCloudInbox runs → ' + (err && err.message));
+    ok(env.props.ENABLE_FIREFLIES === 'true' && env.props.ENABLE_ACOUSTIC_NOTES === 'true', 'it leaves ENABLE_FIREFLIES and ENABLE_ACOUSTIC_NOTES as they were');
+    ok(env.log.triggers.some(t => t.getHandlerFunction() === 'runFireflies'), 'so the Fireflies timer stays installed');
+    const fresh = cloudEnv({ props: { VOICE_INBOX_FOLDER_ID: '1eK3WUc2Xzms-BryXZOnI4JPbZkJVmSVl' } });
+    fresh.drive.folders['1eK3WUc2Xzms-BryXZOnI4JPbZkJVmSVl'] = { id: '1eK3WUc2Xzms-BryXZOnI4JPbZkJVmSVl', name: "Nikhil's World Voice Inbox", parent: 'root' };
+    fresh.drive.folders['1b1150ALWKLMQssqBl-biUAZS4O7sA_7z'] = { id: '1b1150ALWKLMQssqBl-biUAZS4O7sA_7z', name: 'Recly', parent: 'root' };
+    const r2 = fresh.route;
+    fresh.route = (c) => (/run\.googleapis\.com\/v2\/.+\/jobs\/[^:]+$/.test(c.url) || /storage\/v1\/b\/[^/]+$/.test(c.url) ? { code: 200, body: '{}' } : r2(c));
+    fresh.run('installCloudInbox');
+    ok(fresh.props.ENABLE_FIREFLIES === 'false' && fresh.props.ENABLE_ACOUSTIC_NOTES === 'false', 'when they were never set, it sets both to false as before');
+  }
+
+  console.log('\n[V6. No keys in the project files]');
+  {
+    const all = SRC.map(x => x.s).join('\n');
+    ok(!/AIza[0-9A-Za-z_-]{20,}|-----BEGIN|"private_key"|FIREFLIES_API_KEY\s*[:=]\s*['"][^'"]{8,}/.test(all), 'no API key, private key or service-account file in tools/inbox');
   }
 }
 
