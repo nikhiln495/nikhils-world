@@ -515,9 +515,79 @@ async function part3() {
 
 }
 
+// ───────────────────────── Part 4 ─────────────────────────
+async function part4() {
+  console.log('\n[v5 4a. Wake up on the first screen; ?start=waking; Overwhelm]');
+  {
+    const ctx = await open({ offline: true });
+    const { page } = ctx;
+    ok(await page.locator('[data-nw-wakeup]').count() === 1 && await page.locator('[data-nw-wakeup]').isVisible(), 'the first screen has one Wake up button at the top');
+    ok(await page.evaluate(() => { const b = document.querySelector('[data-nw-wakeup]'); return b.parentElement.firstElementChild === b; }), 'it is the first thing on that screen');
+    await page.locator('[data-nw-wakeup]').click();
+    await page.waitForSelector('text=Where are you?', { timeout: 10000 });
+    ok(true, 'offline: Wake up opens Waking up ("Where are you?")');
+    await page.getByRole('button', { name: 'Eyes closed', exact: true }).click();
+    await wait(page, 300);
+    if (!(await page.locator('.pr-root').innerText()).includes("What's in the way?")) await page.locator('.pr-root').getByRole('button', { name: 'Next', exact: true }).click();
+    ok(await page.getByRole('button', { name: 'Overwhelm', exact: true }).count() === 1, '"What\'s in the way?" offers Overwhelm');
+    await page.getByRole('button', { name: 'Overwhelm', exact: true }).click();
+    await wait(page, 1500); // the waking draft saves about 1 s after a change
+    // Leave and come back by the button: the draft in progress resumes where it was.
+    await page.getByRole('button', { name: '✕ Close' }).click();
+    await page.getByRole('button', { name: 'Play', exact: true }).click();
+    await page.locator('[data-nw-wakeup]').click();
+    await wait(page, 600);
+    ok((await page.locator('.pr-root').innerText()).includes("What's in the way?") && await page.getByRole('button', { name: /Overwhelm$/ }).getAttribute('aria-pressed') === 'true', 'a waking draft in progress resumes (Overwhelm still picked)');
+    await page.locator('.pr-root').getByRole('button', { name: 'Next', exact: true }).click();
+    await wait(page, 300);
+    ok((await page.locator('.pr-root').innerText()).includes('Breathe out slowly 3 times'), 'Overwhelm adds a breath-out step that can be done in place');
+    await page.getByRole('button', { name: "I'm up and moving" }).click();
+    await wait(page, 800);
+    const log = await page.evaluate(() => JSON.parse(window.storage.dev.getItem('practice:log:2026_11_15')).entries);
+    const rec = log.find(e => e.source === 'app-waking');
+    ok(rec && /In the way: Overwhelm/.test(rec.note) && rec.wake, 'Overwhelm is saved in the waking record → ' + (rec && rec.note));
+    await finish(ctx, 'wake up');
+  }
+  {
+    const ctx = await open({ fakeFirestore: null, seed: F.base() });
+    const { page } = ctx;
+    const { ORIGIN } = require('./p1-check');
+    await page.goto(ORIGIN + '/?start=waking');
+    await page.waitForFunction(() => document.querySelector('nav button'), null, { timeout: 60000 });
+    await page.waitForSelector('text=Where are you?', { timeout: 15000 });
+    ok(true, '?start=waking opens straight into Waking up');
+    await finish(ctx, 'start=waking');
+  }
+
+  console.log('\n[v5 4b. Other tabs unchanged; the morning briefing copy]');
+  {
+    const seed = { ...F.base(), 'practice:three:2026_11': JSON.stringify({ month: '2026_11', entries: [{ id: 't3_a', at: '2026-11-15T17:00:00.000Z', date: '2026-11-15', kind: 'pick', slot: 'academic', text: 'Read chapter 4' }] }) };
+    const ctx = await open({ fakeFirestore: null, seed });
+    const { page } = ctx;
+    for (const tab of ['Kaizen', 'Practice', 'System']) {
+      await page.getByRole('button', { name: tab, exact: true }).click(); await wait(page, 300);
+      ok(!(await page.locator('[data-nw-wakeup]').isVisible()), `${tab}: no Wake up button`);
+    }
+    await page.getByRole('button', { name: 'Practice', exact: true }).click(); await wait(page, 1500); // Today's three loads
+    await page.getByRole('button', { name: 'Play', exact: true }).click(); await wait(page, 300);
+    await page.locator('[title="Copy morning briefing prompt"]:visible').first().click();
+    await wait(page, 400);
+    const text = await page.evaluate(() => navigator.clipboard.readText());
+    ok(!/kaizen/i.test(text), 'the copied briefing has no Kaizen line');
+    ok(/1\. Today's three .*Academic: Read chapter 4; Other: not picked; Self-nourishment: not picked/.test(text), "it starts with today's three → " + text.split('\n')[2]);
+    const i3 = text.indexOf("Today's three"), iMust = text.indexOf('What must happen today'), iRead = text.indexOf('Then read');
+    ok(i3 > 0 && iMust > i3 && iRead > iMust && /Universal Spark Ledger.*Brain Dump.*voice transcripts.*Fireflies.*Apple Health for the last 3 to 7 days/.test(text), 'then what must happen today, then the sources to read, in that order');
+    await finish(ctx, 'briefing');
+    const c2 = await open({ fakeFirestore: null, seed: F.base() });
+    await c2.page.locator('[title="Copy morning briefing prompt"]:visible').first().click(); await wait(c2.page, 300);
+    ok(/none chosen yet\. Suggest three\./.test(await c2.page.evaluate(() => navigator.clipboard.readText())), 'with none chosen it asks to suggest three');
+    await finish(c2, 'briefing none');
+  }
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
-  const parts = { 1: part1, 2: part2, 3: part3 };
+  const parts = { 1: part1, 2: part2, 3: part3, 4: part4 };
   for (const [k, fn] of Object.entries(parts)) if (which === 'all' || which === k) await fn();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
