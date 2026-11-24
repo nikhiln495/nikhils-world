@@ -8892,7 +8892,6 @@ function CreativeRoulette() {
   const mediaRecorderRef = useRef(null);
   const recordStreamRef = useRef(null);
   const recordChunksRef = useRef([]);
-  const glance = window.useGlanceData();
 
   // Seed entries — recovered from chat after storage loss
   const SEED_ENTRIES = [
@@ -9286,7 +9285,7 @@ function CreativeRoulette() {
     <div style={{ minHeight: "100vh", background: "#0f0f0f", color: "#eee", fontFamily: "'Space Mono', 'Courier New', monospace", padding: 0, margin: 0 }}>
       <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
 
-      <window.TodayStrip data={glance} theme="dark" onPendingClick={() => window.dispatchEvent(new CustomEvent('open-pending'))}/>
+      {/* Nov 20 feedback: the Protein / Deficit / RHR / Sleep strip is gone from Roulette (unused, and it covered the wake-up section). */}
 
       <div style={{ padding: "20px 20px 14px", borderBottom: "1px solid #333", background: "linear-gradient(180deg, #1a1a1a 0%, #0f0f0f 100%)" }}>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:12 }}>
@@ -13345,15 +13344,27 @@ const nwDumpPasteTitle = (d = new Date()) => `Brain Dump Pastes ${d.toLocaleDate
 const nwDumpHeading = (d = new Date()) => d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
 const nwDumpStamp = (d = new Date()) => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 // Who said it (Nov 15): 'mine' (or empty) adds nothing; 'ai' adds ", AI draft"; a name adds ", words: <name>". No model or company is named.
+// Several at once (Nov 23) is one string, "Flora, Sophie" or "Nikhil, AI draft" (see nwWordsStr).
 const nwDumpWho = (w) => (!w || w === 'mine' ? '' : w === 'ai' ? ', AI draft' : `, words: ${String(w).replace(/[()\n]/g, ' ').trim()}`);
+// Whose words picked as a list (['mine'], ['Flora', 'ai'], …) → what a capture keeps in `words`.
+const nwWordsStr = (list) => {
+  const l = (list || []).filter(Boolean);
+  if (!l.length || (l.length === 1 && l[0] === 'mine')) return 'mine';
+  if (l.length === 1 && l[0] === 'ai') return 'ai';
+  return l.map(w => (w === 'mine' ? 'Nikhil' : w === 'ai' ? 'AI draft' : w)).join(', ');
+};
+const nwWordsList = (w) => (!w || w === 'mine' ? ['mine'] : w === 'ai' ? ['ai'] : String(w).split(', ').map(x => (x === 'Nikhil' ? 'mine' : x === 'AI draft' ? 'ai' : x)));
+// Tags (several at once since Nov 20) are kept as one string: "task: wins:".
+const nwTagList = (tag) => String(tag || '').split(/\s+/).filter(Boolean);
 const nwDumpSuffix = (d = new Date(), words) => `(from Nikhil's World, ${nwDumpStamp(d)}${nwDumpWho(words)})`;
 // These tags keep one Brain Dump paragraph per typed line (his Nov 9 note). Any other tag, or none, keeps the lines together.
+// Since Nov 17 the stamp goes once, on the last line, not on every line; the tags stay on every line (each task stands alone).
 const D_SPLIT_TAGS = ['task:', 'done:', 'wins:'];
 const D_PASTE_LINES = 12, D_PASTE_CHARS = 1500;
 // A soft line break: a new line inside one paragraph (tested against a Google Doc on Nov 15: it shows as a line break).
 const D_LINE_BREAK = '\u000b';
 // What a capture becomes: { paras, paste }.
-//  • task:, done:, wins: — one paragraph per line, each with the tag and the stamp.
+//  • task:, done:, wins: — one paragraph per line, each with the tags; the stamp once, after the last line.
 //  • anything else up to 12 lines and 1,500 characters — one paragraph: the tag once, the lines kept (soft line breaks), the stamp once.
 //    A line that starts with a name and a colon ("Corky:", "Me:") is its own line, never joined to another.
 //  • longer — a paste: the full text goes to "Brain Dump Pastes <Mon YYYY>"; the Brain Dump gets one pointer line.
@@ -13361,7 +13372,7 @@ function nwDumpShape(text, tag, d = new Date(), words) {
   const lines = String(text || '').split('\n').map(x => x.trim()).filter(Boolean);
   if (!lines.length) return { paras: [], paste: null };
   const t = tag ? tag + ' ' : '', sfx = nwDumpSuffix(d, words);
-  if (D_SPLIT_TAGS.includes(tag)) return { paras: lines.map(x => `${t}${x} ${sfx}`), paste: null };
+  if (nwTagList(tag).some(x => D_SPLIT_TAGS.includes(x))) return { paras: lines.map((x, i) => `${t}${x}${i === lines.length - 1 ? ' ' + sfx : ''}`), paste: null };
   const chars = lines.join('\n').length;
   if (lines.length <= D_PASTE_LINES && chars <= D_PASTE_CHARS) return { paras: [`${t}${lines.join(D_LINE_BREAK)} ${sfx}`], paste: null };
   const start = lines[0].length > 60 ? lines[0].slice(0, 60) + '…' : lines[0];
@@ -13459,11 +13470,13 @@ async function nwDumpAdd(paras, now = new Date(), opts = {}) {
 // device only (NW_DEV.dump, NW-DEVICE-CACHE) and never reaches the database. Captures made before this change were on this
 // device only; the first load moves them (status kept) and leaves only the work ones there.
 const NW_CAP_WORK = /\b(vine|asmp|starr|rti)\b/i;
-const nwCapIsWork = (c) => /^work:?$/i.test(String((c && c.tag) || '').trim()) || /^\s*work:/i.test(String((c && c.text) || '')) || NW_CAP_WORK.test(`${(c && c.tag) || ''} ${(c && c.text) || ''}`);
+const nwCapIsWork = (c) => nwTagList(c && c.tag).some(x => /^work:?$/i.test(x)) || /^\s*work:/i.test(String((c && c.text) || '')) || NW_CAP_WORK.test(`${(c && c.tag) || ''} ${(c && c.text) || ''}`);
 const nwCapKey = (mk) => `dump:captures:${mk}`;
 const nwCapMonth = (c) => pMonthKey(new Date(c.at));
 const NWC = { subs: new Set(), cloud: {}, ready: null };
 const nwCapDevice = () => nwDev.get(NW_DEV.dump, []);
+// "Mac Safari wfew" → "your Mac (Safari)": the last 4 letters only tell two devices apart.
+const nwDevName = (label) => { const m = String(label || '').match(/^(\S+)(?: (\S+))?(?: [a-z0-9]{4})?$/); return m ? `your ${m[1]}${m[2] ? ` (${m[2]})` : ''}` : String(label || 'another device'); };
 const nwCapMe = () => { try { return window.storage.deviceLabel(); } catch (_) { return ''; } };
 // Every capture this device knows of (all devices, the months read so far, plus this device's work captures), oldest first.
 const nwCaptures = () => {
@@ -13596,25 +13609,33 @@ window.nwBrainDump = {
 
 // "Whose words?" under the tags: Mine (default), the Joy names, AI draft, Someone else (a typed name). Kept on the capture as `words`.
 function DumpWhose({ words, setWords }) {
-  const names = pUseJoyNames();
+  const joyNames = pUseJoyNames();
+  const caps = useCaptures();
   const [other, setOther, clearOther] = useDeviceDraft('dump-words-name', '');
   const [typing, setTyping] = useState(false);
-  const pick = (w) => { setTyping(false); setWords(w); };
-  const known = new Set(['mine', 'ai', ...names]);
-  const chip = (label, w, on) => <button key={label} aria-pressed={on} onClick={() => pick(w)} style={{ ...nwQuickBtn, minHeight: 32, padding: '4px 8px', ...(on ? nwQuickBtnOn : {}) }}>{label}</button>;
+  // Names typed before (Nov 23): every name used on an earlier capture is offered again.
+  const names = [...joyNames];
+  caps.forEach(c => nwWordsList(c.words).forEach(n => { if (n !== 'mine' && n !== 'ai' && !names.includes(n)) names.push(n); }));
+  (words || []).forEach(n => { if (n !== 'mine' && n !== 'ai' && !names.includes(n)) names.push(n); });
+  const sel = words && words.length ? words : ['mine'];
+  // Tap to add or remove. Nothing picked means Mine.
+  // Mine is the default: the first other pick replaces it; tap Mine again to keep it alongside.
+  const add = (w) => (sel.length === 1 && sel[0] === 'mine' && w !== 'mine' ? [w] : [...sel.filter(x => x !== w), w]);
+  const toggle = (w) => { setTyping(false); const next = sel.includes(w) ? sel.filter(x => x !== w) : add(w); setWords(next.length ? next : ['mine']); };
+  const chip = (label, w) => { const on = sel.includes(w); return <button key={label} aria-pressed={on} onClick={() => toggle(w)} style={{ ...nwQuickBtn, minHeight: 32, padding: '4px 8px', ...(on ? nwQuickBtnOn : {}) }}>{label}</button>; };
+  const use = () => { const n = other.trim(); if (!n) return; setWords(add(n)); clearOther(); setTyping(false); };
   return (
     <div data-nw-dump-whose style={{ marginTop: 8 }}>
-      <div style={nwQuickLabel}>WHOSE WORDS?</div>
+      <div style={nwQuickLabel}>WHOSE WORDS? (PICK ANY)</div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
-        {chip('Mine', 'mine', !words || words === 'mine')}
-        {names.map(n => chip(n, n, words === n))}
-        {chip('AI draft', 'ai', words === 'ai')}
-        {!known.has(words || 'mine') && words ? chip(words, words, true) : null}
+        {chip('Mine', 'mine')}
+        {names.map(n => chip(n, n))}
+        {chip('AI draft', 'ai')}
         <button aria-pressed={typing} onClick={() => setTyping(!typing)} style={{ ...nwQuickBtn, minHeight: 32, padding: '4px 8px', ...(typing ? nwQuickBtnOn : {}) }}>Someone else</button>
       </div>
       {typing && <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-        <input aria-label="Whose words: name" value={other} onChange={e => setOther(e.target.value)} placeholder="Their name" style={{ ...nwQuickInput, flex: 1 }} />
-        <button style={nwQuickBtn} disabled={!other.trim()} onClick={() => { setWords(other.trim()); clearOther(); setTyping(false); }}>Use</button>
+        <input aria-label="Whose words: name" value={other} onChange={e => setOther(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') use(); }} placeholder="Their name" style={{ ...nwQuickInput, flex: 1 }} />
+        <button style={nwQuickBtn} disabled={!other.trim()} onClick={use}>Use</button>
       </div>}
     </div>
   );
@@ -13622,8 +13643,10 @@ function DumpWhose({ words, setWords }) {
 
 function DumpPanel({ tab, onDone }) {
   const [text, setText, clearText] = useDeviceDraft('dump-text', '');
-  const [tag, setTag] = useState('');
-  const [words, setWords] = useState('mine');
+  const [tags, setTags] = useState([]);
+  const tag = D_TAGS.filter(t => tags.includes(t)).join(' ');
+  const [wordsSel, setWordsSel] = useState(['mine']);
+  const words = nwWordsStr(wordsSel);
   const [msg, setMsg] = useState('');
   const [lastSent, setLastSent] = useState('');
   const [busy, wrap] = window.useBusy();
@@ -13637,7 +13660,7 @@ function DumpPanel({ tab, onDone }) {
     if (!nwDumpParas(text, tag).length) return;
     setMsg('');
     const c = window.nwBrainDump.add(text, tag, words && words !== 'mine' ? { words } : null);
-    clearText(); setTag(''); setWords('mine'); setLastSent(c.text.split('\n')[0]);
+    clearText(); setTags([]); setWordsSel(['mine']); setLastSent(c.text.split('\n')[0]);
     const where = await c.saved;
     const bar = (w) => window.nwShowBar({ tab, mode: 'saved', what: 'Brain Dump capture', where: w, ref: { what: `Brain Dump: ${c.text.slice(0, 40)}` } });
     if (where === false) { setMsg('Nothing was stored: this device is full. Copy the text somewhere safe.'); bar(false); return; }
@@ -13664,9 +13687,9 @@ function DumpPanel({ tab, onDone }) {
       <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>Brain Dump</div>
       <textarea aria-label="Brain Dump text" rows={4} value={text} onChange={e => setText(e.target.value)} placeholder="Say or type what is in your head" style={nwQuickInput} />
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
-        {D_TAGS.map(t => <button key={t} aria-pressed={tag === t} onClick={() => setTag(tag === t ? '' : t)} style={{ ...nwQuickBtn, minHeight: 32, padding: '4px 8px', ...(tag === t ? nwQuickBtnOn : {}) }}>{t}</button>)}
+        {D_TAGS.map(t => { const on = tags.includes(t); return <button key={t} aria-pressed={on} onClick={() => setTags(on ? tags.filter(x => x !== t) : [...tags, t])} style={{ ...nwQuickBtn, minHeight: 32, padding: '4px 8px', ...(on ? nwQuickBtnOn : {}) }}>{t}</button>; })}
       </div>
-      <DumpWhose words={words} setWords={setWords} />
+      <DumpWhose words={wordsSel} setWords={setWordsSel} />
       <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center' }}>
         <button style={{ ...nwQuickBtn, ...nwQuickBtnOn }} disabled={busy || !text.trim()} onClick={send}>Send</button>
         {waiting > 0 && <button style={nwQuickBtn} disabled={busy || !nwGoogleOnline() || !signedIn} onClick={sendWaiting}>Send waiting ({waiting})</button>}
@@ -13677,7 +13700,7 @@ function DumpPanel({ tab, onDone }) {
       <div style={{ ...nwQuickLabel, margin: '10px 0 4px' }}>THIS MONTH'S CAPTURES, ALL DEVICES</div>
       {!list.length ? <div style={{ fontSize: 13, color: '#9ca3af' }}>None yet.</div> : list.slice(0, shown).map(c => (
         <div key={c.id} data-nw-capture style={{ fontSize: 13, padding: '4px 0', borderBottom: '1px solid #262626', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>
-          <span style={{ color: c.status === 'sent' ? '#86efac' : '#fbbf24' }}>{c.status === 'sent' ? 'sent' : c.onlyHere ? 'waiting, on this device only' : c.dev && c.dev !== me ? `waiting for ${c.dev} to send it` : 'waiting'}</span> · {new Date(c.at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} {pTimeHM(new Date(c.at))}{c.words && c.words !== 'mine' ? ` · ${c.words === 'ai' ? 'AI draft' : `words: ${c.words}`}` : ''} · {c.tag ? c.tag + ' ' : ''}{c.text}
+          <span style={{ color: c.status === 'sent' ? '#86efac' : '#fbbf24' }}>{c.status === 'sent' ? 'sent' : c.onlyHere ? 'waiting, on this device only' : c.dev && c.dev !== me ? `saved, not in the Brain Dump doc yet · ${nwDevName(c.dev)} adds it the next time it opens this app with Google connected` : 'saved, not in the Brain Dump doc yet'}</span> · {new Date(c.at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} {pTimeHM(new Date(c.at))}{c.words && c.words !== 'mine' ? ` · ${c.words === 'ai' ? 'AI draft' : `words: ${c.words}`}` : ''} · {c.tag ? c.tag + ' ' : ''}{c.text}
         </div>
       ))}
       {list.length > shown && <button data-nw-capture-more style={{ ...nwQuickBtn, marginTop: 6 }} onClick={() => setShown(n => n + 20)}>Show more</button>}
