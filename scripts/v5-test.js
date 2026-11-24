@@ -64,7 +64,7 @@ async function part1() {
     await page.locator('[data-nw-quick="dump"]').click(); await wait(page, 300);
     await openDump(page);
     caps = await page.locator('[data-nw-capture]').allInnerTexts();
-    ok(caps.length === 3 && /saved, not in the Brain Dump doc yet · your Mac \(Chrome\) adds it the next time it opens this app with Google connected/.test(caps.find(t => t.includes('TEST laptop second')) || ''), "reopening the panel shows the laptop's new capture, marked as the laptop's to send → " + JSON.stringify(caps));
+    ok(caps.length === 3 && /saved · waiting for your Mac \(Chrome\) to add it to the Brain Dump doc/.test(caps.find(t => t.includes('TEST laptop second')) || ''), "reopening the panel shows the laptop's new capture, marked as the laptop's to send → " + JSON.stringify(caps));
     ok(caps[0].includes('TEST phone capture') || caps[0].includes('TEST laptop second'), 'newest first');
     await finish(ctx, 'two devices');
 
@@ -222,7 +222,7 @@ async function part2() {
     ps = fake.doc.paras;
     ok(ps.slice(1, 4).every(p => /^task: /.test(p.text)) && ps[1].text === 'task: Email Dr. Shobha' && ps[2].text === 'task: Book the room' && /^task: Print the form \(from Nikhil's World, 9:1\d AM\)$/.test(ps[3].text), 'a 3-line task: dump is three task: paragraphs; the stamp once, on the last (Nov 17) → ' + JSON.stringify(ps.slice(1, 4).map(p => p.text)));
     await sendDump(page, 'Finished the draft\nWalked to class', { tag: 'wins:' });
-    ok(/^wins: Finished the draft /.test(fake.doc.paras[1].text) && /^wins: Walked to class /.test(fake.doc.paras[2].text), 'wins: also gives one paragraph per line');
+    ok(fake.doc.paras[1].text === 'wins: Finished the draft' && /^wins: Walked to class \(from Nikhil's World/.test(fake.doc.paras[2].text), 'wins: also gives one paragraph per line; the stamp once, on the last');
     await sendDump(page, 'Corky: you could just call them\nMe: I will after lunch', { other: 'Corky' });
     ps = fake.doc.paras;
     ok(/^Corky: you could just call them\u000bMe: I will after lunch \(from Nikhil's World, 9:1\d AM, words: Corky\)$/.test(ps[1].text), '"Corky:" and "Me:" stay on their own lines; the stamp says whose words → ' + JSON.stringify(ps[1].text));

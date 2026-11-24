@@ -2117,6 +2117,25 @@ function useGlanceData() {
   return { ...data, refresh };
 }
 
+// The morning briefing prompt, copied to the clipboard (TodayStrip's 🌅, and Roulette's own button since the strip left it on Nov 20).
+function nwCopyMorningBrief() {
+  // His Nov 9 note: today's three first, then what must happen today, then the sources to read. (Kaizen is dormant since July.)
+  const three = (window.nwThreeBrief && window.nwThreeBrief()) || '';
+  const brief = [
+    `Morning briefing — ${new Date().toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'})}`,
+    `\n1. Today's three (one Academic, one Other, one Self-nourishment, chosen with Dr. Shobha): ${three ? three : 'none chosen yet. Suggest three.'}`,
+    `2. What must happen today: Ledger rows with a deadline today or marked as a hard deadline, and fixed calendar events.`,
+    `3. Then read: the Universal Spark Ledger, the top of this month's Brain Dump, the newest voice transcripts, the latest Fireflies session, Apple Health for the last 3 to 7 days.`,
+    `\nDeliver as:`,
+    `• Today's three, or three suggested`,
+    `• What must happen today, with times`,
+    `• Body read from health data (1-2 sentences)`,
+    `• One-line session insight if applicable`,
+  ].join('\n');
+  try { navigator.clipboard.writeText(brief); } catch(e) {}
+}
+window.nwCopyMorningBrief = nwCopyMorningBrief;
+
 // ── TodayStrip — pinned at top of every view ──────────────────
 const BODY_NEED_OPTS = [
   { id:'hungry',   icon:'🍽️', label:'hungry'   },
@@ -2243,22 +2262,7 @@ function TodayStrip({ data, onPendingClick, theme = 'dark' }) {
           color={t.topUrgent ? colors.accent : colors.muted}
         />
         {/* Morning briefing button — always available */}
-        <div onClick={() => {
-          // His Nov 9 note: today's three first, then what must happen today, then the sources to read. (Kaizen is dormant since July.)
-          const three = (window.nwThreeBrief && window.nwThreeBrief()) || '';
-          const brief = [
-            `Morning briefing — ${new Date().toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'})}`,
-            `\n1. Today's three (one Academic, one Other, one Self-nourishment, chosen with Dr. Shobha): ${three ? three : 'none chosen yet. Suggest three.'}`,
-            `2. What must happen today: Ledger rows with a deadline today or marked as a hard deadline, and fixed calendar events.`,
-            `3. Then read: the Universal Spark Ledger, the top of this month's Brain Dump, the newest voice transcripts, the latest Fireflies session, Apple Health for the last 3 to 7 days.`,
-            `\nDeliver as:`,
-            `• Today's three, or three suggested`,
-            `• What must happen today, with times`,
-            `• Body read from health data (1-2 sentences)`,
-            `• One-line session insight if applicable`,
-          ].join('\n');
-          try { navigator.clipboard.writeText(brief); } catch(e) {}
-        }} title="Copy morning briefing prompt" style={{
+        <div onClick={nwCopyMorningBrief} title="Copy morning briefing prompt" style={{
           flexShrink: 0, padding: '6px 10px', cursor: 'pointer',
           borderRight: `1px solid ${colors.border}`,
           display: 'flex', alignItems: 'center', gap: 4
@@ -9294,7 +9298,10 @@ function CreativeRoulette() {
             <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2 }}>Creative Roulette</div>
             <div style={{ fontSize: 11, color: "#666", marginTop: 4 }}><span data-play-reps>{reps} reps</span> · {log.length} entries · {notesCount} captured · {catchEntries.length} caught</div>
           </div>
-          <window.SaveStatusPill state={saveStatus}/>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button onClick={() => window.nwCopyMorningBrief()} title="Copy morning briefing prompt" aria-label="Copy morning briefing prompt" style={{ minWidth: 44, minHeight: 36, background: 'transparent', border: '1px solid #333', borderRadius: 6, fontSize: 16, cursor: 'pointer' }}>🌅</button>
+            <window.SaveStatusPill state={saveStatus}/>
+          </div>
         </div>
       </div>
 
@@ -13700,7 +13707,7 @@ function DumpPanel({ tab, onDone }) {
       <div style={{ ...nwQuickLabel, margin: '10px 0 4px' }}>THIS MONTH'S CAPTURES, ALL DEVICES</div>
       {!list.length ? <div style={{ fontSize: 13, color: '#9ca3af' }}>None yet.</div> : list.slice(0, shown).map(c => (
         <div key={c.id} data-nw-capture style={{ fontSize: 13, padding: '4px 0', borderBottom: '1px solid #262626', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>
-          <span style={{ color: c.status === 'sent' ? '#86efac' : '#fbbf24' }}>{c.status === 'sent' ? 'sent' : c.onlyHere ? 'waiting, on this device only' : c.dev && c.dev !== me ? `saved, not in the Brain Dump doc yet · ${nwDevName(c.dev)} adds it the next time it opens this app with Google connected` : 'saved, not in the Brain Dump doc yet'}</span> · {new Date(c.at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} {pTimeHM(new Date(c.at))}{c.words && c.words !== 'mine' ? ` · ${c.words === 'ai' ? 'AI draft' : `words: ${c.words}`}` : ''} · {c.tag ? c.tag + ' ' : ''}{c.text}
+          <span style={{ color: c.status === 'sent' ? '#86efac' : '#fbbf24' }}>{c.status === 'sent' ? 'sent' : c.onlyHere ? 'waiting, on this device only' : c.dev && c.dev !== me ? `saved · waiting for ${nwDevName(c.dev)} to add it to the Brain Dump doc (next time it opens this app with Google connected)` : 'saved · waiting to go in the Brain Dump doc'}</span> · {new Date(c.at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} {pTimeHM(new Date(c.at))}{c.words && c.words !== 'mine' ? ` · ${c.words === 'ai' ? 'AI draft' : `words: ${c.words}`}` : ''} · {c.tag ? c.tag + ' ' : ''}{c.text}
         </div>
       ))}
       {list.length > shown && <button data-nw-capture-more style={{ ...nwQuickBtn, marginTop: 6 }} onClick={() => setShown(n => n + 20)}>Show more</button>}
