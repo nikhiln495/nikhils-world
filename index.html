@@ -13841,11 +13841,9 @@ function nwDumpSendWaiting() {
   return p;
 }
 // A new capture: shown at once, then saved (c.saved resolves to 'cloud', 'device-only' or false). A confidential: capture stays on this device.
-// extra.keepHere: keep it on this device too (a Went wrong, Joy or Predict line with work text, whose entry stays on this device).
 function nwCapAdd(text, tag, extra) {
-  const { keepHere, ...more } = extra || {};
-  const c = { id: `d_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, at: new Date().toISOString(), text: String(text).trim(), tag: tag || '', status: 'device', dev: nwCapMe(), ...more };
-  if (nwCapIsConf(c) || keepHere) {
+  const c = { id: `d_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, at: new Date().toISOString(), text: String(text).trim(), tag: tag || '', status: 'device', dev: nwCapMe(), ...(extra || {}) };
+  if (nwCapIsConf(c)) {
     const ok = nwCapDeviceSet([...nwCapDevice(), { ...c }]);
     c.onlyHere = true; c.saved = Promise.resolve(ok ? 'device-only' : false);
     return c;
@@ -15045,11 +15043,11 @@ NW_QUICK.push({ id: 'feedback', label: 'Feedback', Panel: FeedbackPanel });
 // ─────────────────────────────────────────────────────
 
 // ── One Brain Dump line per joy, prediction, outcome and Went wrong entry (his Nov 7 and Nov 14 notes) ──
-// It goes through the Dump's own path: a capture (in the database, or on this device for work text, like the entry itself),
-// written at once when online and signed in to Google, else when back online. Each is written once.
+// It goes through the Dump's own path: a capture (in the database, work text included since Nov 25; on this device only for
+// confidential:), written at once when online and signed in to Google, else when back online. Each is written once.
 const nwDumpLineId = () => `d_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
 function nwDumpLine(tag, text, extra) {
-  const c = window.nwBrainDump.add(text, tag, { ...(extra || {}), ...(P_WORK_TEXT_ANY.test(`${tag || ''} ${text || ''}`) ? { keepHere: true } : {}) });
+  const c = window.nwBrainDump.add(text, tag, extra);
   c.saved.then(() => { if (nwGoogleOnline() && window.nwGoogle && window.nwGoogle.token()) nwDumpSendWaiting().catch(() => {}); });
   return c;
 }

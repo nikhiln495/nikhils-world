@@ -351,7 +351,7 @@ async function askClaudeOnce(html, myTry, o = {}) {
 const norm = (b) => JSON.stringify(b).replace(/\d\d:\d\d/g, 'HH:MM');
 
 async function part3() {
-  console.log('\n[v5 3a. Went wrong: saved offline, on a second device, one Brain Dump line; work entries stay here]');
+  console.log('\n[v5 3a. Went wrong: saved offline, on a second device, one Brain Dump line; work entries stay here, their Brain Dump line waits online]');
   {
     const fake = newFake();
     const ctx = await open({ offline: true, token: true, google: fake.handler });
@@ -381,7 +381,8 @@ async function part3() {
     const e = doc && doc.entries.find(x => x.what === 'Missed the 3:30 class');
     ok(e && e.did === 'Nothing yet' && JSON.stringify(e.who) === '["Corky"]' && e.part === 'Leaving the dorm' && e.id && e.at && e.time && 'myTry' in e && 'compare' in e, 'practice:wrong:2026_11 holds { id, at, time, what, did, who, part, myTry, compare }');
     const all = await allFake(page);
-    ok(!/VINE consent/.test(all), 'the work entry did not reach the fake Firestore');
+    ok(!/VINE consent/.test(JSON.stringify(doc)), 'the work entry itself is not in practice:wrong (it stays on this device)');
+    ok((await page.evaluate(() => window.nwBrainDump.captures().filter(c => /VINE consent/.test(c.text) && !c.onlyHere).length)) === 1 && /VINE consent/.test(all), 'its Brain Dump line waits in the database like any work capture (Nov 25)');
     ok((await page.evaluate(() => JSON.stringify(window.storage.dev.getItem('__nw_wrong_work')))).includes('VINE consent'), 'it is kept on this device');
     const lines = fake.doc.paras.map(p => p.text);
     ok(lines.filter(x => /^wrong: Missed the 3:30 class · did: Nothing yet · with: Corky \(from Nikhil's World, 9:1\d AM\)$/.test(x)).length === 1, 'exactly one Brain Dump line for it, after the reconnect');
