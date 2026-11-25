@@ -13774,7 +13774,8 @@ async function nwCapLoad() {
   for (const mk of months) {
     try {
       const r = await window.storage.get(nwCapKey(mk));
-      if (r && r.value) { const d = JSON.parse(r.value); NWC.cloud[mk] = Array.isArray(d.entries) ? d.entries : []; }
+      // Keeps captures added here that are still being saved (not in the stored copy yet), so none drops off the list.
+      if (r && r.value) { const d = JSON.parse(r.value), stored = Array.isArray(d.entries) ? d.entries : [], have = new Set(stored.map(e => e && e.id)); NWC.cloud[mk] = stored.concat((NWC.cloud[mk] || []).filter(e => e && !have.has(e.id))); }
     } catch (_) {}
   }
   const old = nwCapDevice().filter(c => c && !nwCapIsConf(c));

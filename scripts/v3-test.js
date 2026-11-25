@@ -593,6 +593,7 @@ async function part2() {
     await page.evaluate(() => { for (let i = 0; i < 12; i++) window.nwBrainDump.add('cap ' + i, ''); });
     await page.locator('[data-nw-quick="dump"]').click().catch(() => {});
     await page.locator('[data-nw-quick="dump"]').click();
+    await page.waitForFunction(() => document.querySelectorAll('[data-nw-capture]').length === 13, null, { timeout: 3000 }).catch(() => {});
     ok(await page.locator('[data-nw-capture]').count() === 13, "shows this month's captures (13), not only the last 10");
     await finish(ctx, 'dump offline');
   }
