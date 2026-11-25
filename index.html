@@ -15206,10 +15206,37 @@ function usePMyTry(id) {
 }
 
 // ── Went wrong (Nov 15): practice:wrong:<YYYY_MM> = { month, entries: [{ id, at, time, what, did, who, part, myTry, compare, bd }] } ──
-// Append-only, merged by id. A work entry (work:, VINE, ASMP, STARR, RTI) stays on this device only (__nw_wrong_work).
+// Append-only, merged by id. Until Nov 25, 2026 a work entry (work:, VINE, ASMP, STARR, RTI) stayed on this device only
+// (__nw_wrong_work); he asked for only confidential: things to stay on a device, so work entries are saved like any other
+// and the ones still on a device move to practice:wrong on the next read (nwWrongMoveWork).
 const NW_WRONG_WORK = '__nw_wrong_work';
-const nwWrongIsWork = (e) => P_WORK_TEXT.test(`${e.what || ''}\n${e.did || ''}\n${e.part || ''}`);
+let nwWrongMoving = null;
+function nwWrongMoveWork() {
+  if (nwWrongMoving) return nwWrongMoving;
+  nwWrongMoving = (async () => {
+    const left = (nwDev.get(NW_WRONG_WORK, { entries: [] }).entries || []).filter(e => e && e.id && e.what && !e.deleted);
+    if (!left.length) return;
+    const byMonth = {};
+    left.forEach(e => { const mk = pMonthKey(new Date(e.at)); (byMonth[mk] = byMonth[mk] || []).push(e); });
+    for (const [mk, items] of Object.entries(byMonth)) {
+      try {
+        const doc = await pUpdate(P_KEYS.wrong(mk), () => ({ month: mk, entries: [] }), (d) => {
+          const list = Array.isArray(d.entries) ? d.entries : [];
+          const have = new Set(list.map(x => x && x.id));
+          d.entries = list.concat(items.filter(x => !have.has(x.id))); return d;
+        });
+        if (!doc) continue;
+        const moved = new Set(items.map(x => x.id));
+        const cur = nwDev.get(NW_WRONG_WORK, { entries: [] });
+        const rest = (cur.entries || []).filter(x => !(x && moved.has(x.id)));
+        if (rest.length) nwDev.set(NW_WRONG_WORK, { entries: rest }); else nwDev.del(NW_WRONG_WORK);
+      } catch (_) { /* stays on this device; tried again on the next read */ }
+    }
+  })().finally(() => { nwWrongMoving = null; });
+  return nwWrongMoving;
+}
 async function pReadWrongs(iso) {
+  try { await nwWrongMoveWork(); } catch (_) {}
   const out = [];
   const months = iso ? [pMonthKey(new Date(`${iso}T12:00:00`))] : [0, 1, 2].map(k => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - k); return pMonthKey(d); });
   for (const mk of months) { const r = await pRead(P_KEYS.wrong(mk)); (r.data && Array.isArray(r.data.entries) ? r.data.entries : []).forEach(e => e && e.what && out.push({ ...e, mk })); }
@@ -15220,7 +15247,7 @@ async function pReadWrongs(iso) {
 window.nwReadWrongs = pReadWrongs;
 // Saves, changes or removes one entry where it is kept. Returns where it was saved ('cloud' | 'device-only').
 async function pWrongWrite(entry, mutate) {
-  if (entry.onlyHere || nwWrongIsWork(entry)) {
+  if (entry.onlyHere) { // an entry still on this device from before Nov 25 (not moved yet)
     const cur = nwDev.get(NW_WRONG_WORK, { entries: [] });
     const list = mutate((cur.entries || []).slice());
     if (!nwDev.set(NW_WRONG_WORK, { entries: list })) throw new Error('This device is full; nothing was stored.');

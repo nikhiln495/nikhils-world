@@ -300,10 +300,10 @@ may say `recovery`, which is shown as Self-nourishment. Claude's answer is reque
 Since Nov 15, 2026 (build v5). `{ "month": "YYYY_MM", "entries": [{ id, at, u, text, tag, status: device|sent, sentAt?, dev }] }`,
 one doc per month (by the capture's local date), append-only (`words?`, `pasted?` too), merged by `id` like `practice:joy` (`ENTRIES_KEY`). `status`
 `device` means waiting to go to the Brain Dump Doc. `dev` is the device that made it (`window.storage.deviceLabel()`); only
-that device sends it, so a capture is never sent twice. Nothing is trimmed. **Work captures** (tag `work:`, text starting
-`work:`, or naming VINE, ASMP, STARR or RTI) are never written here: they stay in `__nw_dump_queue` on the device that made
-them. Captures from before this change were in `__nw_dump_queue` only; the first load moves the non-work ones here with
-their status. `words` is who said it: absent or `mine`, `ai` (an AI draft) or a person's name. `pasted: true` means the
+that device sends it, so a capture is never sent twice. Nothing is trimmed. **`confidential:` captures** are never written here:
+they stay in `__nw_dump_queue` on the device that made them. Work captures (`work:`, VINE, ASMP, STARR, RTI) are written here
+like any other since Nov 25, 2026 (his ask: only confidential: stays on a device). Captures from before were in
+`__nw_dump_queue`; the first load moves all but the confidential: ones here with their status. `words` is who said it: absent or `mine`, `ai` (an AI draft) or a person's name. `pasted: true` means the
 full text of a long capture is already in the Pastes doc (so a retry only writes the pointer line).
 
 ## Went wrong (practice:wrong:<YYYY_MM>)
@@ -312,8 +312,9 @@ Since build v5 (Nov 15, 2026). `{ "month", "entries": [{ id, at, time, what, did
 one doc per month, append-only, merged by `id` (`ENTRIES_KEY`). Only `what` is required; the rest may be empty. `did` may be
 `Nothing yet`; `who` may be `["Nobody"]`. `myTry` and `compare` (`{ mine: { matches, problem }, options: [{ approach,
 first_step, person }] }`, or with "Ask me first" `{ works, question }`) are filled by Compare. `bd` is the id of its Brain Dump capture. An edit keeps what it said before in
-`edits: [{ at, from }]`. **A work entry** (work:, VINE, ASMP, STARR, RTI) is never written here: it stays on the device that
-made it in `__nw_wrong_work` (NW-DEVICE-CACHE), `{ entries: [...] }`, and is never sent to Claude.
+`edits: [{ at, from }]`. A work entry (work:, VINE, ASMP, STARR, RTI) is
+written here like any other since Nov 25, 2026. Before that it stayed in `__nw_wrong_work` (NW-DEVICE-CACHE) on the device that
+made it; the next read there moves those entries here and removes the key.
 
 ## Brain Dump lines for joys, predictions and Went wrong (build v5)
 
