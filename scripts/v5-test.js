@@ -110,36 +110,40 @@ async function part1() {
     await finish(ctx, 'offline 60');
   }
 
-  console.log('\n[v5 1c. Work captures stay on this device; captures from before this change move over]');
+  console.log('\n[v5 1c. Work captures wait in the database like any other (Nov 25), confidential: ones stay on this device; older ones move over]');
   {
     const old = [
       { id: 'd_old1', at: '2026-11-10T10:00:00Z', text: 'TEST old sent', tag: '', status: 'sent', sentAt: '2026-11-10T10:00:03Z' },
       { id: 'd_old2', at: '2026-11-12T10:00:00Z', text: 'TEST old waiting', tag: 'task:', status: 'device' },
       { id: 'd_old3', at: '2026-11-13T10:00:00Z', text: 'TEST VINE survey wording', tag: '', status: 'device' },
       { id: 'd_old4', at: '2026-10-30T10:00:00Z', text: 'TEST october waiting', tag: '', status: 'device' },
+      { id: 'd_old5', at: '2026-11-14T10:00:00Z', text: 'TEST conf study note', tag: 'confidential:', status: 'device' },
     ];
     const ctx = await open({ device: { __nw_dump_queue: JSON.stringify(old) } });
     const { page } = ctx;
     await openDump(page);
     await wait(page, 800);
     const nov = await cloudDoc(page, CAP_ID), oct = await cloudDoc(page, 'dump_captures_2026_10');
-    ok(nov && nov.entries.length === 2 && nov.entries.find(e => e.id === 'd_old1').status === 'sent' && nov.entries.find(e => e.id === 'd_old2').status === 'device', 'November captures moved to the store with their status kept');
+    ok(nov && nov.entries.length === 3 && nov.entries.find(e => e.id === 'd_old1').status === 'sent' && nov.entries.find(e => e.id === 'd_old2').status === 'device' && nov.entries.find(e => e.id === 'd_old3').status === 'device', 'November captures, the work one included, moved to the store with their status kept');
     ok(oct && oct.entries.length === 1 && oct.entries[0].id === 'd_old4', 'an October capture went to the October doc');
     const left = await page.evaluate(() => JSON.parse(window.storage.dev.getItem('__nw_dump_queue')));
-    ok(left.length === 1 && left[0].id === 'd_old3', 'only the work capture is left on this device');
+    ok(left.length === 1 && left[0].id === 'd_old5', 'only the confidential: capture is left on this device');
     const w1 = await page.evaluate(() => window.nwBrainDump.add('TEST work thing', 'work:').saved);
     const w2 = await page.evaluate(() => window.nwBrainDump.add('TEST asmp follow-up', '').saved);
-    ok(w1 === 'device-only' && w2 === 'device-only', 'a work: capture and one naming ASMP are saved on this device only');
+    const w3 = await page.evaluate(() => window.nwBrainDump.add('TEST conf new note', 'confidential:').saved);
+    ok(w1 === 'cloud' && w2 === 'cloud', 'a work: capture and one naming ASMP are saved in the database → ' + JSON.stringify([w1, w2]));
+    ok(w3 === 'device-only', 'a confidential: capture is saved on this device only');
     await wait(page, 600);
     const all = await allFake(page);
-    ok(!/VINE survey|TEST work thing|asmp follow-up/i.test(all), 'no work capture reached the fake Firestore');
+    ok(/VINE survey/.test(all) && /TEST work thing/.test(all) && /asmp follow-up/i.test(all), 'work captures reached the fake Firestore');
+    ok(!/TEST conf study note|TEST conf new note/.test(all), 'no confidential: capture reached the fake Firestore');
     await page.locator('[data-nw-quick="dump"]').click(); await wait(page, 200);
     await openDump(page);
     const caps = await page.locator('[data-nw-capture]').allInnerTexts();
-    ok(caps.some(t => /on this device only/.test(t) && t.includes('TEST work thing')), 'the panel shows work captures as on this device only');
+    ok(caps.some(t => /on this device only/.test(t) && t.includes('TEST conf new note')) && caps.some(t => t.includes('TEST work thing') && !/on this device only/.test(t)), 'the panel shows confidential: captures as on this device only, work ones as saved');
     // Opening again does not move or double anything.
     await page.evaluate(() => window.nwBrainDump.ready(true));
-    ok((await cloudDoc(page, CAP_ID)).entries.length === 2, 'loading again adds nothing');
+    ok((await cloudDoc(page, CAP_ID)).entries.length === 5, 'loading again adds nothing (3 moved + 2 new work captures)');
     await finish(ctx, 'work and old captures');
   }
 
@@ -185,7 +189,7 @@ async function part1() {
     });
     ok(order.feedback > order.drive && order.feedback > order.backup && order.drive > 0, 'the Feedback box is below Google Drive and the downloadable backup → ' + JSON.stringify(order));
     const only = await page.locator('[data-nw-only-here]').innerText();
-    ok(/Only on this device: work captures/.test(only) && /Everything else is in the cloud once Waiting to upload reads 0/.test(only), 'one plain sentence says what exists only on this device');
+    ok(/Only on this device: confidential: captures/.test(only) && /Everything else is in the cloud once Waiting to upload reads 0/.test(only), 'one plain sentence says what exists only on this device');
     await finish(ctx, 'system tab');
   }
 }

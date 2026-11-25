@@ -13720,11 +13720,11 @@ async function nwDumpAdd(paras, now = new Date(), opts = {}) {
 // Brain Dump captures (Nov 15): kept through window.storage at dump:captures:<YYYY_MM> = { month, entries: [capture] }, merged by
 // id on every save like the joys, so every device sees every capture and none is dropped (nothing is trimmed). A capture:
 // { id, at, u, text, tag, status: 'device' | 'sent', sentAt?, dev }. `dev` is the device that made it; only that device sends it,
-// so two devices never send the same capture. A work capture (tagged work: or naming VINE, ASMP, STARR or RTI) stays on this
-// device only (NW_DEV.dump, NW-DEVICE-CACHE) and never reaches the database. Captures made before this change were on this
-// device only; the first load moves them (status kept) and leaves only the work ones there.
-const NW_CAP_WORK = /\b(vine|asmp|starr|rti)\b/i;
-const nwCapIsWork = (c) => nwTagList(c && c.tag).some(x => /^work:?$/i.test(x)) || /^\s*work:/i.test(String((c && c.text) || '')) || NW_CAP_WORK.test(`${(c && c.tag) || ''} ${(c && c.text) || ''}`);
+// so two devices never send the same capture. A confidential: capture stays on this device only (NW_DEV.dump, NW-DEVICE-CACHE)
+// and never reaches the database. Work captures (work:, VINE, ASMP, STARR, RTI) also stayed on this device until Nov 25, 2026,
+// when he asked for them to wait in the database too, so nothing is lost with the device: they go to the main Brain Dump like
+// any other. Captures made before either change were on this device only; the first load moves them (status kept) and leaves
+// only the confidential ones there.
 const nwCapKey = (mk) => `dump:captures:${mk}`;
 const nwCapMonth = (c) => pMonthKey(new Date(c.at));
 const NWC = { subs: new Set(), cloud: {}, ready: null };
@@ -13732,7 +13732,7 @@ const nwCapDevice = () => nwDev.get(NW_DEV.dump, []);
 // "Mac Safari wfew" → "your Mac (Safari)": the last 4 letters only tell two devices apart.
 const nwDevName = (label) => { const m = String(label || '').match(/^(\S+)(?: (\S+))?(?: [a-z0-9]{4})?$/); return m ? `your ${m[1]}${m[2] ? ` (${m[2]})` : ''}` : String(label || 'another device'); };
 const nwCapMe = () => { try { return window.storage.deviceLabel(); } catch (_) { return ''; } };
-// Every capture this device knows of (all devices, the months read so far, plus this device's work captures), oldest first.
+// Every capture this device knows of (all devices, the months read so far, plus this device's confidential: captures), oldest first.
 const nwCaptures = () => {
   const all = [];
   Object.values(NWC.cloud).forEach(list => (list || []).forEach(e => { if (e && !e.deleted && e.status !== 'removed') all.push(e); }));
@@ -13777,7 +13777,7 @@ async function nwCapLoad() {
       if (r && r.value) { const d = JSON.parse(r.value); NWC.cloud[mk] = Array.isArray(d.entries) ? d.entries : []; }
     } catch (_) {}
   }
-  const old = nwCapDevice().filter(c => c && !nwCapIsWork(c) && !nwCapIsConf(c));
+  const old = nwCapDevice().filter(c => c && !nwCapIsConf(c));
   if (old.length) {
     const me = nwCapMe(), byMonth = {};
     old.forEach(c => { (byMonth[nwCapMonth(c)] = byMonth[nwCapMonth(c)] || []).push({ ...c, dev: c.dev || me }); });
@@ -13797,13 +13797,13 @@ function useCaptures() {
   useEffect(() => { NWC.subs.add(setL); nwCapReady(true); return () => NWC.subs.delete(setL); }, []);
   return l;
 }
-// Changes a capture where it is kept (this device for a work capture, else the month's doc).
+// Changes a capture where it is kept (this device for a confidential: capture, else the month's doc).
 async function nwCapMark(c, patch) {
   if (c.onlyHere) { nwCapDeviceSet(nwCapDevice().map(x => (x.id === c.id ? { ...x, ...patch } : x))); return; }
   await nwCapUpdate(nwCapMonth(c), (list) => list.map(x => (x && x.id === c.id ? { ...x, ...patch } : x)));
 }
 const nwCapMarkSent = (c) => nwCapMark(c, { status: 'sent', sentAt: new Date().toISOString() });
-// The captures this device sends: its own (and its work captures), oldest first, so the newest ends up on top.
+// The captures this device sends: its own (and its confidential: captures), oldest first, so the newest ends up on top.
 const nwCapMine = () => { const me = nwCapMe(); return nwCaptures().filter(c => c.status === 'device' && (c.onlyHere || !c.dev || c.dev === me)); };
 // Sends the waiting captures. Returns { sent, error }.
 let nwDumpSending = null;
@@ -13840,10 +13840,12 @@ function nwDumpSendWaiting() {
   p.finally(() => { if (nwDumpSending === p) nwDumpSending = null; });
   return p;
 }
-// A new capture: shown at once, then saved (c.saved resolves to 'cloud', 'device-only' or false). A work capture stays on this device.
+// A new capture: shown at once, then saved (c.saved resolves to 'cloud', 'device-only' or false). A confidential: capture stays on this device.
+// extra.keepHere: keep it on this device too (a Went wrong, Joy or Predict line with work text, whose entry stays on this device).
 function nwCapAdd(text, tag, extra) {
-  const c = { id: `d_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, at: new Date().toISOString(), text: String(text).trim(), tag: tag || '', status: 'device', dev: nwCapMe(), ...(extra || {}) };
-  if (nwCapIsWork(c) || nwCapIsConf(c)) {
+  const { keepHere, ...more } = extra || {};
+  const c = { id: `d_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, at: new Date().toISOString(), text: String(text).trim(), tag: tag || '', status: 'device', dev: nwCapMe(), ...more };
+  if (nwCapIsConf(c) || keepHere) {
     const ok = nwCapDeviceSet([...nwCapDevice(), { ...c }]);
     c.onlyHere = true; c.saved = Promise.resolve(ok ? 'device-only' : false);
     return c;
@@ -15043,11 +15045,11 @@ NW_QUICK.push({ id: 'feedback', label: 'Feedback', Panel: FeedbackPanel });
 // ─────────────────────────────────────────────────────
 
 // ── One Brain Dump line per joy, prediction, outcome and Went wrong entry (his Nov 7 and Nov 14 notes) ──
-// It goes through the Dump's own path: a capture (in the database, or on this device for work text), written at once
-// when online and signed in to Google, else when back online. Each is written once.
+// It goes through the Dump's own path: a capture (in the database, or on this device for work text, like the entry itself),
+// written at once when online and signed in to Google, else when back online. Each is written once.
 const nwDumpLineId = () => `d_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
 function nwDumpLine(tag, text, extra) {
-  const c = window.nwBrainDump.add(text, tag, extra);
+  const c = window.nwBrainDump.add(text, tag, { ...(extra || {}), ...(P_WORK_TEXT_ANY.test(`${tag || ''} ${text || ''}`) ? { keepHere: true } : {}) });
   c.saved.then(() => { if (nwGoogleOnline() && window.nwGoogle && window.nwGoogle.token()) nwDumpSendWaiting().catch(() => {}); });
   return c;
 }
@@ -16483,7 +16485,7 @@ function NwAppInfo({ active }) {
         </div>}
         {msg && <div data-nw-clear-msg style={{ fontSize: 12, color: '#4ECDC4', marginTop: 6 }}>{msg}</div>}
       </div>}
-      <div data-nw-only-here style={{ fontSize: 12, color: '#ccc', marginTop: 8, lineHeight: 1.5 }}>Only on this device: work captures (tagged work: or naming VINE, ASMP, STARR or RTI), Ledger changes waiting to send, the Ledger link, text typed but not yet sent in the Ledger and Dump boxes, and the Google Calendar copy. Everything else is in the cloud once Waiting to upload reads 0.</div>
+      <div data-nw-only-here style={{ fontSize: 12, color: '#ccc', marginTop: 8, lineHeight: 1.5 }}>Only on this device: confidential: captures, Ledger changes waiting to send, the Ledger link, text typed but not yet sent in the Ledger and Dump boxes, and the Google Calendar copy. Everything else is in the cloud once Waiting to upload reads 0.</div>
       <div style={{ fontSize: 11, color: '#888', marginTop: 6, lineHeight: 1.5 }}>{usage && usage.real ? "Room used is the browser's own count for this app. The rows above are counted at 2 bytes per character." : 'Counted at 2 bytes per character.'} A message shows at the top at 85%, or when a save does not fit; it closes by itself when there is room again. Clear caches removes only copies of what is already in Google.</div>
     </div>
   );
