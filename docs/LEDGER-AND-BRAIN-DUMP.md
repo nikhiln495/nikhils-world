@@ -76,7 +76,9 @@ first heading, otherwise a new H1 heading for today is inserted first. Each capt
 (if the revision is stale it reads again and retries, up to 3 times). It only inserts text; it never edits or deletes.
 
 **Shape (build v5, Nov 15).** Send writes at once (no preview).
-- `task:`, `done:` and `wins:` give one paragraph per typed line, each with the tag and the stamp.
+- Several tags can be picked at once (Nov 20); they go in front in the order of the buttons (`wins: life: …`).
+- `task:`, `done:` and `wins:` give one paragraph per typed line, each with the tags; the stamp goes once, after the last
+  line (Nov 17).
 - Any other tag, or none, with at most 12 lines and 1,500 characters gives **one paragraph**: the tag once at the front,
   the lines kept as soft line breaks (U+000B; checked against a real Google Doc on Nov 15, it shows as a line break), the
   stamp once at the end. A line that starts with a name and a colon ("Corky:", "Me:") stays its own line.
@@ -84,7 +86,13 @@ first heading, otherwise a new H1 heading for today is inserted first. Each capt
   Brain Dump's folder, same day headings), and the Brain Dump gets one line:
   `paste: N lines, N characters, starts '…' (from Nikhil's World, 5:04 PM)`.
 - **Whose words?** Mine (default) adds nothing. A name gives `(from Nikhil's World, 5:04 PM, words: Corky)`; AI draft gives
-  `(from Nikhil's World, 5:04 PM, AI draft)`. No AI model or company is named in the Doc.
+  `(from Nikhil's World, 5:04 PM, AI draft)`. No AI model or company is named in the Doc. Several can be picked (Nov 23):
+  `words: Corky, Priya` (Mine shows as Nikhil). Any name used on an earlier capture is offered again.
+- **`confidential:`** (Nov 18, research data) works like a work capture: kept on this device only (`__nw_dump_queue`), never in
+  the database, never sent to Claude by the app. It goes only to a private Doc `Brain Dump Confidential <Mon YYYY>` made in the
+  Brain Dump's folder, all of it (no pointer line in the main Brain Dump, even for a paste). The main Brain Dump is never
+  chosen from a doc named `Brain Dump Pastes …` or `Brain Dump Confidential …`. The panel reminds him to use study IDs, not
+  participants' names or emails.
 
 Captures are kept through `window.storage` (`dump:captures:<YYYY_MM>`, see DATA-FORMAT.md), so every device lists them.
 Offline they wait and go out, oldest first, when back online (if signed in); only the device that made a capture sends it.

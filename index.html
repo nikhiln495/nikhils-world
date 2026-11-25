@@ -13345,9 +13345,13 @@ function NwLedgerSetup({ active }) {
 }
 
 // ── Brain Dump: add to the top of this month's Google Doc, from any tab ──
-const D_TAGS = ['task:', 'note:', 'wins:', 'class:', 'geog:', 'stagecraft:', 'work:', 'life:', 'private:'];
+const D_TAGS = ['task:', 'note:', 'wins:', 'class:', 'geog:', 'stagecraft:', 'work:', 'life:', 'private:', 'confidential:'];
 const nwDumpTitle = (d = new Date()) => `Brain Dump ${d.toLocaleDateString('en-US', { month: 'short' })} ${d.getFullYear()}`;
 const nwDumpPasteTitle = (d = new Date()) => `Brain Dump Pastes ${d.toLocaleDateString('en-US', { month: 'short' })} ${d.getFullYear()}`;
+// confidential: (Nov 18, research data): never in the database, never in the main Brain Dump, never sent to Claude by the app.
+// It goes only to its own private doc in the Brain Dump's folder, where he (or Claude, when he asks) can read it.
+const nwDumpConfTitle = (d = new Date()) => `Brain Dump Confidential ${d.toLocaleDateString('en-US', { month: 'short' })} ${d.getFullYear()}`;
+const nwCapIsConf = (c) => String((c && c.tag) || '').split(/\s+/).includes('confidential:');
 const nwDumpHeading = (d = new Date()) => d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
 const nwDumpStamp = (d = new Date()) => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 // Who said it (Nov 15): 'mine' (or empty) adds nothing; 'ai' adds ", AI draft"; a name adds ", words: <name>". No model or company is named.
@@ -13434,15 +13438,14 @@ async function nwDumpFindDoc(now = new Date()) {
     // This month's doc isn't there yet (e.g. the 1st): use the newest doc whose name starts with "Brain Dump" (not a Pastes doc).
     const q2 = "mimeType='application/vnd.google-apps.document' and name contains 'Brain Dump' and trashed=false";
     const r2 = await nwGFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q2)}&orderBy=modifiedTime%20desc&pageSize=10&fields=files(id,name,modifiedTime,parents)`);
-    const hit = (r2.files || []).find(x => /^Brain Dump/i.test(x.name || '') && !/^Brain Dump Pastes/i.test(x.name || ''));
+    const hit = (r2.files || []).find(x => /^Brain Dump/i.test(x.name || '') && !/^Brain Dump (Pastes|Confidential)/i.test(x.name || ''));
     if (hit) f = { ...hit, fallback: true };
   }
   if (!f) throw Object.assign(new Error(`No Google Doc named "${title}" (or any "Brain Dump …") was found.`), { code: 'no-doc' });
   return f;
 }
 // This month's Pastes doc, made on first use in the Brain Dump's folder.
-async function nwDumpPasteDoc(now = new Date()) {
-  const title = nwDumpPasteTitle(now);
+async function nwDumpPasteDoc(now = new Date(), title = nwDumpPasteTitle(now)) {
   const q = `mimeType='application/vnd.google-apps.document' and name='${title.replace(/'/g, "\\'")}' and trashed=false`;
   const res = await nwGFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&orderBy=modifiedTime%20desc&pageSize=5&fields=files(id,name,modifiedTime,parents)`);
   const f = (res.files || [])[0];
@@ -13454,7 +13457,7 @@ async function nwDumpPasteDoc(now = new Date()) {
 async function nwDumpRead(id) { return nwGFetch(`https://docs.googleapis.com/v1/documents/${id}`); }
 // Reads fresh, then writes with requiredRevisionId; a stale revision is read again (up to 3 tries). Never edits or deletes text.
 async function nwDumpAdd(paras, now = new Date(), opts = {}) {
-  const f = opts.paste ? await nwDumpPasteDoc(now) : await nwDumpFindDoc(now);
+  const f = opts.conf ? await nwDumpPasteDoc(now, nwDumpConfTitle(now)) : opts.paste ? await nwDumpPasteDoc(now) : await nwDumpFindDoc(now);
   let last = null;
   for (let tries = 0; tries < 3; tries++) {
     const doc = await nwDumpRead(f.id);
@@ -13530,7 +13533,7 @@ async function nwCapLoad() {
       if (r && r.value) { const d = JSON.parse(r.value); NWC.cloud[mk] = Array.isArray(d.entries) ? d.entries : []; }
     } catch (_) {}
   }
-  const old = nwCapDevice().filter(c => c && !nwCapIsWork(c));
+  const old = nwCapDevice().filter(c => c && !nwCapIsWork(c) && !nwCapIsConf(c));
   if (old.length) {
     const me = nwCapMe(), byMonth = {};
     old.forEach(c => { (byMonth[nwCapMonth(c)] = byMonth[nwCapMonth(c)] || []).push({ ...c, dev: c.dev || me }); });
@@ -13568,6 +13571,14 @@ function nwDumpSendWaiting() {
     for (const c of nwCapMine()) {
       try {
         const shape = nwDumpShape(c.text, c.tag, new Date(c.at), c.words);
+        if (nwCapIsConf(c)) {
+          // All of it to the Confidential doc; nothing, not even a pointer line, in the main Brain Dump.
+          const w = await nwDumpAdd(shape.paste ? shape.paste.paras : shape.paras, new Date(), { conf: true });
+          doc = { title: w.title, fallback: false };
+          await nwCapMarkSent(c).catch(() => {});
+          sent++;
+          continue;
+        }
         if (shape.paste && !c.pasted) {
           // The full text first (once), then the pointer line in the Brain Dump.
           await nwDumpAdd(shape.paste.paras, new Date(), { paste: true });
@@ -13588,7 +13599,7 @@ function nwDumpSendWaiting() {
 // A new capture: shown at once, then saved (c.saved resolves to 'cloud', 'device-only' or false). A work capture stays on this device.
 function nwCapAdd(text, tag, extra) {
   const c = { id: `d_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, at: new Date().toISOString(), text: String(text).trim(), tag: tag || '', status: 'device', dev: nwCapMe(), ...(extra || {}) };
-  if (nwCapIsWork(c)) {
+  if (nwCapIsWork(c) || nwCapIsConf(c)) {
     const ok = nwCapDeviceSet([...nwCapDevice(), { ...c }]);
     c.onlyHere = true; c.saved = Promise.resolve(ok ? 'device-only' : false);
     return c;
@@ -13696,6 +13707,7 @@ function DumpPanel({ tab, onDone }) {
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
         {D_TAGS.map(t => { const on = tags.includes(t); return <button key={t} aria-pressed={on} onClick={() => setTags(on ? tags.filter(x => x !== t) : [...tags, t])} style={{ ...nwQuickBtn, minHeight: 32, padding: '4px 8px', ...(on ? nwQuickBtnOn : {}) }}>{t}</button>; })}
       </div>
+      {tags.includes('confidential:') && <div data-nw-dump-conf style={{ fontSize: 12, color: '#9ca3af', marginTop: 6 }}>Confidential: kept on this device and sent only to "{nwDumpConfTitle()}" in your Drive. Not in the database, the main Brain Dump, or anything the app sends to Claude. Leave out names and emails of study participants; use their study ID.</div>}
       <DumpWhose words={wordsSel} setWords={setWordsSel} />
       <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center' }}>
         <button style={{ ...nwQuickBtn, ...nwQuickBtnOn }} disabled={busy || !text.trim()} onClick={send}>Send</button>
@@ -14057,6 +14069,35 @@ const nwThreeDayN = (start, now = new Date()) => {
 };
 const nwMMSS = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
+// Today's three from the latest session (Nov 18): the newest "… Session with … Transcript" doc in Drive (the NW Inbox puts the
+// Fireflies transcripts there) from the last 3 days is read and Claude pulls out the three agreed on. Nothing is saved until he taps
+// "Use these"; the transcript itself is never saved by the app (the ask record keeps only its cost, like What now?).
+const P_THREE_SESSION_FORMAT = { type: 'json_schema', schema: {
+  type: 'object', additionalProperties: false, required: ['academic', 'other', 'nourishment'],
+  properties: {
+    academic: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+    other: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+    nourishment: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+  },
+} };
+const nwDocText = (doc) => ((doc && doc.body && doc.body.content) || []).map(el => (el.paragraph ? (el.paragraph.elements || []).map(e => (e.textRun && e.textRun.content) || '').join('') : '')).join('');
+async function nwThreeFromSession(now = new Date()) {
+  const since = new Date(now.getTime() - 3 * 86400000).toISOString();
+  const q = `mimeType='application/vnd.google-apps.document' and name contains 'Transcript' and name contains 'Session with' and modifiedTime > '${since}' and trashed=false`;
+  const res = await nwGFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&orderBy=modifiedTime%20desc&pageSize=5&fields=files(id,name,modifiedTime)`);
+  const f = (res.files || []).find(x => /Session with/i.test(x.name || '') && /Transcript/i.test(x.name || ''));
+  if (!f) return { none: true };
+  const text = nwDocText(await nwGFetch(`https://docs.googleapis.com/v1/documents/${f.id}`)).slice(0, 120000);
+  const system = `${P_VOICE}\n\nThis is the transcript of his coaching session (Dr. Shobha's 21 days). In it they agree on three steps: one Academic, one Other, one Self-nourishment. Give each as he would write it on a sticky note: short, literal, the physical action. Use what was agreed, in his words where you can; if the session did not settle one, give null. Do not invent.`;
+  const { data } = await pCallClaude({ system, text: `Session: ${f.name}\n\n${text}`, format: P_THREE_SESSION_FORMAT, ask: { kind: 'three-session', redact: true }, screen: 'three-session' });
+  const block = (data?.content || []).find(b => b.type === 'text');
+  let out = null;
+  try { out = JSON.parse(block ? block.text : 'null'); } catch (_) {}
+  if (!out) throw new Error('Claude sent back something that could not be read.');
+  const picks = P_SLOTS.map(sl => ({ slot: sl.id, label: sl.label, text: typeof out[sl.id] === 'string' ? out[sl.id].trim() : '' })).filter(x => x.text);
+  return { title: f.name, picks };
+}
+
 function ThreeCard() {
   const T = useThree();
   const L = useLedger();
@@ -14066,6 +14107,7 @@ function ThreeCard() {
   const [doneSlot, setDoneSlot] = useState(null);
   const [doneOp, setDoneOp] = useState(null);
   const [opErr, setOpErr] = useState('');
+  const [sess, setSess] = useState(null); // { title, picks } from the latest session
   const [parkOpen, setParkOpen] = useState(false);
   const [startDate, setStartDate] = useState('');
   const [ciStart, setCiStart] = useState(null);
@@ -14116,6 +14158,20 @@ function ThreeCard() {
     const r = await nwLedgerSend(doneOp);
     if (r.ok) { nwLedgerDoneBar(doneOp, r.where); setDoneOp(null); setOpErr(''); } else setOpErr(r.error);
   });
+  const fromSession = wrap(async () => {
+    setMsg(''); setSess(null);
+    try {
+      const r = await nwThreeFromSession();
+      if (r.none) { setMsg('No session transcript from the last 3 days in your Drive.'); return; }
+      if (!r.picks.length) { setMsg(`"${r.title}" did not settle any of the three. Pick them below.`); return; }
+      setSess(r);
+    } catch (e) { setMsg(`Could not read the session: ${e.code ? nwGErr(e, 'Drive') : e.message}`); }
+  });
+  const useSession = wrap(async () => {
+    if (!sess) return;
+    const r = await nwThreeLog(sess.picks.map(x => ({ kind: 'pick', slot: x.slot, text: x.text })), `Today's three from the session`, setMsg);
+    if (r && r.where) { setSess(null); setChooser(null); setMsg(''); }
+  });
   const saveCheckin = wrap(async () => {
     if (!checkin.trim()) return;
     const r = await nwThreeLog([{ kind: 'checkin', text: checkin.trim() }], 'Check-in', setMsg);
@@ -14158,6 +14214,21 @@ function ThreeCard() {
         </div>
       )}
       <div style={{ fontSize: 12, color: PC.muted, marginBottom: 8 }}>Calendar items are givens. They are not part of the three.</div>
+      {window.nwGoogle && window.nwGoogle.token() && (
+        <div data-pr-three-session style={{ marginBottom: 10 }}>
+          {!sess && <button style={pBtn('ghost', { width: '100%', minHeight: 44 })} disabled={busy || !pOnline()} onClick={fromSession}>{busy ? 'Reading the session…' : 'Fill from the latest session'}</button>}
+          {sess && (
+            <div style={{ border: `1px solid ${PC.border}`, borderRadius: 8, padding: 10 }}>
+              <div style={{ fontSize: 12, color: PC.muted, marginBottom: 6, overflowWrap: 'anywhere' }}>From "{sess.title}"</div>
+              {sess.picks.map(x => <div key={x.slot} style={{ fontSize: 14, color: PC.text, marginBottom: 4 }}><span style={{ color: PC.muted }}>{x.label}:</span> {x.text}</div>)}
+              <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                <button style={pBtn('solid', { flex: 2 })} disabled={busy} onClick={useSession}>Use these</button>
+                <button style={pBtn('ghost', { flex: 1 })} onClick={() => setSess(null)}>Not now</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <details data-pr-three-checkin style={{ marginBottom: 10 }}>
         <summary style={{ fontSize: 14, color: PC.text, cursor: 'pointer' }}>Check-in (optional){checkinToday.length ? ` · saved ${pHM(checkinToday[checkinToday.length - 1].at)}` : ''}</summary>
