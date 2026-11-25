@@ -64,7 +64,7 @@ async function part1() {
     await page.locator('[data-nw-quick="dump"]').click(); await wait(page, 300);
     await openDump(page);
     caps = await page.locator('[data-nw-capture]').allInnerTexts();
-    ok(caps.length === 3 && /waiting for Mac Chrome lap1 to send it/.test(caps.find(t => t.includes('TEST laptop second')) || ''), "reopening the panel shows the laptop's new capture, marked as the laptop's to send → " + JSON.stringify(caps));
+    ok(caps.length === 3 && /saved · waiting for your Mac \(Chrome\) to add it to the Brain Dump doc/.test(caps.find(t => t.includes('TEST laptop second')) || ''), "reopening the panel shows the laptop's new capture, marked as the laptop's to send → " + JSON.stringify(caps));
     ok(caps[0].includes('TEST phone capture') || caps[0].includes('TEST laptop second'), 'newest first');
     await finish(ctx, 'two devices');
 
@@ -220,12 +220,23 @@ async function part2() {
     ok(ps[0].text === 'Sunday, Nov 15, 2026' && /^note: Bought the stamps\u000bCalled Mom\u000bWrote the outline \(from Nikhil's World, 9:1\d AM\)$/.test(ps[1].text) && ps[2].text === 'Saturday, Nov 14, 2026', 'a 3-line note: dump is one paragraph: the tag once, three lines, the stamp once → ' + JSON.stringify(ps[1].text));
     await sendDump(page, 'Email Dr. Shobha\nBook the room\nPrint the form', { tag: 'task:' });
     ps = fake.doc.paras;
-    ok(ps.slice(1, 4).every(p => /^task: .+ \(from Nikhil's World, 9:1\d AM\)$/.test(p.text)) && ps[1].text.startsWith('task: Email Dr. Shobha') && ps[3].text.startsWith('task: Print the form'), 'a 3-line task: dump is three task: paragraphs');
+    ok(ps.slice(1, 4).every(p => /^task: /.test(p.text)) && ps[1].text === 'task: Email Dr. Shobha' && ps[2].text === 'task: Book the room' && /^task: Print the form \(from Nikhil's World, 9:1\d AM\)$/.test(ps[3].text), 'a 3-line task: dump is three task: paragraphs; the stamp once, on the last (Nov 17) → ' + JSON.stringify(ps.slice(1, 4).map(p => p.text)));
     await sendDump(page, 'Finished the draft\nWalked to class', { tag: 'wins:' });
-    ok(/^wins: Finished the draft /.test(fake.doc.paras[1].text) && /^wins: Walked to class /.test(fake.doc.paras[2].text), 'wins: also gives one paragraph per line');
+    ok(fake.doc.paras[1].text === 'wins: Finished the draft' && /^wins: Walked to class \(from Nikhil's World/.test(fake.doc.paras[2].text), 'wins: also gives one paragraph per line; the stamp once, on the last');
     await sendDump(page, 'Corky: you could just call them\nMe: I will after lunch', { other: 'Corky' });
     ps = fake.doc.paras;
     ok(/^Corky: you could just call them\u000bMe: I will after lunch \(from Nikhil's World, 9:1\d AM, words: Corky\)$/.test(ps[1].text), '"Corky:" and "Me:" stay on their own lines; the stamp says whose words → ' + JSON.stringify(ps[1].text));
+    // Several tags at once (Nov 20) and several people (Nov 23); a typed name is offered next time.
+    await page.locator('[data-nw-dump]').getByRole('button', { name: 'wins:', exact: true }).click();
+    await sendDump(page, 'Cooked for everyone', { tag: 'life:', words: 'Corky', other: 'Priya' });
+    ps = fake.doc.paras;
+    ok(/^wins: life: Cooked for everyone \(from Nikhil's World, 9:1\d AM, words: Corky, Priya\)$/.test(ps[1].text), 'two tags and two people in one capture → ' + JSON.stringify(ps[1].text));
+    ok(await page.locator('[data-nw-dump-whose]').getByRole('button', { name: 'Priya', exact: true }).count() === 1, 'a name typed under Someone else is offered as a button next time');
+    ok((await page.locator('[data-nw-dump] [aria-pressed="true"]').count()) === 1 && (await page.locator('[data-nw-dump-whose]').getByRole('button', { name: 'Mine', exact: true }).getAttribute('aria-pressed')) === 'true', 'after Send the tags clear and Whose words goes back to Mine');
+    await page.locator('[data-nw-dump-whose]').getByRole('button', { name: 'Corky', exact: true }).click();
+    await page.locator('[data-nw-dump-whose]').getByRole('button', { name: 'Mine', exact: true }).click();
+    await sendDump(page, 'We planned the trip together');
+    ok(/, words: Corky, Nikhil\)$/.test(fake.doc.paras[1].text), 'Mine can be picked alongside someone else → ' + JSON.stringify(fake.doc.paras[1].text));
     await sendDump(page, 'Here is a draft reply to the landlord', { words: 'AI draft' });
     ok(/^Here is a draft reply to the landlord \(from Nikhil's World, 9:1\d AM, AI draft\)$/.test(fake.doc.paras[1].text), 'AI draft shows in the stamp');
     ok(!fake.doc.paras.some(p => /claude|anthropic|sonnet|opus|gpt|gemini/i.test(p.text)), 'no AI model or company is named in the Doc');

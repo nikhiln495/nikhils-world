@@ -502,6 +502,11 @@ Mirror reads with `listPrefix('practice:three:')` and should skip them.
   work rows are never read into the app, so they cannot get here). It is never put into the one-line context that is saved with
   Claude's answers; What now? is told the full text and does not save it.
 
+**Fill from the latest session** (Nov 25, needs the Drive sign-in): the newest Doc named `… Session with … Transcript`
+modified in the last 3 days (the NW Inbox's Fireflies transcripts) is read through the Docs API and sent to Claude with a
+fixed JSON shape `{ academic, other, nourishment }` (each a string or null). The answer is shown first; "Use these" saves one
+`pick` per filled slot. The transcript is never saved: its `practice:asks` record is redacted (kind `three-session`, usage only).
+
 `practice:three-start` is `{ "start": "YYYY-MM-DD", "at" }`: the date Day 1 of the 21 days was. The card asks once. Day N is
 the number of local calendar days since `start`, plus 1; after Day 21 the card says "Day 21 done."
 
