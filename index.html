@@ -12885,8 +12885,8 @@ const nwColLetter = (i) => { let n = i + 1, s = ''; while (n > 0) { const m = (n
 const L_BUCKET_SPARK = 'TODAY SPARK', L_BUCKET_WEEK = 'THIS WEEK';
 const L_WORK = /\b(vine|asmp|starr|rti|work)\b/i;
 // Work rows: Bucket, Domain or Trello_Board mentions VINE, ASMP, STARR, RTI or Work. Since Nov 15 they go to What now? (and any
-// other AI prompt that reads the Ledger), but they are not listed on the strip, and text from them is never saved to appdata:
-// what is saved from an answer has it replaced (nwScrubWork). They stay on this device otherwise (the Ledger copy is device-only).
+// other AI prompt that reads the Ledger), but they are not listed on the strip. Since Nov 25 what is saved from an answer keeps
+// their text, like any other step. The Ledger copy itself stays device-only.
 const nwIsWorkRow = (r) => L_WORK.test(`${r.Bucket || ''}\n${r.Domain || ''}\n${r.Trello_Board || ''}`);
 // Header row 1 gives each column's place by name; rows come back as objects { row: <sheet row>, <Header>: text }.
 function nwParseLedger(values) {
@@ -13508,7 +13508,7 @@ function LedgerStrip() {
       {L.readAt && L.hidden > 0 && (
         <details data-pr-ledger-hidden style={{ fontSize: 12, color: PC.muted, marginBottom: 6 }}>
           <summary style={{ cursor: 'pointer' }}>Which rows are not listed, and why</summary>
-          <div style={{ lineHeight: 1.5, marginTop: 4 }}>A work row is one whose Bucket, Domain or Trello_Board names VINE, ASMP, STARR, RTI or Work, or whose task has such a step. They are not listed on this strip, but What now? sends them to Claude with the other open rows, and a step from one can be marked done there. Text from them is not saved to the cloud: what is saved from an answer says "work, kept on this device" instead. Google's Sheets service does the reading, signed in as you.</div>
+          <div style={{ lineHeight: 1.5, marginTop: 4 }}>A work row is one whose Bucket, Domain or Trello_Board names VINE, ASMP, STARR, RTI or Work, or whose task has such a step. They are not listed on this strip, but What now? sends them to Claude with the other open rows, and a step from one can be marked done there. What is saved from an answer keeps their text, like any other step. Google's Sheets service does the reading, signed in as you.</div>
         </details>
       )}
       {L.readAt && !total && <div style={{ fontSize: 14, color: PC.muted }}>Nothing open in Today Spark, This Week, or due in 14 days.</div>}
@@ -14094,24 +14094,12 @@ async function pWhatNow({ words, rows, rules, log, feedback, past, three, givens
   if (!result.options.length) throw pAskError('Claude sent no usable options. Your words are still in the box. Try again.', saved);
   return { result, saved, usage: data?.usage || null };
 }
-// Text from work rows, or naming work, never reaches appdata (Nov 15: work rows go to Claude, but the saved copy of an
-// answer says "work, kept on this device" instead). Returns a copy.
-const P_WORK_NOTE = '(work, kept on this device)';
+// Until Nov 25, 2026 the saved copy of a What now? answer replaced work text with "(work, kept on this device)". He asked
+// for work text to be saved like any other (only confidential: stays on a device), so the copy is kept whole. Returns a copy.
 function nwScrubWork(result, words) {
-  const wr = (NWL.state.workRows || []);
-  const names = new Set(wr.flatMap(r => [r.Parent_Task, r.Step_Action, r.First_Physical_Step]).map(x => String(x || '').trim().toLowerCase()).filter(x => x.length > 3));
-  const bad = (t) => { const s = String(t || ''); const l = s.toLowerCase(); return P_WORK_TEXT_ANY.test(s) || [...names].some(n => l.includes(n)); };
-  const clean = (t) => (bad(t) ? P_WORK_NOTE : t);
-  const out = JSON.parse(JSON.stringify(result || {}));
-  out.patterns = (out.patterns || []).map(clean);
-  out.parked = (out.parked || []).map(clean);
-  out.newTasks = (out.newTasks || []).map(clean);
-  if (out.question) out.question = clean(out.question);
-  (out.options || []).forEach(o => { o.title = clean(o.title); (o.steps || []).forEach(st => { if (st.work || bad(st.text) || (st.ledger && bad(`${st.ledger.task}\n${st.ledger.stepAction}`))) { st.text = P_WORK_NOTE; delete st.ledger; st.work = true; } }); });
-  return { result: out, words: bad(words) ? P_WORK_NOTE : words };
+  return { result: JSON.parse(JSON.stringify(result || {})), words };
 }
-const P_WORK_TEXT_ANY = /(^|\s)work:|\b(vine|asmp|starr|rti)\b/i;
-// practice:ramp:<day>: his words and the result, append-only, merged by id. Work text is replaced (nwScrubWork).
+// practice:ramp:<day>: his words and the result, append-only, merged by id. Work text is kept (Nov 25).
 function pAddRamp({ words: words0, result: result0, usage, kind = 'what-now', feedback, of }) {
   const { result, words } = nwScrubWork(result0, words0);
   const now = new Date();
@@ -15097,16 +15085,14 @@ const P_MYTRY_FORMAT = { type: 'json_schema', schema: {
     options: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['approach', 'first_step', 'person'], properties: { approach: { type: 'string' }, first_step: { type: 'string' }, person: { anyOf: [{ type: 'string' }, P_MYTRY_NULL] } } } },
   },
 } };
-const P_WORK_TEXT = /(^|\s)work:|\b(vine|asmp|starr|rti)\b/i;
 // mode 'ways' (default): returns { result: { mine: { matches, problem }, options: [...] }, saved }.
 // mode 'ask' ("Ask me first"): returns { result: { works, question }, saved }.
-// Work text is sent (Nov 15); the copy of the ask saved to appdata leaves it out.
+// Work text is sent (Nov 15) and, since Nov 25, kept in the saved copy of the ask like any other text.
 async function pCompareTry({ words, myTry, of, screen, joy, mode = 'ways' }) {
-  const work = P_WORK_TEXT.test(`${words}\n${myTry}`);
   const ask = mode === 'ask';
   const system = `${P_VOICE}\n\n${ask ? P_MYTRY_ASK_RULE : P_MYTRY_RULE}${joy && !ask ? `\n${P_MYTRY_JOY_RULE}` : ''}`;
   const text = `${joy ? 'The joy' : "What's going on"}: ${words || '(not written)'}\nLeft to myself, I'd: ${myTry}`;
-  const rec = work ? { kind: 'compare', of, mode, words: P_WORK_NOTE, redact: true } : { kind: 'compare', of, mode, words, myTry };
+  const rec = { kind: 'compare', of, mode, words, myTry };
   const { data, saved } = await pCallClaude({ system, text, format: ask ? P_MYTRY_ASK_FORMAT : P_MYTRY_FORMAT, ask: rec, screen: `${screen || of}-compare` });
   const raw = (data?.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
   let result;

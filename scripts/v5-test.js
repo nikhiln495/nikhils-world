@@ -505,15 +505,15 @@ async function part3() {
     const view = await off.page.locator('[data-pr-compare]').innerText();
     ok(view.includes('Stepping outside for air is what people often do first.') && view.includes('Checking the phone outside') && view.includes('Breathing move') && view.includes('Who helps: Someone who asks questions out loud') && await off.page.locator('[data-pr-compare-ways]').count() === 0, 'off: mine first, then the options, with no question step');
     await finish(off, 'ask me first off');
-    // Work text is sent now (Nov 15); the saved ask leaves it out.
+    // Work text is sent (Nov 15) and kept in the saved ask (Nov 25).
     const w = await askClaudeOnce(null, 'Email the ASMP lead', { askFirst: false });
     ok(w.proxyCalls.length === 2 && w.proxyCalls.some(c => c.output_config && c.output_config.format && /ASMP/.test(c.messages[0].content)), 'a try with work text is sent to Claude');
     const saved = await w.page.evaluate(() => JSON.parse(window.__mem.get('practice:asks:2026_10_04')).entries.filter(e => e.kind === 'compare'));
-    ok(saved.length === 1 && !/ASMP/.test(JSON.stringify(saved)), 'the saved ask has no work text → ' + JSON.stringify(saved[0] && { words: saved[0].words, prompt: saved[0].prompt }));
+    ok(saved.length === 1 && saved[0].myTry === 'Email the ASMP lead', 'the saved ask keeps the work text → ' + JSON.stringify(saved[0] && { words: saved[0].words, prompt: saved[0].prompt }));
     await w.browser.close();
   }
 
-  console.log('\n[v5 3d. Work rows go to What now?; nothing from them is saved to appdata]');
+  console.log('\n[v5 3d. Work rows go to What now?; the saved record keeps their text (Nov 25)]');
   {
     const plan = { patterns: ['The consent form and the tax folder both wait'], options: [{ title: 'Start with the call', steps: [
       { text: 'Phone Maria Lopez about the consent form', ledger_row: 8, minutes: 5, est: false, start: '09:15', kind: 'other' },
@@ -533,9 +533,8 @@ async function part3() {
     ok((await page.locator('[data-pr-whatnow]').innerText()).includes('Phone Maria Lopez'), 'the answer shows the work step on screen');
     await wait(page, 800);
     const db = await page.evaluate(() => JSON.stringify([...window.__mem.entries()].filter(([k]) => !/^drafts:|^practice:drafts$/.test(k))));
-    const leak = (db.match(/.{0,60}(Maria Lopez|VINE|ASMP|STARR|Phone Maria).{0,60}/gi) || []);
-    ok(!leak.length, 'nothing from a work row is saved to appdata (the What now? record says "work, kept on this device") → ' + JSON.stringify(leak));
-    ok(/\(work, kept on this device\)/.test(db) && /Put the tax folder on the desk/.test(db), 'the saved record keeps the other steps');
+    ok(/Phone Maria Lopez about the consent form/.test(db) && /Put the tax folder on the desk/.test(db), 'the saved What now? record keeps the work step and the other steps');
+    ok(!/kept on this device/.test(db), 'no "(work, kept on this device)" placeholder is saved');
     await finish(ctx, 'work rows');
   }
 
