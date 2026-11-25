@@ -56,7 +56,8 @@
     }
   </script>
   <!-- Google Identity Services (for Drive sync) -->
-  <script src="https://accounts.google.com/gsi/client" async></script>
+  <!-- If this load fails (no internet or a slow network when the home-screen app opened), nwGsiLoad() loads it again. -->
+  <script src="https://accounts.google.com/gsi/client" async onerror="window.__nwGsiFailed=true"></script>
 
   <!-- Fallback: ensure globals exist even if CDNs fail -->
   <script>
@@ -12790,6 +12791,64 @@ function useDeviceDraft(id, initial = '') {
   return [val, set, clear];
 }
 
+// ── Google sign-in script (accounts.google.com/gsi/client) ──
+// Loaded once by a tag in <head>. If that load failed (no internet, or a slow network, when the home-screen app
+// opened), `google` never existed, and the home-screen app can stay open for days without reloading, so every
+// Connect Google tap failed with "Can't find variable: google". nwGsiLoad() loads it again; it is also retried
+// when the device comes back online or the app comes back to the front.
+const NW_GSI_SRC = 'https://accounts.google.com/gsi/client';
+const nwGsiReady = () => !!(window.google && window.google.accounts && window.google.accounts.oauth2);
+let nwGsiLoading = null;
+const nwGsiErr = (m) => Object.assign(new Error(m), { code: 'gsi' });
+function nwGsiLoad(timeoutMs = 12000) {
+  if (nwGsiReady()) return Promise.resolve();
+  if (nwGsiLoading) return nwGsiLoading;
+  nwGsiLoading = new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    let added = null, tick = null;
+    const add = () => {
+      window.__nwGsiFailed = false;
+      added = document.createElement('script');
+      added.src = NW_GSI_SRC; added.async = true; added.setAttribute('data-nw-gsi', '');
+      added.onerror = () => { window.__nwGsiFailed = true; };
+      document.head.appendChild(added);
+    };
+    const end = (err) => { clearInterval(tick); nwGsiLoading = null; if (err) { if (added) added.remove(); reject(err); } else resolve(); };
+    // The <head> tag may still be loading: give it 3 seconds unless it already failed, then add a fresh tag.
+    if (window.__nwGsiFailed) add();
+    tick = setInterval(() => {
+      if (nwGsiReady()) return end();
+      if (!added && (window.__nwGsiFailed || Date.now() - t0 > 3000)) return add();
+      if (added && window.__nwGsiFailed) return end(nwGsiErr("Google's sign-in didn't load. Check the internet connection and tap Connect Google again."));
+      if (Date.now() - t0 > timeoutMs) return end(nwGsiErr("Google's sign-in is taking too long to load. Check the internet connection and tap Connect Google again."));
+    }, 150);
+  });
+  return nwGsiLoading;
+}
+if (typeof window !== 'undefined') {
+  const nwGsiRetry = () => { if (!nwGsiReady() && navigator.onLine !== false) nwGsiLoad().catch(() => {}); };
+  window.addEventListener('online', nwGsiRetry);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') nwGsiRetry(); });
+  setTimeout(nwGsiRetry, 5000);
+}
+// Asks Google for a token ({ access_token, expires_in }). When the script is already here the popup opens straight
+// from the tap, as before; otherwise the script is loaded first, and if the popup is then blocked the message says
+// to tap again.
+function nwGsiToken(cfg) {
+  const run = () => new Promise((resolve, reject) => {
+    try {
+      google.accounts.oauth2.initTokenClient({
+        ...cfg,
+        callback: (r) => { if (r.error) reject(new Error(r.error)); else resolve(r); },
+        error_callback: (e) => reject(e && e.type === 'popup_failed_to_open'
+          ? nwGsiErr("Google's sign-in is ready now. Tap Connect Google again.")
+          : new Error((e && e.type) || 'popup_closed')),
+      }).requestAccessToken();
+    } catch (e) { reject(e); }
+  });
+  return nwGsiReady() ? run() : nwGsiLoad().then(run);
+}
+
 // ── Google calls ──
 const nwGoogleOnline = () => (typeof navigator === 'undefined' || navigator.onLine !== false);
 async function nwGFetch(url, opts = {}) {
@@ -13170,7 +13229,7 @@ function ConnectGoogle({ onDone }) {
       <button data-pr-connect style={pBtn('solid', { width: '100%' })} onClick={async () => {
         setErr('');
         try { await window.nwGoogle.connect(); if (!nwDev.get(NW_DEV.link, '')) nwLedgerAutoFind(); onDone && onDone(); }
-        catch (e) { setErr(/popup_closed|access_denied/.test(String(e.message || e)) ? 'Google sign-in was closed. Try again.' : `Google sign-in failed: ${e.message || e}`); }
+        catch (e) { setErr(e && e.code === 'gsi' ? e.message : /popup_closed|access_denied/.test(String(e.message || e)) ? 'Google sign-in was closed. Try again.' : `Google sign-in failed: ${e.message || e}`); }
       }}>Connect Google</button>
       {err && <div role="alert" style={{ fontSize: 13, color: PC.bad, marginTop: 6 }}>{err}</div>}
     </div>
@@ -13340,14 +13399,9 @@ async function nwCalLoad() {
 }
 // Asks Google for calendar.readonly, only when tapped. The consent screen shows the one new permission.
 function nwCalConnect() {
-  return new Promise((resolve, reject) => {
-    try {
-      const client = google.accounts.oauth2.initTokenClient({
-        client_id: NW_GOOGLE_CLIENT_ID, scope: NW_CAL_SCOPE, include_granted_scopes: true,
-        callback: (r) => { if (r.error) { reject(new Error(r.error)); return; } nwDev.set(NW_CAL_KEYS.token, { token: r.access_token, expiresAt: Date.now() + (r.expires_in || 3600) * 1000 }); resolve(r.access_token); },
-      });
-      client.requestAccessToken();
-    } catch (e) { reject(e); }
+  return nwGsiToken({ client_id: NW_GOOGLE_CLIENT_ID, scope: NW_CAL_SCOPE, include_granted_scopes: true }).then((r) => {
+    nwDev.set(NW_CAL_KEYS.token, { token: r.access_token, expiresAt: Date.now() + (r.expires_in || 3600) * 1000 });
+    return r.access_token;
   });
 }
 // The events inside today-until-tomorrow-noon, as they are shown.
@@ -13374,7 +13428,7 @@ function CalGivens() {
   const connect = async () => {
     setErr('');
     try { await nwCalConnect(); await nwCalLoad(); }
-    catch (e) { setErr(/popup_closed|access_denied/.test(String(e.message || e)) ? 'Calendar sign-in was closed. Try again.' : `Calendar sign-in failed: ${e.message || e}`); }
+    catch (e) { setErr(e && e.code === 'gsi' ? e.message : /popup_closed|access_denied/.test(String(e.message || e)) ? 'Calendar sign-in was closed. Try again.' : `Calendar sign-in failed: ${e.message || e}`); }
   };
   return (
     <div data-pr-givens style={{ marginBottom: 8, paddingBottom: 8, borderBottom: `1px solid ${PC.border}` }}>
@@ -13483,7 +13537,7 @@ function SystemCalendar() {
   const connect = async () => {
     setErr('');
     try { await nwCalConnect(); await nwCalLoad(); }
-    catch (e) { setErr(/popup_closed|access_denied/.test(String(e.message || e)) ? 'Calendar sign-in was closed. Try again.' : `Calendar sign-in failed: ${e.message || e}`); }
+    catch (e) { setErr(e && e.code === 'gsi' ? e.message : /popup_closed|access_denied/.test(String(e.message || e)) ? 'Calendar sign-in was closed. Try again.' : `Calendar sign-in failed: ${e.message || e}`); }
   };
   return (
     <div data-nw-calendar-setup style={{ borderTop: '1px solid #333', paddingTop: 8, marginBottom: 8 }}>
@@ -16659,16 +16713,7 @@ function App() {
   window.nwGoogle = {
     token: getCachedToken,
     clear: clearCachedToken,
-    connect: () => new Promise((resolve, reject) => {
-      try {
-        const client = google.accounts.oauth2.initTokenClient({
-          client_id: DRIVE_CLIENT_ID,
-          scope: DRIVE_SCOPE,
-          callback: (r) => { if (r.error) { reject(new Error(r.error)); return; } cacheToken(r.access_token, r.expires_in); resolve(r.access_token); },
-        });
-        client.requestAccessToken();
-      } catch (e) { reject(e); }
-    }),
+    connect: () => nwGsiToken({ client_id: DRIVE_CLIENT_ID, scope: DRIVE_SCOPE }).then((r) => { cacheToken(r.access_token, r.expires_in); return r.access_token; }),
   };
   // ══ NW-TOKEN-CACHE END ══
 
@@ -16745,23 +16790,14 @@ function App() {
 
     setStatus('Connecting to Google Drive...');
     try {
-      await new Promise((resolve, reject) => {
-        const client = google.accounts.oauth2.initTokenClient({
-          client_id: DRIVE_CLIENT_ID,
-          scope: DRIVE_SCOPE,
-          callback: async (tokenResponse) => {
-            if (tokenResponse.error) { reject(tokenResponse.error); return; }
-            const token = tokenResponse.access_token;
-            cacheToken(token, tokenResponse.expires_in);
-            await doSync(token);
-            resolve();
-          },
-        });
-        client.requestAccessToken();
-      });
+      const tokenResponse = await nwGsiToken({ client_id: DRIVE_CLIENT_ID, scope: DRIVE_SCOPE });
+      cacheToken(tokenResponse.access_token, tokenResponse.expires_in);
+      await doSync(tokenResponse.access_token);
     } catch(e) {
-      const msg = String(e);
-      if (!msg || msg === 'undefined' || msg.includes('popup_closed') || msg.includes('access_denied')) {
+      const msg = (e && e.message) || String(e);
+      if (e && e.code === 'gsi') {
+        setStatus('❌ ' + msg.replace('Connect Google', 'Sync to Google Drive'));
+      } else if (!msg || msg === 'undefined' || msg.includes('popup_closed') || msg.includes('access_denied')) {
         setStatus('❌ OAuth blocked — this origin is not authorized in GCP Console. Go to GCP → APIs & Services → Credentials → OAuth client → Authorized JS origins and add the current domain.');
       } else if (msg.includes('google is not defined') || msg.includes('Cannot read')) {
         setStatus('❌ Google Identity script failed to load — check your connection and try again.');
