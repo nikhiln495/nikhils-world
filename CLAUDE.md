@@ -30,7 +30,7 @@ The app opens and saves without internet (`sw.js`, registered at the end of `ind
 - Scripts, styles and fonts from other sites are stored on their first load and served from storage after
   that. **Outside scripts use pinned versions in the URL** (`react@18.3.1`, `firebasejs/10.12.2`), so a
   stored copy is never stale. (The one exception is `accounts.google.com/gsi/client`, which Google doesn't
-  version; it is never stored.) Firestore, other Google APIs, `accounts.google.com` and
+  version; it is never stored. If its first load fails, `nwGsiLoad()` loads it again; every sign-in goes through `nwGsiToken()`, never `google.accounts` directly.) Firestore, other Google APIs, `accounts.google.com` and
   `cloudfunctions.net` are never stored.
 - **Every feature must open and save offline using this device's copy.** Read through `window.storage`
   (offline, `get`/`getAll` answer from this device's copy at once) and never wait on a network call before
