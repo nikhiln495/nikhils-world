@@ -272,6 +272,8 @@ Practice log entries may also carry (all optional, copied as given):
 - `pause-contain-return` entries (Nov 25, `source: "app-cascade"`, no `level`): `note` is `Return: <the small action>`, with
   `Cascade parked in the Brain Dump.` in front when he wrote one. The cascade text itself goes only to the Brain Dump
   (a `note:` capture starting `Cascade:`), never into the log. Drafts: `practice` tab, ids `cascade` and `cascade-return`.
+- Stuck from anywhere (Nov 25): the bottom bar on every tab has a Stuck button (`data-nw-quick="stuck"`). It fires
+  `nw-open-stuck`; the app switches to Practice and puts the Stuck screen on top once. Nothing is written.
 - `counts` — count-to-60 attempts: `[{ n, seconds (one decimal), position?: lying|sitting|standing, at, seeded?,
   startedLate? }]`. Used by `passage-of-time` entries and by the waking-ladder entry.
 - `place` — on `lights-out` entries: `bed | couch | other` (the line he adds is `myNote`).

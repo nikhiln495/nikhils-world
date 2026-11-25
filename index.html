@@ -12750,6 +12750,8 @@ function NwQuickActions({ tab }) {
       )}
       <div data-nw-quickbar style={{ flexShrink: 0, display: 'flex', gap: 6, padding: '4px 10px', background: '#141414', borderTop: '1px solid #262626' }}>
         {NW_QUICK.map(q => <button key={q.id} data-nw-quick={q.id} aria-expanded={open === q.id} onClick={() => setOpen(o => (o === q.id ? null : q.id))} style={{ ...nwQuickBtn, minHeight: 32, padding: '2px 12px', ...(open === q.id ? { background: '#1f3f3c' } : {}) }}>{q.label}</button>)}
+        {/* Nov 25 (Dr. Shobha session): Stuck one tap away from any tab. Opens Practice with the Stuck screen on top. */}
+        <button data-nw-quick="stuck" onClick={() => { setOpen(null); window.dispatchEvent(new Event('nw-open-stuck')); }} style={{ ...nwQuickBtn, minHeight: 32, padding: '2px 12px', marginLeft: 'auto', color: '#fca5a5', border: '1px solid #f87171', fontWeight: 700 }}>Stuck</button>
       </div>
     </>
   );
@@ -15636,6 +15638,9 @@ function PracticeApp() {
   useEffect(() => {
     const open = () => setStack(st => (st.length && st[st.length - 1].type === 'waking' ? st : [...st, { type: 'waking', key: `waking-${Date.now()}-${st.length}` }]));
     window.addEventListener('nw-open-waking', open);
+    // The Stuck button on the bottom bar of every tab (Nov 25): the Stuck screen on top, once.
+    const openStuck = () => { setStack(st => (st.length && st[st.length - 1].type === 'stuck' ? st : [...st, { type: 'stuck', key: `stuck-${Date.now()}-${st.length}` }])); toTop(); };
+    window.addEventListener('nw-open-stuck', openStuck);
     if (NW_START_WAKING_P()) open();
     // The return card's Open: back into the flow (its draft resumes at the step it was on), or Today.
     const back = (e) => {
@@ -15644,7 +15649,7 @@ function PracticeApp() {
       else { setStack([]); setScreen('today'); }
     };
     window.addEventListener('nw-return-open', back);
-    return () => { window.removeEventListener('nw-open-waking', open); window.removeEventListener('nw-return-open', back); };
+    return () => { window.removeEventListener('nw-open-waking', open); window.removeEventListener('nw-open-stuck', openStuck); window.removeEventListener('nw-return-open', back); };
   }, []);
 
   // Puts a changed log doc on screen if it is today's.
@@ -16571,8 +16576,9 @@ function App() {
   useEffect(() => {
     const onWake = () => setActiveTab('practice');
     window.addEventListener('nw-open-waking', onWake);
+    window.addEventListener('nw-open-stuck', onWake);
     window.addEventListener('nw-return-open', onWake);
-    return () => { window.removeEventListener('nw-open-waking', onWake); window.removeEventListener('nw-return-open', onWake); };
+    return () => { window.removeEventListener('nw-open-waking', onWake); window.removeEventListener('nw-open-stuck', onWake); window.removeEventListener('nw-return-open', onWake); };
   }, []);
   const [backupStatus, setBackupStatus] = useState('');
   const fileRef = useRef(null);

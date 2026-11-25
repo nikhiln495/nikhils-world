@@ -117,9 +117,26 @@ async function part2() {
   await finish(ctx, 'cascade');
 }
 
+async function part3() {
+  console.log('\n[v7 3. Stuck is one tap from any tab]');
+  const ctx = await open({});
+  const { page } = ctx;
+  // Starts on another tab (not Practice): the bottom bar's Stuck goes straight to the Stuck screen.
+  const n = await page.locator('[data-nw-quick="stuck"]').count();
+  ok(n === 1, 'one Stuck button on the bottom bar → ' + n);
+  await page.locator('[data-nw-quick="stuck"]').click();
+  await wait(page, 600);
+  const cascadeVisible = await page.locator('[data-pr-cascade-open]').isVisible();
+  ok(cascadeVisible, 'one tap opens the Stuck screen, with Pause, Contain, Return on it');
+  await page.locator('[data-nw-quick="stuck"]').click();
+  await wait(page, 300);
+  ok(await page.locator('[data-pr-cascade-open]').count() === 1, 'a second tap does not stack a second Stuck screen');
+  await finish(ctx, 'stuck-one-tap');
+}
+
 (async () => {
   const which = process.argv[2] || 'all';
-  const parts = { 1: part1, 2: part2 };
+  const parts = { 1: part1, 2: part2, 3: part3 };
   for (const [k, fn] of Object.entries(parts)) if (which === 'all' || which === k) await fn();
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
