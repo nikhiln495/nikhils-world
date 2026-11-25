@@ -11634,7 +11634,8 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
 
       {stage === 'up' && (
         <div>
-          <div style={{ fontSize: 26, fontWeight: 700, color: PC.text, marginBottom: 6 }}>Up. Logged at level 4.</div>
+          <div data-pr-up-cheer style={{ fontSize: 26, fontWeight: 700, color: PC.text, marginBottom: 4 }}>Hey, great, you got up from bed.</div>
+          <div style={{ fontSize: 14, color: PC.muted, marginBottom: 6 }}>Up. Logged at level 4.</div>
           {first ? (
             <div style={pCard({ marginTop: 12 })}>
               <div style={pLabel}>First thing on today's plan</div>
@@ -11646,6 +11647,192 @@ function WakingUp({ playbook, today, homework, todayLog, yesterdayLog, onLog, on
           ) : <div style={{ fontSize: 15, color: PC.muted, marginTop: 8 }}>No plan for today yet. Name the first thing you'll do, and do its first step.</div>}
           <button data-pr-pick-three style={pBtn('solid', { width: '100%', marginTop: 8 })} onClick={() => { nwThreeAsk(); onClose(); }}>Pick today's three</button>
           <button style={pBtn('ghost', { width: '100%', marginTop: 8 })} onClick={onClose}>Back to Today</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────
+// REJUVENATE (Nov 25, 2026 session with Dr. Shobha)
+// After a task: move off the bed, then mindful orientation or a spin of something new to learn.
+// Called "Rejuvenate", not rest or break. Topics are the ones he named; never objects he is making himself.
+// ─────────────────────────────────────────────────────
+const P_REJUV_TOPICS = [
+  { id: 'geography', label: 'Geography' },
+  { id: 'space', label: 'Space' },
+  { id: 'science', label: 'Science' },
+  { id: 'story', label: 'A random story or fantasy' },
+  { id: 'art', label: 'An art technique' },
+  { id: 'boats', label: 'Boat or canoe making' },
+  { id: 'indigenous', label: 'Indigenous ways of living' },
+  { id: 'made', label: 'How things are made (an airplane, a bedsheet)' },
+];
+const P_ORIENT_STEPS = [
+  'Sit where you are and notice where that is: "I am on the sofa."',
+  "Name 3 things around you that show this place is familiar and you've been safe here.",
+  'Notice the light, the sounds and the temperature.',
+  'Say: "I am here in this moment. I do not have to solve the entire day right now."',
+];
+// A random topic, never the same one twice in a row.
+const pRejuvPick = (lastId, rand = Math.random) => {
+  const pool = P_REJUV_TOPICS.filter(t => t.id !== lastId);
+  return pool[Math.min(pool.length - 1, Math.floor(rand() * pool.length))];
+};
+const pVideoSearchUrl = (words) => `https://www.youtube.com/results?search_query=${encodeURIComponent(words)}`;
+const P_REJUV_FORMAT = { type: 'json_schema', schema: {
+  type: 'object', additionalProperties: false, required: ['title', 'text', 'search'],
+  properties: { title: { type: 'string' }, text: { type: 'string' }, search: { type: 'string' } },
+} };
+async function pRejuvTeach(topic) {
+  const system = `${P_VOICE}\n\nHe is taking a short reset between tasks. Teach him one specific, surprising thing from the topic he spun. Pick something narrow (one place, one object, one technique, one story), not an overview. 120 to 180 words, plain words, no metaphors, no questions back, nothing to do afterwards. Never about anything he is making or planning himself. title: a few words naming the subject. search: 3 to 6 words that would find a good video about it.`;
+  const { data, saved } = await pCallClaude({ system, text: `Topic: ${topic.label}`, format: P_REJUV_FORMAT, ask: { kind: 'rejuvenate', words: topic.label }, screen: 'rejuvenate' });
+  const block = (data?.content || []).find(b => b.type === 'text');
+  let out = null;
+  try { out = JSON.parse(block ? block.text : 'null'); } catch (_) {}
+  if (!out || typeof out.text !== 'string' || !out.text.trim()) throw pAskError('Claude sent back something that could not be read.', saved);
+  return { title: String(out.title || topic.label).trim(), text: out.text.trim(), search: String(out.search || out.title || topic.label).trim(), saved };
+}
+
+function RejuvenateScreen({ onLog, onClose }) {
+  const [stage, setStage] = useState('move'); // move | pick | orient | spin
+  const [offBed, setOffBed] = useState(null);
+  const [step, setStep] = useState(0);
+  const [topic, setTopic] = useState(null);
+  const [lesson, setLesson] = useState({ busy: false, err: '', res: null });
+  const [done, setDone] = useState([]);
+  const [busy, wrap] = window.useBusy();
+  const online = pOnline();
+  const spin = () => { setTopic(t => pRejuvPick(t && t.id)); setLesson({ busy: false, err: '', res: null }); setStage('spin'); };
+  const teach = async () => {
+    if (!topic) return;
+    setLesson({ busy: true, err: '', res: null });
+    try { const res = await pRejuvTeach(topic); setLesson({ busy: false, err: '', res }); setDone(d => (d.includes(`learn: ${res.title}`) ? d : [...d, `learn: ${res.title}`])); }
+    catch (e) { setLesson({ busy: false, err: e.message || String(e), res: null, saved: e.saved }); }
+  };
+  const finish = wrap(async () => {
+    const where = offBed ? 'off the bed' : 'stayed where I was';
+    const note = [where, ...done].join('; ');
+    const ok = await onLog({ practiceId: 'rejuvenate', source: 'app-rejuvenate', note });
+    if (ok) onClose();
+  });
+  const back = <button style={pBtn('ghost', { width: '100%', marginTop: 8 })} onClick={() => setStage('pick')}>Back</button>;
+  return (
+    <div data-pr-rejuv>
+      <div style={{ fontSize: 26, fontWeight: 700, color: PC.text, marginBottom: 6 }}>Rejuvenate</div>
+      {stage === 'move' && (
+        <div>
+          <div style={{ fontSize: 17, color: PC.text, marginBottom: 12 }}>First, off the bed: the sofa, or somewhere a little less comfy.</div>
+          <button style={pBtn('solid', { width: '100%' })} onClick={() => { setOffBed(true); setStage('pick'); }}>I'm off the bed</button>
+          <button style={pBtn('ghost', { width: '100%', marginTop: 8 })} onClick={() => { setOffBed(false); setStage('pick'); }}>Not yet, start here</button>
+          <button style={pBtn('ghost', { width: '100%', marginTop: 8 })} onClick={onClose}>Close</button>
+        </div>
+      )}
+      {stage === 'pick' && (
+        <div>
+          {offBed === false && <div style={{ fontSize: 14, color: PC.muted, marginBottom: 10 }}>Start with orientation where you are. Move to the sofa when you can.</div>}
+          <button style={pBtn('solid', { width: '100%' })} onClick={() => { setStep(0); setStage('orient'); }}>Mindful orientation, 2 min</button>
+          <button style={pBtn('solid', { width: '100%', marginTop: 8 })} onClick={spin}>Spin something to learn</button>
+          <button style={pBtn('ghost', { width: '100%', marginTop: 8 })} disabled={busy} onClick={finish}>Done, back to it</button>
+        </div>
+      )}
+      {stage === 'orient' && (
+        <div>
+          <div style={pLabel}>Step {step + 1} of {P_ORIENT_STEPS.length}</div>
+          <div style={{ fontSize: 18, color: PC.text, marginBottom: 12 }}>{P_ORIENT_STEPS[step]}</div>
+          {step < P_ORIENT_STEPS.length - 1
+            ? <button style={pBtn('solid', { width: '100%' })} onClick={() => setStep(step + 1)}>Next</button>
+            : <button style={pBtn('solid', { width: '100%' })} onClick={() => { setDone(d => (d.includes('mindful orientation') ? d : [...d, 'mindful orientation'])); setStage('pick'); }}>Done</button>}
+          {back}
+        </div>
+      )}
+      {stage === 'spin' && topic && (
+        <div>
+          <div style={pCard()}>
+            <div style={pLabel}>You spun</div>
+            <div data-pr-rejuv-topic style={{ fontSize: 20, fontWeight: 700, color: PC.text }}>{topic.label}</div>
+          </div>
+          {!lesson.res && (online
+            ? <button style={pBtn('solid', { width: '100%' })} disabled={lesson.busy} onClick={teach}>{lesson.busy ? 'Asking Claude…' : 'Teach me one thing'}</button>
+            : <div style={{ fontSize: 14, color: PC.muted }}>This device is offline, so Claude can't teach one now. Spin again, or try orientation.</div>)}
+          {lesson.err && <div style={{ fontSize: 14, color: PC.warn || PC.text, marginTop: 8 }}>❌ {lesson.err}</div>}
+          {lesson.res && (
+            <div style={pCard()}>
+              <div style={{ fontSize: 17, fontWeight: 700, color: PC.text, marginBottom: 6 }}>{lesson.res.title}</div>
+              <div style={{ fontSize: 15, color: PC.text, whiteSpace: 'pre-wrap' }}>{lesson.res.text}</div>
+              <a href={pVideoSearchUrl(lesson.res.search)} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', marginTop: 10, color: PC.accent }}>Find a video</a>
+              <PSaved saved={lesson.res.saved} />
+            </div>
+          )}
+          <button style={pBtn('ghost', { width: '100%', marginTop: 8 })} onClick={spin}>Spin again</button>
+          {back}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────
+// PAUSE, CONTAIN, RETURN (Nov 25, 2026 session with Dr. Shobha)
+// For a cascade: the racing thoughts between tasks (the task plus the feeling, the thought, what will happen).
+// The cascade goes to the Brain Dump; the tasks themselves belong in Today's three.
+// ─────────────────────────────────────────────────────
+function CascadeScreen({ onLog, onClose }) {
+  const [stage, setStage] = useState('pause'); // pause | contain | return
+  const [text, setText, clearText] = window.useDraft('practice', 'cascade', '');
+  const [next, setNext, clearNext] = window.useDraft('practice', 'cascade-return', '');
+  const [msg, setMsg] = useState('');
+  const [parked, setParked] = useState(false);
+  const [busy, wrap] = window.useBusy();
+  const park = wrap(async () => {
+    const t = text.trim();
+    if (t && window.nwBrainDump && window.nwBrainDump.add) {
+      const c = window.nwBrainDump.add(`Cascade: ${t}`, 'note:');
+      const where = await c.saved;
+      if (where === false) { setMsg('Nothing was stored: this device is full. Copy the text somewhere safe.'); return; }
+      if (pOnline() && window.nwGoogle && window.nwGoogle.token()) { try { await window.nwBrainDump.sendWaiting(); } catch (_) {} }
+      setParked(true);
+      clearText();
+    }
+    setStage('contain-done');
+  });
+  const finish = wrap(async () => {
+    const n = next.trim();
+    const ok = await onLog({ practiceId: 'pause-contain-return', source: 'app-cascade', note: `${parked ? 'Cascade parked in the Brain Dump. ' : ''}Return: ${n || '(not written)'}` });
+    if (ok) { clearNext(); onClose(); }
+  });
+  return (
+    <div data-pr-cascade>
+      <div style={{ fontSize: 26, fontWeight: 700, color: PC.text, marginBottom: 6 }}>Pause, Contain, Return</div>
+      {stage === 'pause' && (
+        <div>
+          <div style={pLabel}>Pause</div>
+          <div style={{ fontSize: 18, color: PC.text, marginBottom: 12 }}>Say: "I am experiencing a cascade. I do not need to follow every thought." Then a few breaths, without forcing them.</div>
+          <button style={pBtn('solid', { width: '100%' })} onClick={() => setStage('contain')}>Next</button>
+          <button style={pBtn('ghost', { width: '100%', marginTop: 8 })} onClick={onClose}>Close</button>
+        </div>
+      )}
+      {stage === 'contain' && (
+        <div>
+          <div style={pLabel}>Contain</div>
+          <div style={{ fontSize: 16, color: PC.text, marginBottom: 8 }}>Put the cascade here: the feeling, the thought, what you think will happen. Not the tasks.</div>
+          <textarea aria-label="The cascade" value={text} onChange={e => setText(e.target.value)} rows={4} style={{ width: '100%', fontSize: 16, padding: 10, borderRadius: 8, border: `1px solid ${PC.border}`, background: PC.card, color: PC.text, boxSizing: 'border-box' }} />
+          <button style={pBtn('solid', { width: '100%', marginTop: 8 })} disabled={busy} onClick={park}>{text.trim() ? 'Put it in the Brain Dump' : 'Skip writing it'}</button>
+          {msg && <div style={{ fontSize: 14, color: PC.muted, marginTop: 8 }}>{msg}</div>}
+        </div>
+      )}
+      {stage === 'contain-done' && (
+        <div>
+          <div style={{ fontSize: 18, color: PC.text, marginBottom: 12 }}>{parked ? "It's in the Brain Dump. " : ''}Make one physical gesture to close it (close the laptop lid, put the phone face down). Then 30 seconds to feel the lightness.</div>
+          <button style={pBtn('solid', { width: '100%' })} onClick={() => setStage('return')}>Next</button>
+        </div>
+      )}
+      {stage === 'return' && (
+        <div>
+          <div style={pLabel}>Return</div>
+          <div style={{ fontSize: 16, color: PC.text, marginBottom: 8 }}>One small action in the present, like "go down the steps slowly". What is it?</div>
+          <input aria-label="One small action" value={next} onChange={e => setNext(e.target.value)} style={{ width: '100%', fontSize: 16, padding: 10, borderRadius: 8, border: `1px solid ${PC.border}`, background: PC.card, color: PC.text, boxSizing: 'border-box' }} />
+          <button style={pBtn('solid', { width: '100%', marginTop: 8 })} disabled={busy} onClick={finish}>Do it now</button>
         </div>
       )}
     </div>
@@ -11726,7 +11913,7 @@ function EarlierAnswers({ playbook, tick }) {
   );
 }
 
-function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onWaking, onSaveProposal, onClose }) {
+function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onWaking, onCascade, onSaveProposal, onClose }) {
   useThree(); // loads today's three, which the one-line context for Claude includes
   const [open, setOpen] = useState(null);
   const [askText, setAskText, clearAsk] = window.useDraft('practice', 'ask', '');
@@ -11783,6 +11970,7 @@ function StuckScreen({ playbook, stuckMap, stuckMapError, todayLog, onStart, onW
       <div style={{ fontSize: 26, fontWeight: 700, color: PC.text, marginBottom: 6 }}>Where are you right now?</div>
       {!fromDoc && <div style={{ fontSize: 12, color: PC.muted, marginBottom: 10 }}>Using the built-in list: the stuck map is {stuckMapError ? 'unreadable' : 'missing'}.</div>}
       {!playbook && <div style={{ fontSize: 12, color: PC.muted, marginBottom: 10 }}>The playbook couldn't be read, so no practices can be listed.</div>}
+      {onCascade && <button data-pr-cascade-open style={pBtn('ghost', { width: '100%', minHeight: 56, fontSize: 16, textAlign: 'left', marginBottom: 8 })} onClick={onCascade}>Thoughts racing between tasks: Pause, Contain, Return</button>}
 
       {situations.map((s, k) => {
         const isOpen = open === (s.id || k);
@@ -12248,7 +12436,7 @@ function ProgressScreen({ data, refreshKey }) {
 // BUILD v3 · PART 1 — Joy, Lights out, Day history, one-time seeds
 // ─────────────────────────────────────────────────────
 
-const P_FALLBACK_NAMES = { 'lights-out': 'Lights out', 'waking-ladder': 'Waking ladder', 'what-now': 'What now?', 'idea-dump': 'Idea dump' };
+const P_FALLBACK_NAMES = { 'lights-out': 'Lights out', 'waking-ladder': 'Waking ladder', 'what-now': 'What now?', 'idea-dump': 'Idea dump', rejuvenate: 'Rejuvenate', 'pause-contain-return': 'Pause, Contain, Return' };
 const pPracticeName = (pb, id) => pFindPractice(pb, id)?.name || P_FALLBACK_NAMES[id] || id;
 const pMonthKey = (d = new Date()) => `${d.getFullYear()}_${pTwo(d.getMonth() + 1)}`;
 const P_JOY_WHO = ['Corky', 'Bubbess', 'Flora', 'Dolly', 'Diah', 'Rob', 'Kristy'];
@@ -12562,6 +12750,8 @@ function NwQuickActions({ tab }) {
       )}
       <div data-nw-quickbar style={{ flexShrink: 0, display: 'flex', gap: 6, padding: '4px 10px', background: '#141414', borderTop: '1px solid #262626' }}>
         {NW_QUICK.map(q => <button key={q.id} data-nw-quick={q.id} aria-expanded={open === q.id} onClick={() => setOpen(o => (o === q.id ? null : q.id))} style={{ ...nwQuickBtn, minHeight: 32, padding: '2px 12px', ...(open === q.id ? { background: '#1f3f3c' } : {}) }}>{q.label}</button>)}
+        {/* Nov 25 (Dr. Shobha session): Stuck one tap away from any tab. Opens Practice with the Stuck screen on top. */}
+        <button data-nw-quick="stuck" aria-label="Stuck, from any tab" onClick={() => { setOpen(null); window.dispatchEvent(new Event('nw-open-stuck')); }} style={{ ...nwQuickBtn, minHeight: 32, padding: '2px 12px', marginLeft: 'auto', color: '#fca5a5', border: '1px solid #f87171', fontWeight: 700 }}>Stuck</button>
       </div>
     </>
   );
@@ -15448,6 +15638,9 @@ function PracticeApp() {
   useEffect(() => {
     const open = () => setStack(st => (st.length && st[st.length - 1].type === 'waking' ? st : [...st, { type: 'waking', key: `waking-${Date.now()}-${st.length}` }]));
     window.addEventListener('nw-open-waking', open);
+    // The Stuck button on the bottom bar of every tab (Nov 25): the Stuck screen on top, once.
+    const openStuck = () => { setStack(st => (st.length && st[st.length - 1].type === 'stuck' ? st : [...st, { type: 'stuck', key: `stuck-${Date.now()}-${st.length}` }])); toTop(); };
+    window.addEventListener('nw-open-stuck', openStuck);
     if (NW_START_WAKING_P()) open();
     // The return card's Open: back into the flow (its draft resumes at the step it was on), or Today.
     const back = (e) => {
@@ -15456,7 +15649,7 @@ function PracticeApp() {
       else { setStack([]); setScreen('today'); }
     };
     window.addEventListener('nw-return-open', back);
-    return () => { window.removeEventListener('nw-open-waking', open); window.removeEventListener('nw-return-open', back); };
+    return () => { window.removeEventListener('nw-open-waking', open); window.removeEventListener('nw-open-stuck', openStuck); window.removeEventListener('nw-return-open', back); };
   }, []);
 
   // Puts a changed log doc on screen if it is today's.
@@ -15659,9 +15852,11 @@ function PracticeApp() {
       <WakingUp playbook={data.playbook} today={data.today} homework={data.homework} todayLog={data.todayLog} yesterdayLog={data.yesterdayLog}
         onLog={logRep} onStart={start} onClose={pop} />
     );
+    if (o.type === 'rejuv') return <RejuvenateScreen onLog={logRep} onClose={pop} />;
+    if (o.type === 'cascade') return <CascadeScreen onLog={logRep} onClose={pop} />;
     if (o.type === 'stuck') return (
       <StuckScreen playbook={data.playbook} stuckMap={data.stuckMap} stuckMapError={data.stuckMapError} todayLog={data.todayLog}
-        onStart={start} onWaking={() => push({ type: 'waking' })} onSaveProposal={saveProposal} onClose={pop} />
+        onStart={start} onWaking={() => push({ type: 'waking' })} onCascade={() => push({ type: 'cascade' })} onSaveProposal={saveProposal} onClose={pop} />
     );
     return null;
   };
@@ -15695,9 +15890,14 @@ function PracticeApp() {
             <div style={{ fontSize: 11, color: PC.accent, letterSpacing: 2, textTransform: 'uppercase', marginBottom: 4, fontFamily: pMono }}>Dr. Shobha · Brighton · every rep counts</div>
             <h1 style={{ fontSize: 26, fontWeight: 700, color: PC.text, margin: 0, letterSpacing: -0.5 }}>Practice</h1>
           </div>
-          {top?.type !== 'stuck' && (
-            <button onClick={() => push({ type: 'stuck' })} style={pBtn('warn', { minHeight: 48, padding: '10px 18px', fontSize: 16, fontWeight: 700, flexShrink: 0 })}>Stuck</button>
-          )}
+          <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+            {top?.type !== 'rejuv' && (
+              <button onClick={() => push({ type: 'rejuv' })} style={pBtn('ghost', { minHeight: 48, padding: '10px 14px', fontSize: 15, fontWeight: 700 })}>Rejuvenate</button>
+            )}
+            {top?.type !== 'stuck' && (
+              <button onClick={() => push({ type: 'stuck' })} style={pBtn('warn', { minHeight: 48, padding: '10px 18px', fontSize: 16, fontWeight: 700 })}>Stuck</button>
+            )}
+          </div>
         </div>
         {!stack.length && (
           <div role="tablist" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginBottom: 16 }}>
@@ -16376,8 +16576,9 @@ function App() {
   useEffect(() => {
     const onWake = () => setActiveTab('practice');
     window.addEventListener('nw-open-waking', onWake);
+    window.addEventListener('nw-open-stuck', onWake);
     window.addEventListener('nw-return-open', onWake);
-    return () => { window.removeEventListener('nw-open-waking', onWake); window.removeEventListener('nw-return-open', onWake); };
+    return () => { window.removeEventListener('nw-open-waking', onWake); window.removeEventListener('nw-open-stuck', onWake); window.removeEventListener('nw-return-open', onWake); };
   }, []);
   const [backupStatus, setBackupStatus] = useState('');
   const fileRef = useRef(null);

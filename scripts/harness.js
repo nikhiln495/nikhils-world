@@ -15,6 +15,7 @@
 // 10. v5-test.js all         — build v5 (Nov 15 2026): captures on every device, the Dump's shape and who said it, Went wrong,
 //                             his own answer first, Wake up, the return card
 // 11. v6-test.js all         — build v6 (Nov 25 2026): Today's three from the latest session, the confidential: tag
+// 12. v7-test.js all         — build v7 (Nov 25 2026, session with Dr. Shobha): Rejuvenate, Pause Contain Return, the up cheer
 // Plus: index.html must not call api.anthropic.com directly (everything goes through the AI proxy), and must never
 // send tool_choice of type 'tool' or 'any'.
 // The live Firestore is never touched: every run uses an in-memory mock or fake Firestore.
@@ -36,6 +37,7 @@ const steps = [
   ['build v4-A: What now fix, Ledger on any device, calendar givens, Today\'s three', ['v4a-test.js', 'all']],
   ['build v5: captures on every device, Dump shape, who said it, Went wrong, your answer first', ['v5-test.js', 'all']],
   ['build v6: Today\'s three from the latest session, confidential: tag', ['v6-test.js', 'all']],
+  ['build v7: Rejuvenate, Pause Contain Return, the up cheer', ['v7-test.js', 'all']],
 ];
 const results = [];
 const html = fs.readFileSync(path.join(dir, '..', 'index.html'), 'utf8');

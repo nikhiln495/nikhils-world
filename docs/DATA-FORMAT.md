@@ -266,6 +266,14 @@ Practice log entries may also carry (all optional, copied as given):
   recorded on the step it was pressed on.
 - `eyesOpen` — `{ kind: now|15|30|45|60|time, at (ISO), minutesAgo, plus? }` and `minutesEyesToUp`.
 - `sleepAt` — on a `waking-ladder` entry with no `level` and `source: "app-waking-sleep"`: the time he went back to sleep.
+- `rejuvenate` entries (Nov 25, `source: "app-rejuvenate"`, no `level`): `note` is `off the bed` or `stayed where I was`,
+  then what he did, `; `-separated (`mindful orientation`, `learn: <title Claude gave>`). The Rejuvenate button sits next to
+  Stuck. "Teach me one thing" saves its Claude answer as `practice:asks` kind `rejuvenate` (words = the topic spun).
+- `pause-contain-return` entries (Nov 25, `source: "app-cascade"`, no `level`): `note` is `Return: <the small action>`, with
+  `Cascade parked in the Brain Dump.` in front when he wrote one. The cascade text itself goes only to the Brain Dump
+  (a `note:` capture starting `Cascade:`), never into the log. Drafts: `practice` tab, ids `cascade` and `cascade-return`.
+- Stuck from anywhere (Nov 25): the bottom bar on every tab has a Stuck button (`data-nw-quick="stuck"`). It fires
+  `nw-open-stuck`; the app switches to Practice and puts the Stuck screen on top once. Nothing is written.
 - `counts` — count-to-60 attempts: `[{ n, seconds (one decimal), position?: lying|sitting|standing, at, seeded?,
   startedLate? }]`. Used by `passage-of-time` entries and by the waking-ladder entry.
 - `place` — on `lights-out` entries: `bed | couch | other` (the line he adds is `myNote`).
