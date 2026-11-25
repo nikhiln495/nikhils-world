@@ -12751,7 +12751,7 @@ function NwQuickActions({ tab }) {
       <div data-nw-quickbar style={{ flexShrink: 0, display: 'flex', gap: 6, padding: '4px 10px', background: '#141414', borderTop: '1px solid #262626' }}>
         {NW_QUICK.map(q => <button key={q.id} data-nw-quick={q.id} aria-expanded={open === q.id} onClick={() => setOpen(o => (o === q.id ? null : q.id))} style={{ ...nwQuickBtn, minHeight: 32, padding: '2px 12px', ...(open === q.id ? { background: '#1f3f3c' } : {}) }}>{q.label}</button>)}
         {/* Nov 25 (Dr. Shobha session): Stuck one tap away from any tab. Opens Practice with the Stuck screen on top. */}
-        <button data-nw-quick="stuck" onClick={() => { setOpen(null); window.dispatchEvent(new Event('nw-open-stuck')); }} style={{ ...nwQuickBtn, minHeight: 32, padding: '2px 12px', marginLeft: 'auto', color: '#fca5a5', border: '1px solid #f87171', fontWeight: 700 }}>Stuck</button>
+        <button data-nw-quick="stuck" aria-label="Stuck, from any tab" onClick={() => { setOpen(null); window.dispatchEvent(new Event('nw-open-stuck')); }} style={{ ...nwQuickBtn, minHeight: 32, padding: '2px 12px', marginLeft: 'auto', color: '#fca5a5', border: '1px solid #f87171', fontWeight: 700 }}>Stuck</button>
       </div>
     </>
   );

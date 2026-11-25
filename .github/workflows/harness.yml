@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # scripts/v5-test.js reads an older main commit with git show
 
       - name: Set up Node
         uses: actions/setup-node@v4

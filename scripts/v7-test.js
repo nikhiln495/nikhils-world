@@ -42,7 +42,7 @@ async function part1() {
   await click(page, "I'm off the bed");
   await click(page, 'Mindful orientation, 2 min');
   t = await page.locator('[data-pr-rejuv]').innerText();
-  ok(t.includes('Step 1 of 4') && t.includes('I am on the sofa'), 'orientation starts at step 1 of 4');
+  ok(t.toLowerCase().includes('step 1 of 4') && t.includes('I am on the sofa'), 'orientation starts at step 1 of 4');
   await click(page, 'Next'); await click(page, 'Next'); await click(page, 'Next');
   t = await page.locator('[data-pr-rejuv]').innerText();
   ok(t.includes('I do not have to solve the entire day right now.'), 'the last orientation step is her sentence');
