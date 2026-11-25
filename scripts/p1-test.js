@@ -360,6 +360,7 @@ async function step3() {
     t = await visibleText(ctx.page);
     ok(lg && lg.entries.length === 1 && lg.entries[0].practiceId === 'waking-ladder' && lg.entries[0].level === 4 && lg.entries[0].time === '07:10' && lg.entries[0].source === 'app-waking' && /Where: Eyes closed/.test(lg.entries[0].note), "tapping \"I'm up and moving\" on the last step logs up straight away");
     ok(t.includes('Up. Logged at level 4.') && !t.includes('That was the last step'), 'goes straight to the "Up" screen, no in-between screen');
+    ok(t.includes('Hey, great, you got up from bed.'), 'the Up screen cheers him for getting up (Nov 25 session)');
     await finish(ctx, 'waking-timer');
   }
 
