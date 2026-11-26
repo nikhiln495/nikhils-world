@@ -25,7 +25,7 @@ Drive sign-in.") and everything else keeps working.
 
 `NW-DEVICE-CACHE` in `index.html`: the Ledger link (`__nw_ledger_link`), the last read with its time and the Rules
 text (`__nw_ledger_cache`, work rows already removed), changes waiting to be sent (`__nw_ledger_pending`), Brain
-Dump work captures with their status (`__nw_dump_queue`; every other capture is in `dump:captures:<YYYY_MM>` since build v5), and drafts of Ledger / Brain Dump text (`__nw_dev_draft:*`).
+Dump confidential: captures with their status (`__nw_dump_queue`; every other capture, work: included since Nov 25, is in `dump:captures:<YYYY_MM>`), and drafts of Ledger / Brain Dump text (`__nw_dev_draft:*`).
 appdata is publicly readable, so none of it may be written there. The only Ledger text that can reach Firestore is
 inside saved **What now?** results and the first step he saves for tomorrow, and only from rows the work filter allows.
 
@@ -88,7 +88,7 @@ first heading, otherwise a new H1 heading for today is inserted first. Each capt
 - **Whose words?** Mine (default) adds nothing. A name gives `(from Nikhil's World, 5:04 PM, words: Corky)`; AI draft gives
   `(from Nikhil's World, 5:04 PM, AI draft)`. No AI model or company is named in the Doc. Several can be picked (Nov 23):
   `words: Corky, Priya` (Mine shows as Nikhil). Any name used on an earlier capture is offered again.
-- **`confidential:`** (Nov 18, research data) works like a work capture: kept on this device only (`__nw_dump_queue`), never in
+- **`confidential:`** (Nov 18, research data) is kept on this device only (`__nw_dump_queue`), never in
   the database, never sent to Claude by the app. It goes only to a private Doc `Brain Dump Confidential <Mon YYYY>` made in the
   Brain Dump's folder, all of it (no pointer line in the main Brain Dump, even for a paste). The main Brain Dump is never
   chosen from a doc named `Brain Dump Pastes …` or `Brain Dump Confidential …`. The panel reminds him to use study IDs, not

@@ -110,36 +110,40 @@ async function part1() {
     await finish(ctx, 'offline 60');
   }
 
-  console.log('\n[v5 1c. Work captures stay on this device; captures from before this change move over]');
+  console.log('\n[v5 1c. Work captures wait in the database like any other (Nov 25), confidential: ones stay on this device; older ones move over]');
   {
     const old = [
       { id: 'd_old1', at: '2026-11-10T10:00:00Z', text: 'TEST old sent', tag: '', status: 'sent', sentAt: '2026-11-10T10:00:03Z' },
       { id: 'd_old2', at: '2026-11-12T10:00:00Z', text: 'TEST old waiting', tag: 'task:', status: 'device' },
       { id: 'd_old3', at: '2026-11-13T10:00:00Z', text: 'TEST VINE survey wording', tag: '', status: 'device' },
       { id: 'd_old4', at: '2026-10-30T10:00:00Z', text: 'TEST october waiting', tag: '', status: 'device' },
+      { id: 'd_old5', at: '2026-11-14T10:00:00Z', text: 'TEST conf study note', tag: 'confidential:', status: 'device' },
     ];
     const ctx = await open({ device: { __nw_dump_queue: JSON.stringify(old) } });
     const { page } = ctx;
     await openDump(page);
     await wait(page, 800);
     const nov = await cloudDoc(page, CAP_ID), oct = await cloudDoc(page, 'dump_captures_2026_10');
-    ok(nov && nov.entries.length === 2 && nov.entries.find(e => e.id === 'd_old1').status === 'sent' && nov.entries.find(e => e.id === 'd_old2').status === 'device', 'November captures moved to the store with their status kept');
+    ok(nov && nov.entries.length === 3 && nov.entries.find(e => e.id === 'd_old1').status === 'sent' && nov.entries.find(e => e.id === 'd_old2').status === 'device' && nov.entries.find(e => e.id === 'd_old3').status === 'device', 'November captures, the work one included, moved to the store with their status kept');
     ok(oct && oct.entries.length === 1 && oct.entries[0].id === 'd_old4', 'an October capture went to the October doc');
     const left = await page.evaluate(() => JSON.parse(window.storage.dev.getItem('__nw_dump_queue')));
-    ok(left.length === 1 && left[0].id === 'd_old3', 'only the work capture is left on this device');
+    ok(left.length === 1 && left[0].id === 'd_old5', 'only the confidential: capture is left on this device');
     const w1 = await page.evaluate(() => window.nwBrainDump.add('TEST work thing', 'work:').saved);
     const w2 = await page.evaluate(() => window.nwBrainDump.add('TEST asmp follow-up', '').saved);
-    ok(w1 === 'device-only' && w2 === 'device-only', 'a work: capture and one naming ASMP are saved on this device only');
+    const w3 = await page.evaluate(() => window.nwBrainDump.add('TEST conf new note', 'confidential:').saved);
+    ok(w1 === 'cloud' && w2 === 'cloud', 'a work: capture and one naming ASMP are saved in the database → ' + JSON.stringify([w1, w2]));
+    ok(w3 === 'device-only', 'a confidential: capture is saved on this device only');
     await wait(page, 600);
     const all = await allFake(page);
-    ok(!/VINE survey|TEST work thing|asmp follow-up/i.test(all), 'no work capture reached the fake Firestore');
+    ok(/VINE survey/.test(all) && /TEST work thing/.test(all) && /asmp follow-up/i.test(all), 'work captures reached the fake Firestore');
+    ok(!/TEST conf study note|TEST conf new note/.test(all), 'no confidential: capture reached the fake Firestore');
     await page.locator('[data-nw-quick="dump"]').click(); await wait(page, 200);
     await openDump(page);
     const caps = await page.locator('[data-nw-capture]').allInnerTexts();
-    ok(caps.some(t => /on this device only/.test(t) && t.includes('TEST work thing')), 'the panel shows work captures as on this device only');
+    ok(caps.some(t => /on this device only/.test(t) && t.includes('TEST conf new note')) && caps.some(t => t.includes('TEST work thing') && !/on this device only/.test(t)), 'the panel shows confidential: captures as on this device only, work ones as saved');
     // Opening again does not move or double anything.
     await page.evaluate(() => window.nwBrainDump.ready(true));
-    ok((await cloudDoc(page, CAP_ID)).entries.length === 2, 'loading again adds nothing');
+    ok((await cloudDoc(page, CAP_ID)).entries.length === 5, 'loading again adds nothing (3 moved + 2 new work captures)');
     await finish(ctx, 'work and old captures');
   }
 
@@ -185,7 +189,7 @@ async function part1() {
     });
     ok(order.feedback > order.drive && order.feedback > order.backup && order.drive > 0, 'the Feedback box is below Google Drive and the downloadable backup → ' + JSON.stringify(order));
     const only = await page.locator('[data-nw-only-here]').innerText();
-    ok(/Only on this device: work captures/.test(only) && /Everything else is in the cloud once Waiting to upload reads 0/.test(only), 'one plain sentence says what exists only on this device');
+    ok(/Only on this device: confidential: captures/.test(only) && /Everything else is in the cloud once Waiting to upload reads 0/.test(only), 'one plain sentence says what exists only on this device');
     await finish(ctx, 'system tab');
   }
 }
@@ -347,7 +351,7 @@ async function askClaudeOnce(html, myTry, o = {}) {
 const norm = (b) => JSON.stringify(b).replace(/\d\d:\d\d/g, 'HH:MM');
 
 async function part3() {
-  console.log('\n[v5 3a. Went wrong: saved offline, on a second device, one Brain Dump line; work entries stay here]');
+  console.log('\n[v5 3a. Went wrong: saved offline, on a second device, one Brain Dump line; work entries are saved like any other (Nov 25); old device-only ones move]');
   {
     const fake = newFake();
     const ctx = await open({ offline: true, token: true, google: fake.handler });
@@ -377,8 +381,9 @@ async function part3() {
     const e = doc && doc.entries.find(x => x.what === 'Missed the 3:30 class');
     ok(e && e.did === 'Nothing yet' && JSON.stringify(e.who) === '["Corky"]' && e.part === 'Leaving the dorm' && e.id && e.at && e.time && 'myTry' in e && 'compare' in e, 'practice:wrong:2026_11 holds { id, at, time, what, did, who, part, myTry, compare }');
     const all = await allFake(page);
-    ok(!/VINE consent/.test(all), 'the work entry did not reach the fake Firestore');
-    ok((await page.evaluate(() => JSON.stringify(window.storage.dev.getItem('__nw_wrong_work')))).includes('VINE consent'), 'it is kept on this device');
+    ok(doc && doc.entries.some(x => /VINE consent/.test(x.what)), 'the work entry is in practice:wrong like any other (Nov 25)');
+    ok((await page.evaluate(() => window.nwBrainDump.captures().filter(c => /VINE consent/.test(c.text) && !c.onlyHere).length)) === 1 && /VINE consent/.test(all), 'its Brain Dump line waits in the database like any work capture (Nov 25)');
+    ok(!(await page.evaluate(() => window.storage.dev.getItem('__nw_wrong_work'))), 'nothing is kept in the old device-only key');
     const lines = fake.doc.paras.map(p => p.text);
     ok(lines.filter(x => /^wrong: Missed the 3:30 class · did: Nothing yet · with: Corky \(from Nikhil's World, 9:1\d AM\)$/.test(x)).length === 1, 'exactly one Brain Dump line for it, after the reconnect');
     ok(lines.filter(x => /VINE consent/.test(x)).length === 1, 'the work entry also gets its line (from this device; the Brain Dump is his own doc)');
@@ -389,12 +394,22 @@ async function part3() {
     await ctx2.page.locator('[data-nw-quick="wrong"]').click();
     await wait(ctx2.page, 800);
     const rows2 = await ctx2.page.locator('[data-nw-wrong-row]').allInnerTexts();
-    ok(rows2.some(r => r.includes('Missed the 3:30 class')) && !rows2.some(r => /VINE/.test(r)), 'a second device shows the entry (not the work one) → ' + JSON.stringify(rows2));
+    ok(rows2.some(r => r.includes('Missed the 3:30 class')) && rows2.some(r => /VINE consent/.test(r)), 'a second device shows both entries, the work one included → ' + JSON.stringify(rows2));
     await ctx2.page.getByRole('button', { name: 'Practice', exact: true }).click();
     await ctx2.page.waitForSelector('.pr-root h1');
     const hist = await ctx2.page.evaluate(async () => (await pDayItems('2026-11-15', null)).items.map(i => i.kind + ': ' + i.title));
     ok(hist.includes('Went wrong: Missed the 3:30 class'), 'Day history shows it next to Joys → ' + JSON.stringify(hist));
     await finish(ctx2, 'went wrong second device');
+    // A work entry kept on a device before Nov 25 moves to practice:wrong on the next read, once.
+    const oldWork = { id: 'w_old1', at: '2026-11-14T18:00:00.000Z', time: '10:00', what: 'TEST old ASMP roster mixup', did: '', who: [], part: '' };
+    const ctx3 = await open({ device: { __nw_wrong_work: JSON.stringify({ entries: [oldWork] }) } });
+    await ctx3.page.locator('[data-nw-quick="wrong"]').click();
+    await wait(ctx3.page, 1200);
+    const moved = await cloudDoc(ctx3.page, 'practice_wrong_2026_11');
+    ok(moved && moved.entries.filter(x => x.id === 'w_old1').length === 1, 'an old device-only work entry moved to practice:wrong');
+    ok(!(await ctx3.page.evaluate(() => window.storage.dev.getItem('__nw_wrong_work'))), 'and left the device-only key');
+    ok((await ctx3.page.locator('[data-nw-wrong-row]').allInnerTexts()).filter(r => r.includes('TEST old ASMP roster mixup')).length === 1, 'it shows once in the list');
+    await finish(ctx3, 'went wrong old work entry');
   }
 
   console.log('\n[v5 3b. Joy, prediction and outcome: one Brain Dump line each; edit and Undo]');
@@ -490,15 +505,15 @@ async function part3() {
     const view = await off.page.locator('[data-pr-compare]').innerText();
     ok(view.includes('Stepping outside for air is what people often do first.') && view.includes('Checking the phone outside') && view.includes('Breathing move') && view.includes('Who helps: Someone who asks questions out loud') && await off.page.locator('[data-pr-compare-ways]').count() === 0, 'off: mine first, then the options, with no question step');
     await finish(off, 'ask me first off');
-    // Work text is sent now (Nov 15); the saved ask leaves it out.
+    // Work text is sent (Nov 15) and kept in the saved ask (Nov 25).
     const w = await askClaudeOnce(null, 'Email the ASMP lead', { askFirst: false });
     ok(w.proxyCalls.length === 2 && w.proxyCalls.some(c => c.output_config && c.output_config.format && /ASMP/.test(c.messages[0].content)), 'a try with work text is sent to Claude');
     const saved = await w.page.evaluate(() => JSON.parse(window.__mem.get('practice:asks:2026_10_04')).entries.filter(e => e.kind === 'compare'));
-    ok(saved.length === 1 && !/ASMP/.test(JSON.stringify(saved)), 'the saved ask has no work text → ' + JSON.stringify(saved[0] && { words: saved[0].words, prompt: saved[0].prompt }));
+    ok(saved.length === 1 && saved[0].myTry === 'Email the ASMP lead', 'the saved ask keeps the work text → ' + JSON.stringify(saved[0] && { words: saved[0].words, prompt: saved[0].prompt }));
     await w.browser.close();
   }
 
-  console.log('\n[v5 3d. Work rows go to What now?; nothing from them is saved to appdata]');
+  console.log('\n[v5 3d. Work rows go to What now?; the saved record keeps their text (Nov 25)]');
   {
     const plan = { patterns: ['The consent form and the tax folder both wait'], options: [{ title: 'Start with the call', steps: [
       { text: 'Phone Maria Lopez about the consent form', ledger_row: 8, minutes: 5, est: false, start: '09:15', kind: 'other' },
@@ -518,9 +533,8 @@ async function part3() {
     ok((await page.locator('[data-pr-whatnow]').innerText()).includes('Phone Maria Lopez'), 'the answer shows the work step on screen');
     await wait(page, 800);
     const db = await page.evaluate(() => JSON.stringify([...window.__mem.entries()].filter(([k]) => !/^drafts:|^practice:drafts$/.test(k))));
-    const leak = (db.match(/.{0,60}(Maria Lopez|VINE|ASMP|STARR|Phone Maria).{0,60}/gi) || []);
-    ok(!leak.length, 'nothing from a work row is saved to appdata (the What now? record says "work, kept on this device") → ' + JSON.stringify(leak));
-    ok(/\(work, kept on this device\)/.test(db) && /Put the tax folder on the desk/.test(db), 'the saved record keeps the other steps');
+    ok(/Phone Maria Lopez about the consent form/.test(db) && /Put the tax folder on the desk/.test(db), 'the saved What now? record keeps the work step and the other steps');
+    ok(!/kept on this device/.test(db), 'no "(work, kept on this device)" placeholder is saved');
     await finish(ctx, 'work rows');
   }
 

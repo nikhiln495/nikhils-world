@@ -593,6 +593,7 @@ async function part2() {
     await page.evaluate(() => { for (let i = 0; i < 12; i++) window.nwBrainDump.add('cap ' + i, ''); });
     await page.locator('[data-nw-quick="dump"]').click().catch(() => {});
     await page.locator('[data-nw-quick="dump"]').click();
+    await page.waitForFunction(() => document.querySelectorAll('[data-nw-capture]').length === 13, null, { timeout: 3000 }).catch(() => {});
     ok(await page.locator('[data-nw-capture]').count() === 13, "shows this month's captures (13), not only the last 10");
     await finish(ctx, 'dump offline');
   }
@@ -671,8 +672,8 @@ async function part3() {
     const e = ramp && ramp.entries[0];
     ok(e && e.words === WORDS && e.result.patterns.length === 2 && e.result.options.length === 2 && e.result.parked[0] === 'I worry about the lease' && e.result.newTasks[0] === 'Call Dana about the move', 'dump and result saved append-only to practice:ramp:2026_11_03');
     const s0 = e.result.options[0].steps;
-    ok(s0[0].ledger && s0[0].ledger.row === 2 && s0[0].ledger.task === 'File the tax form' && s0[3].ledger === undefined, 'the saved copy keeps Ledger refs for ordinary rows; a work row step is saved as "work, kept on this device", with no ref');
-    ok(s0[3].text === '(work, kept on this device)' && !JSON.stringify(e).includes('Maria'), 'no work row text is saved');
+    ok(s0[0].ledger && s0[0].ledger.row === 2 && s0[0].ledger.task === 'File the tax form' && s0[3].ledger && s0[3].ledger.row === 8, 'the saved copy keeps Ledger refs, work rows too (Nov 25)');
+    ok(s0[3].text === 'Phone Maria Lopez' && s0[3].work === true, 'a work row step keeps its text in the saved copy (Nov 25), marked work');
     ok(s0[2].est === true && s0[2].minutes === 40 && s0[1].est === false, 'est. set in code for steps over 10 minutes');
     const asks = await mem(page, 'practice:asks:2026_11_03');
     ok(asks && !/tax|dentist|lease/i.test(asks) && JSON.parse(asks).entries[0].kind === 'what-now', 'the ask record keeps kind and usage only, no Ledger text');

@@ -300,10 +300,10 @@ may say `recovery`, which is shown as Self-nourishment. Claude's answer is reque
 Since Nov 15, 2026 (build v5). `{ "month": "YYYY_MM", "entries": [{ id, at, u, text, tag, status: device|sent, sentAt?, dev }] }`,
 one doc per month (by the capture's local date), append-only (`words?`, `pasted?` too), merged by `id` like `practice:joy` (`ENTRIES_KEY`). `status`
 `device` means waiting to go to the Brain Dump Doc. `dev` is the device that made it (`window.storage.deviceLabel()`); only
-that device sends it, so a capture is never sent twice. Nothing is trimmed. **Work captures** (tag `work:`, text starting
-`work:`, or naming VINE, ASMP, STARR or RTI) are never written here: they stay in `__nw_dump_queue` on the device that made
-them. Captures from before this change were in `__nw_dump_queue` only; the first load moves the non-work ones here with
-their status. `words` is who said it: absent or `mine`, `ai` (an AI draft) or a person's name. `pasted: true` means the
+that device sends it, so a capture is never sent twice. Nothing is trimmed. **`confidential:` captures** are never written here:
+they stay in `__nw_dump_queue` on the device that made them. Work captures (`work:`, VINE, ASMP, STARR, RTI) are written here
+like any other since Nov 25, 2026 (his ask: only confidential: stays on a device). Captures from before were in
+`__nw_dump_queue`; the first load moves all but the confidential: ones here with their status. `words` is who said it: absent or `mine`, `ai` (an AI draft) or a person's name. `pasted: true` means the
 full text of a long capture is already in the Pastes doc (so a retry only writes the pointer line).
 
 ## Went wrong (practice:wrong:<YYYY_MM>)
@@ -312,8 +312,9 @@ Since build v5 (Nov 15, 2026). `{ "month", "entries": [{ id, at, time, what, did
 one doc per month, append-only, merged by `id` (`ENTRIES_KEY`). Only `what` is required; the rest may be empty. `did` may be
 `Nothing yet`; `who` may be `["Nobody"]`. `myTry` and `compare` (`{ mine: { matches, problem }, options: [{ approach,
 first_step, person }] }`, or with "Ask me first" `{ works, question }`) are filled by Compare. `bd` is the id of its Brain Dump capture. An edit keeps what it said before in
-`edits: [{ at, from }]`. **A work entry** (work:, VINE, ASMP, STARR, RTI) is never written here: it stays on the device that
-made it in `__nw_wrong_work` (NW-DEVICE-CACHE), `{ entries: [...] }`, and is never sent to Claude.
+`edits: [{ at, from }]`. A work entry (work:, VINE, ASMP, STARR, RTI) is
+written here like any other since Nov 25, 2026. Before that it stayed in `__nw_wrong_work` (NW-DEVICE-CACHE) on the device that
+made it; the next read there moves those entries here and removes the key.
 
 ## Brain Dump lines for joys, predictions and Went wrong (build v5)
 
@@ -330,16 +331,15 @@ An answer to his own try is saved in `practice:asks:<day>` like any answer, with
 `stuck-else`, `outside`, `coach-me`, `what-now`, `wrong`, `joy-more`), `mode` and `myTry`. "Ask me first" (beside the box,
 on by default) first saves `mode: "ask"` (one line on what works, one question); "Show me ways" then saves `mode: "ways"`
 (the approaches). With it off, only `mode: "ways"`. When the box is empty nothing is added and the request is the same as
-before. Work text in the try is sent to Claude, but the saved ask then has no prompt, text or try (`words` says
-"(work, kept on this device)").
+before. Work text in the try is sent to Claude and, since Nov 25, kept in the saved ask like any other text.
 
 ## Work rows (Nov 15)
 
 Ledger work rows (Bucket, Domain or Trello_Board naming VINE, ASMP, STARR, RTI or Work, and every row of such a task) are
 sent to What now? with the other open rows, kept in this device's Ledger copy (`workRows`), and can be marked done from What
-now?. They are not listed on the strip and not offered for Today's three. Nothing from them is saved to appdata: in the
-saved What now? record (`practice:ramp`) a work step's text is `(work, kept on this device)` with no `ledger` ref, and any
-other line that names work is replaced the same way. Past Brain Dump lines are no longer filtered for work.
+now?. They are not listed on the strip and not offered for Today's three. Since Nov 25 the saved What now? record
+(`practice:ramp`) keeps a work step's text and `ledger` ref, marked `work: true`; until then it said
+`(work, kept on this device)`. Past Brain Dump lines are no longer filtered for work.
 
 ## The return card (nw:return)
 

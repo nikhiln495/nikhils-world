@@ -56,7 +56,8 @@
     }
   </script>
   <!-- Google Identity Services (for Drive sync) -->
-  <script src="https://accounts.google.com/gsi/client" async></script>
+  <!-- If this load fails (no internet or a slow network when the home-screen app opened), nwGsiLoad() loads it again. -->
+  <script src="https://accounts.google.com/gsi/client" async onerror="window.__nwGsiFailed=true"></script>
 
   <!-- Fallback: ensure globals exist even if CDNs fail -->
   <script>
@@ -12790,6 +12791,64 @@ function useDeviceDraft(id, initial = '') {
   return [val, set, clear];
 }
 
+// ── Google sign-in script (accounts.google.com/gsi/client) ──
+// Loaded once by a tag in <head>. If that load failed (no internet, or a slow network, when the home-screen app
+// opened), `google` never existed, and the home-screen app can stay open for days without reloading, so every
+// Connect Google tap failed with "Can't find variable: google". nwGsiLoad() loads it again; it is also retried
+// when the device comes back online or the app comes back to the front.
+const NW_GSI_SRC = 'https://accounts.google.com/gsi/client';
+const nwGsiReady = () => !!(window.google && window.google.accounts && window.google.accounts.oauth2);
+let nwGsiLoading = null;
+const nwGsiErr = (m) => Object.assign(new Error(m), { code: 'gsi' });
+function nwGsiLoad(timeoutMs = 12000) {
+  if (nwGsiReady()) return Promise.resolve();
+  if (nwGsiLoading) return nwGsiLoading;
+  nwGsiLoading = new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    let added = null, tick = null;
+    const add = () => {
+      window.__nwGsiFailed = false;
+      added = document.createElement('script');
+      added.src = NW_GSI_SRC; added.async = true; added.setAttribute('data-nw-gsi', '');
+      added.onerror = () => { window.__nwGsiFailed = true; };
+      document.head.appendChild(added);
+    };
+    const end = (err) => { clearInterval(tick); nwGsiLoading = null; if (err) { if (added) added.remove(); reject(err); } else resolve(); };
+    // The <head> tag may still be loading: give it 3 seconds unless it already failed, then add a fresh tag.
+    if (window.__nwGsiFailed) add();
+    tick = setInterval(() => {
+      if (nwGsiReady()) return end();
+      if (!added && (window.__nwGsiFailed || Date.now() - t0 > 3000)) return add();
+      if (added && window.__nwGsiFailed) return end(nwGsiErr("Google's sign-in didn't load. Check the internet connection and tap Connect Google again."));
+      if (Date.now() - t0 > timeoutMs) return end(nwGsiErr("Google's sign-in is taking too long to load. Check the internet connection and tap Connect Google again."));
+    }, 150);
+  });
+  return nwGsiLoading;
+}
+if (typeof window !== 'undefined') {
+  const nwGsiRetry = () => { if (!nwGsiReady() && navigator.onLine !== false) nwGsiLoad().catch(() => {}); };
+  window.addEventListener('online', nwGsiRetry);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') nwGsiRetry(); });
+  setTimeout(nwGsiRetry, 5000);
+}
+// Asks Google for a token ({ access_token, expires_in }). When the script is already here the popup opens straight
+// from the tap, as before; otherwise the script is loaded first, and if the popup is then blocked the message says
+// to tap again.
+function nwGsiToken(cfg) {
+  const run = () => new Promise((resolve, reject) => {
+    try {
+      google.accounts.oauth2.initTokenClient({
+        ...cfg,
+        callback: (r) => { if (r.error) reject(new Error(r.error)); else resolve(r); },
+        error_callback: (e) => reject(e && e.type === 'popup_failed_to_open'
+          ? nwGsiErr("Google's sign-in is ready now. Tap Connect Google again.")
+          : new Error((e && e.type) || 'popup_closed')),
+      }).requestAccessToken();
+    } catch (e) { reject(e); }
+  });
+  return nwGsiReady() ? run() : nwGsiLoad().then(run);
+}
+
 // ── Google calls ──
 const nwGoogleOnline = () => (typeof navigator === 'undefined' || navigator.onLine !== false);
 async function nwGFetch(url, opts = {}) {
@@ -12826,8 +12885,8 @@ const nwColLetter = (i) => { let n = i + 1, s = ''; while (n > 0) { const m = (n
 const L_BUCKET_SPARK = 'TODAY SPARK', L_BUCKET_WEEK = 'THIS WEEK';
 const L_WORK = /\b(vine|asmp|starr|rti|work)\b/i;
 // Work rows: Bucket, Domain or Trello_Board mentions VINE, ASMP, STARR, RTI or Work. Since Nov 15 they go to What now? (and any
-// other AI prompt that reads the Ledger), but they are not listed on the strip, and text from them is never saved to appdata:
-// what is saved from an answer has it replaced (nwScrubWork). They stay on this device otherwise (the Ledger copy is device-only).
+// other AI prompt that reads the Ledger), but they are not listed on the strip. Since Nov 25 what is saved from an answer keeps
+// their text, like any other step. The Ledger copy itself stays device-only.
 const nwIsWorkRow = (r) => L_WORK.test(`${r.Bucket || ''}\n${r.Domain || ''}\n${r.Trello_Board || ''}`);
 // Header row 1 gives each column's place by name; rows come back as objects { row: <sheet row>, <Header>: text }.
 function nwParseLedger(values) {
@@ -13170,7 +13229,7 @@ function ConnectGoogle({ onDone }) {
       <button data-pr-connect style={pBtn('solid', { width: '100%' })} onClick={async () => {
         setErr('');
         try { await window.nwGoogle.connect(); if (!nwDev.get(NW_DEV.link, '')) nwLedgerAutoFind(); onDone && onDone(); }
-        catch (e) { setErr(/popup_closed|access_denied/.test(String(e.message || e)) ? 'Google sign-in was closed. Try again.' : `Google sign-in failed: ${e.message || e}`); }
+        catch (e) { setErr(e && e.code === 'gsi' ? e.message : /popup_closed|access_denied/.test(String(e.message || e)) ? 'Google sign-in was closed. Try again.' : `Google sign-in failed: ${e.message || e}`); }
       }}>Connect Google</button>
       {err && <div role="alert" style={{ fontSize: 13, color: PC.bad, marginTop: 6 }}>{err}</div>}
     </div>
@@ -13340,14 +13399,9 @@ async function nwCalLoad() {
 }
 // Asks Google for calendar.readonly, only when tapped. The consent screen shows the one new permission.
 function nwCalConnect() {
-  return new Promise((resolve, reject) => {
-    try {
-      const client = google.accounts.oauth2.initTokenClient({
-        client_id: NW_GOOGLE_CLIENT_ID, scope: NW_CAL_SCOPE, include_granted_scopes: true,
-        callback: (r) => { if (r.error) { reject(new Error(r.error)); return; } nwDev.set(NW_CAL_KEYS.token, { token: r.access_token, expiresAt: Date.now() + (r.expires_in || 3600) * 1000 }); resolve(r.access_token); },
-      });
-      client.requestAccessToken();
-    } catch (e) { reject(e); }
+  return nwGsiToken({ client_id: NW_GOOGLE_CLIENT_ID, scope: NW_CAL_SCOPE, include_granted_scopes: true }).then((r) => {
+    nwDev.set(NW_CAL_KEYS.token, { token: r.access_token, expiresAt: Date.now() + (r.expires_in || 3600) * 1000 });
+    return r.access_token;
   });
 }
 // The events inside today-until-tomorrow-noon, as they are shown.
@@ -13374,7 +13428,7 @@ function CalGivens() {
   const connect = async () => {
     setErr('');
     try { await nwCalConnect(); await nwCalLoad(); }
-    catch (e) { setErr(/popup_closed|access_denied/.test(String(e.message || e)) ? 'Calendar sign-in was closed. Try again.' : `Calendar sign-in failed: ${e.message || e}`); }
+    catch (e) { setErr(e && e.code === 'gsi' ? e.message : /popup_closed|access_denied/.test(String(e.message || e)) ? 'Calendar sign-in was closed. Try again.' : `Calendar sign-in failed: ${e.message || e}`); }
   };
   return (
     <div data-pr-givens style={{ marginBottom: 8, paddingBottom: 8, borderBottom: `1px solid ${PC.border}` }}>
@@ -13454,7 +13508,7 @@ function LedgerStrip() {
       {L.readAt && L.hidden > 0 && (
         <details data-pr-ledger-hidden style={{ fontSize: 12, color: PC.muted, marginBottom: 6 }}>
           <summary style={{ cursor: 'pointer' }}>Which rows are not listed, and why</summary>
-          <div style={{ lineHeight: 1.5, marginTop: 4 }}>A work row is one whose Bucket, Domain or Trello_Board names VINE, ASMP, STARR, RTI or Work, or whose task has such a step. They are not listed on this strip, but What now? sends them to Claude with the other open rows, and a step from one can be marked done there. Text from them is not saved to the cloud: what is saved from an answer says "work, kept on this device" instead. Google's Sheets service does the reading, signed in as you.</div>
+          <div style={{ lineHeight: 1.5, marginTop: 4 }}>A work row is one whose Bucket, Domain or Trello_Board names VINE, ASMP, STARR, RTI or Work, or whose task has such a step. They are not listed on this strip, but What now? sends them to Claude with the other open rows, and a step from one can be marked done there. What is saved from an answer keeps their text, like any other step. Google's Sheets service does the reading, signed in as you.</div>
         </details>
       )}
       {L.readAt && !total && <div style={{ fontSize: 14, color: PC.muted }}>Nothing open in Today Spark, This Week, or due in 14 days.</div>}
@@ -13483,7 +13537,7 @@ function SystemCalendar() {
   const connect = async () => {
     setErr('');
     try { await nwCalConnect(); await nwCalLoad(); }
-    catch (e) { setErr(/popup_closed|access_denied/.test(String(e.message || e)) ? 'Calendar sign-in was closed. Try again.' : `Calendar sign-in failed: ${e.message || e}`); }
+    catch (e) { setErr(e && e.code === 'gsi' ? e.message : /popup_closed|access_denied/.test(String(e.message || e)) ? 'Calendar sign-in was closed. Try again.' : `Calendar sign-in failed: ${e.message || e}`); }
   };
   return (
     <div data-nw-calendar-setup style={{ borderTop: '1px solid #333', paddingTop: 8, marginBottom: 8 }}>
@@ -13666,11 +13720,11 @@ async function nwDumpAdd(paras, now = new Date(), opts = {}) {
 // Brain Dump captures (Nov 15): kept through window.storage at dump:captures:<YYYY_MM> = { month, entries: [capture] }, merged by
 // id on every save like the joys, so every device sees every capture and none is dropped (nothing is trimmed). A capture:
 // { id, at, u, text, tag, status: 'device' | 'sent', sentAt?, dev }. `dev` is the device that made it; only that device sends it,
-// so two devices never send the same capture. A work capture (tagged work: or naming VINE, ASMP, STARR or RTI) stays on this
-// device only (NW_DEV.dump, NW-DEVICE-CACHE) and never reaches the database. Captures made before this change were on this
-// device only; the first load moves them (status kept) and leaves only the work ones there.
-const NW_CAP_WORK = /\b(vine|asmp|starr|rti)\b/i;
-const nwCapIsWork = (c) => nwTagList(c && c.tag).some(x => /^work:?$/i.test(x)) || /^\s*work:/i.test(String((c && c.text) || '')) || NW_CAP_WORK.test(`${(c && c.tag) || ''} ${(c && c.text) || ''}`);
+// so two devices never send the same capture. A confidential: capture stays on this device only (NW_DEV.dump, NW-DEVICE-CACHE)
+// and never reaches the database. Work captures (work:, VINE, ASMP, STARR, RTI) also stayed on this device until Nov 25, 2026,
+// when he asked for them to wait in the database too, so nothing is lost with the device: they go to the main Brain Dump like
+// any other. Captures made before either change were on this device only; the first load moves them (status kept) and leaves
+// only the confidential ones there.
 const nwCapKey = (mk) => `dump:captures:${mk}`;
 const nwCapMonth = (c) => pMonthKey(new Date(c.at));
 const NWC = { subs: new Set(), cloud: {}, ready: null };
@@ -13678,7 +13732,7 @@ const nwCapDevice = () => nwDev.get(NW_DEV.dump, []);
 // "Mac Safari wfew" → "your Mac (Safari)": the last 4 letters only tell two devices apart.
 const nwDevName = (label) => { const m = String(label || '').match(/^(\S+)(?: (\S+))?(?: [a-z0-9]{4})?$/); return m ? `your ${m[1]}${m[2] ? ` (${m[2]})` : ''}` : String(label || 'another device'); };
 const nwCapMe = () => { try { return window.storage.deviceLabel(); } catch (_) { return ''; } };
-// Every capture this device knows of (all devices, the months read so far, plus this device's work captures), oldest first.
+// Every capture this device knows of (all devices, the months read so far, plus this device's confidential: captures), oldest first.
 const nwCaptures = () => {
   const all = [];
   Object.values(NWC.cloud).forEach(list => (list || []).forEach(e => { if (e && !e.deleted && e.status !== 'removed') all.push(e); }));
@@ -13720,10 +13774,11 @@ async function nwCapLoad() {
   for (const mk of months) {
     try {
       const r = await window.storage.get(nwCapKey(mk));
-      if (r && r.value) { const d = JSON.parse(r.value); NWC.cloud[mk] = Array.isArray(d.entries) ? d.entries : []; }
+      // Keeps captures added here that are still being saved (not in the stored copy yet), so none drops off the list.
+      if (r && r.value) { const d = JSON.parse(r.value), stored = Array.isArray(d.entries) ? d.entries : [], have = new Set(stored.map(e => e && e.id)); NWC.cloud[mk] = stored.concat((NWC.cloud[mk] || []).filter(e => e && !have.has(e.id))); }
     } catch (_) {}
   }
-  const old = nwCapDevice().filter(c => c && !nwCapIsWork(c) && !nwCapIsConf(c));
+  const old = nwCapDevice().filter(c => c && !nwCapIsConf(c));
   if (old.length) {
     const me = nwCapMe(), byMonth = {};
     old.forEach(c => { (byMonth[nwCapMonth(c)] = byMonth[nwCapMonth(c)] || []).push({ ...c, dev: c.dev || me }); });
@@ -13743,13 +13798,13 @@ function useCaptures() {
   useEffect(() => { NWC.subs.add(setL); nwCapReady(true); return () => NWC.subs.delete(setL); }, []);
   return l;
 }
-// Changes a capture where it is kept (this device for a work capture, else the month's doc).
+// Changes a capture where it is kept (this device for a confidential: capture, else the month's doc).
 async function nwCapMark(c, patch) {
   if (c.onlyHere) { nwCapDeviceSet(nwCapDevice().map(x => (x.id === c.id ? { ...x, ...patch } : x))); return; }
   await nwCapUpdate(nwCapMonth(c), (list) => list.map(x => (x && x.id === c.id ? { ...x, ...patch } : x)));
 }
 const nwCapMarkSent = (c) => nwCapMark(c, { status: 'sent', sentAt: new Date().toISOString() });
-// The captures this device sends: its own (and its work captures), oldest first, so the newest ends up on top.
+// The captures this device sends: its own (and its confidential: captures), oldest first, so the newest ends up on top.
 const nwCapMine = () => { const me = nwCapMe(); return nwCaptures().filter(c => c.status === 'device' && (c.onlyHere || !c.dev || c.dev === me)); };
 // Sends the waiting captures. Returns { sent, error }.
 let nwDumpSending = null;
@@ -13786,10 +13841,10 @@ function nwDumpSendWaiting() {
   p.finally(() => { if (nwDumpSending === p) nwDumpSending = null; });
   return p;
 }
-// A new capture: shown at once, then saved (c.saved resolves to 'cloud', 'device-only' or false). A work capture stays on this device.
+// A new capture: shown at once, then saved (c.saved resolves to 'cloud', 'device-only' or false). A confidential: capture stays on this device.
 function nwCapAdd(text, tag, extra) {
   const c = { id: `d_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, at: new Date().toISOString(), text: String(text).trim(), tag: tag || '', status: 'device', dev: nwCapMe(), ...(extra || {}) };
-  if (nwCapIsWork(c) || nwCapIsConf(c)) {
+  if (nwCapIsConf(c)) {
     const ok = nwCapDeviceSet([...nwCapDevice(), { ...c }]);
     c.onlyHere = true; c.saved = Promise.resolve(ok ? 'device-only' : false);
     return c;
@@ -14040,24 +14095,12 @@ async function pWhatNow({ words, rows, rules, log, feedback, past, three, givens
   if (!result.options.length) throw pAskError('Claude sent no usable options. Your words are still in the box. Try again.', saved);
   return { result, saved, usage: data?.usage || null };
 }
-// Text from work rows, or naming work, never reaches appdata (Nov 15: work rows go to Claude, but the saved copy of an
-// answer says "work, kept on this device" instead). Returns a copy.
-const P_WORK_NOTE = '(work, kept on this device)';
+// Until Nov 25, 2026 the saved copy of a What now? answer replaced work text with "(work, kept on this device)". He asked
+// for work text to be saved like any other (only confidential: stays on a device), so the copy is kept whole. Returns a copy.
 function nwScrubWork(result, words) {
-  const wr = (NWL.state.workRows || []);
-  const names = new Set(wr.flatMap(r => [r.Parent_Task, r.Step_Action, r.First_Physical_Step]).map(x => String(x || '').trim().toLowerCase()).filter(x => x.length > 3));
-  const bad = (t) => { const s = String(t || ''); const l = s.toLowerCase(); return P_WORK_TEXT_ANY.test(s) || [...names].some(n => l.includes(n)); };
-  const clean = (t) => (bad(t) ? P_WORK_NOTE : t);
-  const out = JSON.parse(JSON.stringify(result || {}));
-  out.patterns = (out.patterns || []).map(clean);
-  out.parked = (out.parked || []).map(clean);
-  out.newTasks = (out.newTasks || []).map(clean);
-  if (out.question) out.question = clean(out.question);
-  (out.options || []).forEach(o => { o.title = clean(o.title); (o.steps || []).forEach(st => { if (st.work || bad(st.text) || (st.ledger && bad(`${st.ledger.task}\n${st.ledger.stepAction}`))) { st.text = P_WORK_NOTE; delete st.ledger; st.work = true; } }); });
-  return { result: out, words: bad(words) ? P_WORK_NOTE : words };
+  return { result: JSON.parse(JSON.stringify(result || {})), words };
 }
-const P_WORK_TEXT_ANY = /(^|\s)work:|\b(vine|asmp|starr|rti)\b/i;
-// practice:ramp:<day>: his words and the result, append-only, merged by id. Work text is replaced (nwScrubWork).
+// practice:ramp:<day>: his words and the result, append-only, merged by id. Work text is kept (Nov 25).
 function pAddRamp({ words: words0, result: result0, usage, kind = 'what-now', feedback, of }) {
   const { result, words } = nwScrubWork(result0, words0);
   const now = new Date();
@@ -14989,8 +15032,8 @@ NW_QUICK.push({ id: 'feedback', label: 'Feedback', Panel: FeedbackPanel });
 // ─────────────────────────────────────────────────────
 
 // ── One Brain Dump line per joy, prediction, outcome and Went wrong entry (his Nov 7 and Nov 14 notes) ──
-// It goes through the Dump's own path: a capture (in the database, or on this device for work text), written at once
-// when online and signed in to Google, else when back online. Each is written once.
+// It goes through the Dump's own path: a capture (in the database, work text included since Nov 25; on this device only for
+// confidential:), written at once when online and signed in to Google, else when back online. Each is written once.
 const nwDumpLineId = () => `d_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
 function nwDumpLine(tag, text, extra) {
   const c = window.nwBrainDump.add(text, tag, extra);
@@ -15043,16 +15086,14 @@ const P_MYTRY_FORMAT = { type: 'json_schema', schema: {
     options: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['approach', 'first_step', 'person'], properties: { approach: { type: 'string' }, first_step: { type: 'string' }, person: { anyOf: [{ type: 'string' }, P_MYTRY_NULL] } } } },
   },
 } };
-const P_WORK_TEXT = /(^|\s)work:|\b(vine|asmp|starr|rti)\b/i;
 // mode 'ways' (default): returns { result: { mine: { matches, problem }, options: [...] }, saved }.
 // mode 'ask' ("Ask me first"): returns { result: { works, question }, saved }.
-// Work text is sent (Nov 15); the copy of the ask saved to appdata leaves it out.
+// Work text is sent (Nov 15) and, since Nov 25, kept in the saved copy of the ask like any other text.
 async function pCompareTry({ words, myTry, of, screen, joy, mode = 'ways' }) {
-  const work = P_WORK_TEXT.test(`${words}\n${myTry}`);
   const ask = mode === 'ask';
   const system = `${P_VOICE}\n\n${ask ? P_MYTRY_ASK_RULE : P_MYTRY_RULE}${joy && !ask ? `\n${P_MYTRY_JOY_RULE}` : ''}`;
   const text = `${joy ? 'The joy' : "What's going on"}: ${words || '(not written)'}\nLeft to myself, I'd: ${myTry}`;
-  const rec = work ? { kind: 'compare', of, mode, words: P_WORK_NOTE, redact: true } : { kind: 'compare', of, mode, words, myTry };
+  const rec = { kind: 'compare', of, mode, words, myTry };
   const { data, saved } = await pCallClaude({ system, text, format: ask ? P_MYTRY_ASK_FORMAT : P_MYTRY_FORMAT, ask: rec, screen: `${screen || of}-compare` });
   const raw = (data?.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
   let result;
@@ -15152,10 +15193,37 @@ function usePMyTry(id) {
 }
 
 // ── Went wrong (Nov 15): practice:wrong:<YYYY_MM> = { month, entries: [{ id, at, time, what, did, who, part, myTry, compare, bd }] } ──
-// Append-only, merged by id. A work entry (work:, VINE, ASMP, STARR, RTI) stays on this device only (__nw_wrong_work).
+// Append-only, merged by id. Until Nov 25, 2026 a work entry (work:, VINE, ASMP, STARR, RTI) stayed on this device only
+// (__nw_wrong_work); he asked for only confidential: things to stay on a device, so work entries are saved like any other
+// and the ones still on a device move to practice:wrong on the next read (nwWrongMoveWork).
 const NW_WRONG_WORK = '__nw_wrong_work';
-const nwWrongIsWork = (e) => P_WORK_TEXT.test(`${e.what || ''}\n${e.did || ''}\n${e.part || ''}`);
+let nwWrongMoving = null;
+function nwWrongMoveWork() {
+  if (nwWrongMoving) return nwWrongMoving;
+  nwWrongMoving = (async () => {
+    const left = (nwDev.get(NW_WRONG_WORK, { entries: [] }).entries || []).filter(e => e && e.id && e.what && !e.deleted);
+    if (!left.length) return;
+    const byMonth = {};
+    left.forEach(e => { const mk = pMonthKey(new Date(e.at)); (byMonth[mk] = byMonth[mk] || []).push(e); });
+    for (const [mk, items] of Object.entries(byMonth)) {
+      try {
+        const doc = await pUpdate(P_KEYS.wrong(mk), () => ({ month: mk, entries: [] }), (d) => {
+          const list = Array.isArray(d.entries) ? d.entries : [];
+          const have = new Set(list.map(x => x && x.id));
+          d.entries = list.concat(items.filter(x => !have.has(x.id))); return d;
+        });
+        if (!doc) continue;
+        const moved = new Set(items.map(x => x.id));
+        const cur = nwDev.get(NW_WRONG_WORK, { entries: [] });
+        const rest = (cur.entries || []).filter(x => !(x && moved.has(x.id)));
+        if (rest.length) nwDev.set(NW_WRONG_WORK, { entries: rest }); else nwDev.del(NW_WRONG_WORK);
+      } catch (_) { /* stays on this device; tried again on the next read */ }
+    }
+  })().finally(() => { nwWrongMoving = null; });
+  return nwWrongMoving;
+}
 async function pReadWrongs(iso) {
+  try { await nwWrongMoveWork(); } catch (_) {}
   const out = [];
   const months = iso ? [pMonthKey(new Date(`${iso}T12:00:00`))] : [0, 1, 2].map(k => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - k); return pMonthKey(d); });
   for (const mk of months) { const r = await pRead(P_KEYS.wrong(mk)); (r.data && Array.isArray(r.data.entries) ? r.data.entries : []).forEach(e => e && e.what && out.push({ ...e, mk })); }
@@ -15166,7 +15234,7 @@ async function pReadWrongs(iso) {
 window.nwReadWrongs = pReadWrongs;
 // Saves, changes or removes one entry where it is kept. Returns where it was saved ('cloud' | 'device-only').
 async function pWrongWrite(entry, mutate) {
-  if (entry.onlyHere || nwWrongIsWork(entry)) {
+  if (entry.onlyHere) { // an entry still on this device from before Nov 25 (not moved yet)
     const cur = nwDev.get(NW_WRONG_WORK, { entries: [] });
     const list = mutate((cur.entries || []).slice());
     if (!nwDev.set(NW_WRONG_WORK, { entries: list })) throw new Error('This device is full; nothing was stored.');
@@ -16429,7 +16497,7 @@ function NwAppInfo({ active }) {
         </div>}
         {msg && <div data-nw-clear-msg style={{ fontSize: 12, color: '#4ECDC4', marginTop: 6 }}>{msg}</div>}
       </div>}
-      <div data-nw-only-here style={{ fontSize: 12, color: '#ccc', marginTop: 8, lineHeight: 1.5 }}>Only on this device: work captures (tagged work: or naming VINE, ASMP, STARR or RTI), Ledger changes waiting to send, the Ledger link, text typed but not yet sent in the Ledger and Dump boxes, and the Google Calendar copy. Everything else is in the cloud once Waiting to upload reads 0.</div>
+      <div data-nw-only-here style={{ fontSize: 12, color: '#ccc', marginTop: 8, lineHeight: 1.5 }}>Only on this device: confidential: captures, Ledger changes waiting to send, the Ledger link, text typed but not yet sent in the Ledger and Dump boxes, and the Google Calendar copy. Everything else is in the cloud once Waiting to upload reads 0.</div>
       <div style={{ fontSize: 11, color: '#888', marginTop: 6, lineHeight: 1.5 }}>{usage && usage.real ? "Room used is the browser's own count for this app. The rows above are counted at 2 bytes per character." : 'Counted at 2 bytes per character.'} A message shows at the top at 85%, or when a save does not fit; it closes by itself when there is room again. Clear caches removes only copies of what is already in Google.</div>
     </div>
   );
@@ -16659,16 +16727,7 @@ function App() {
   window.nwGoogle = {
     token: getCachedToken,
     clear: clearCachedToken,
-    connect: () => new Promise((resolve, reject) => {
-      try {
-        const client = google.accounts.oauth2.initTokenClient({
-          client_id: DRIVE_CLIENT_ID,
-          scope: DRIVE_SCOPE,
-          callback: (r) => { if (r.error) { reject(new Error(r.error)); return; } cacheToken(r.access_token, r.expires_in); resolve(r.access_token); },
-        });
-        client.requestAccessToken();
-      } catch (e) { reject(e); }
-    }),
+    connect: () => nwGsiToken({ client_id: DRIVE_CLIENT_ID, scope: DRIVE_SCOPE }).then((r) => { cacheToken(r.access_token, r.expires_in); return r.access_token; }),
   };
   // ══ NW-TOKEN-CACHE END ══
 
@@ -16745,23 +16804,14 @@ function App() {
 
     setStatus('Connecting to Google Drive...');
     try {
-      await new Promise((resolve, reject) => {
-        const client = google.accounts.oauth2.initTokenClient({
-          client_id: DRIVE_CLIENT_ID,
-          scope: DRIVE_SCOPE,
-          callback: async (tokenResponse) => {
-            if (tokenResponse.error) { reject(tokenResponse.error); return; }
-            const token = tokenResponse.access_token;
-            cacheToken(token, tokenResponse.expires_in);
-            await doSync(token);
-            resolve();
-          },
-        });
-        client.requestAccessToken();
-      });
+      const tokenResponse = await nwGsiToken({ client_id: DRIVE_CLIENT_ID, scope: DRIVE_SCOPE });
+      cacheToken(tokenResponse.access_token, tokenResponse.expires_in);
+      await doSync(tokenResponse.access_token);
     } catch(e) {
-      const msg = String(e);
-      if (!msg || msg === 'undefined' || msg.includes('popup_closed') || msg.includes('access_denied')) {
+      const msg = (e && e.message) || String(e);
+      if (e && e.code === 'gsi') {
+        setStatus('❌ ' + msg.replace('Connect Google', 'Sync to Google Drive'));
+      } else if (!msg || msg === 'undefined' || msg.includes('popup_closed') || msg.includes('access_denied')) {
         setStatus('❌ OAuth blocked — this origin is not authorized in GCP Console. Go to GCP → APIs & Services → Credentials → OAuth client → Authorized JS origins and add the current domain.');
       } else if (msg.includes('google is not defined') || msg.includes('Cannot read')) {
         setStatus('❌ Google Identity script failed to load — check your connection and try again.');
