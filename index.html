@@ -10841,6 +10841,8 @@ async function pSaveAsk(ask, prompt, data, model) {
     if (ask?.myTry && !ask?.redact) rec.myTry = ask.myTry;
     if (ask?.mode) rec.mode = ask.mode;
     if (ask?.of) rec.of = ask.of;
+    if (ask?.entry) rec.entry = ask.entry; // the Went wrong entry this conversation is about (Nov 26)
+    if (ask?.turn) rec.turn = ask.turn; // which answer in that conversation, from 1
     if (ask?.redact) { rec.prompt = ''; rec.text = ''; rec.tools = []; rec.sources = []; } // the What now? dump and result live in practice:ramp, not here
     const doc = await pUpdate(P_KEYS.asks(pDayKey(now)), () => ({ date: pLocalISO(now), entries: [] }), (doc) => {
       if (!Array.isArray(doc.entries)) doc.entries = [];
@@ -10868,7 +10870,9 @@ async function pProxyError(resp) {
 window.nwProxyError = pProxyError;
 // format: a structured-output format ({ type: 'json_schema', schema }) merged into output_config. Forced tool choice
 // ('tool' or 'any') is refused by the current models, so a fixed JSON shape comes through format instead.
-async function pCallClaude({ system, text, tools, toolChoice, format, ask, screen }) {
+// history (Nov 26): earlier turns of one conversation, [{ role: 'user' | 'assistant', content }], oldest first, ending with an
+// assistant turn; text is then his newest message.
+async function pCallClaude({ system, text, tools, toolChoice, format, ask, screen, history }) {
   if (!pOnline()) throw new Error('This device is offline.');
   const url = window.AI_PROXY_URL, model = window.AI_MODEL;
   if (!url || !model) throw new Error('AI proxy settings not found.');
@@ -10879,7 +10883,7 @@ async function pCallClaude({ system, text, tools, toolChoice, format, ask, scree
   if (tools) body.tools = tools;
   if (toolChoice) body.tool_choice = toolChoice;
   if (format) body.output_config.format = format;
-  body.messages = [{ role: 'user', content: text }];
+  body.messages = [...(Array.isArray(history) ? history : []), { role: 'user', content: text }];
   let resp;
   try {
     resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -15086,18 +15090,74 @@ const P_MYTRY_FORMAT = { type: 'json_schema', schema: {
     options: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['approach', 'first_step', 'person'], properties: { approach: { type: 'string' }, first_step: { type: 'string' }, person: { anyOf: [{ type: 'string' }, P_MYTRY_NULL] } } } },
   },
 } };
+// ── Went wrong as one conversation (Nov 26, his ask): before this, each Compare started from scratch, so a follow-up try
+// lost the earlier tries and answers and one answer mixed up who did what. Now every follow-up carries the situation, who
+// was there (his names), every earlier try or reply and every answer already given. He can also just type a reply. ──
+const P_CONVO_RULE = [
+  'This is one continuing conversation about one thing that went wrong. The earlier messages are what he wrote and what you answered.',
+  '- Build on them. Do not give again an option or a step you already gave, unless he asks for it.',
+  '- His newest message wins over older ones: when it says something already happened or changed, go by that.',
+  '- Keep every person exactly as he named them. Never move an action, a feeling, a place or a word from one person to another.',
+  '- "they" or "them" in his words means the person he named for that action. When you cannot tell who did something, say which person you are reading it as, or ask. Never guess.',
+  '- When he says "she", "he" or "they" without a name, keep his word. Do not put a name on that person unless he does.',
+  '- When he tells you what he already did or said (for example "I told her which window", "I kinda said sorry"), start from there: say in one plain sentence what that already took care of, then what is left, if anything, and the next step for only that part. Do not start over with general options.',
+  '- When nothing is left to do about it, say so plainly.',
+].join('\n');
+// "Reply" (Nov 26): he answers the last answer in his own words; the answer is a plain reply and at most one first step.
+const P_REPLY_RULE = [
+  'He is replying to your last answer in his own words.',
+  '- answer: answer what he just said in 1 to 3 plain sentences. Lead with your direct answer. If he corrected you, go by his correction.',
+  '- first_step: the one first physical step to do next, if there is one; otherwise null.',
+  '- No praise words (great, amazing, well done, good job, proud of). Plain literal words. No metaphors.',
+].join('\n');
+const P_REPLY_FORMAT = { type: 'json_schema', schema: {
+  type: 'object', additionalProperties: false, required: ['answer', 'first_step'],
+  properties: { answer: { type: 'string' }, first_step: { anyOf: [{ type: 'string' }, { type: 'null' }] } },
+} };
+// One turn of the conversation: { id, at, kind: 'try' | 'ways' | 'reply', mode: 'ask' | 'ways' | 'reply', text, result }.
+// 'try' is a "Left to myself, I'd" try, 'ways' is "Show me ways" after an Ask-me-first answer, 'reply' is a typed reply.
+const pTurnAsk = (t) => (t.kind === 'ways' ? 'Show me ways for my last try.' : t.kind === 'reply' ? `My reply: ${t.text}` : `Left to myself, I'd: ${t.text}`);
+function pTurnAnswer(r) {
+  if (!r || typeof r !== 'object') return '(no answer)';
+  if (typeof r.answer === 'string') return [r.answer, r.first_step ? `First step: ${r.first_step}` : ''].filter(Boolean).join('\n');
+  if (typeof r.works === 'string') return `What works: ${r.works}\nQuestion: ${r.question || ''}`;
+  if (r.mine) return [`What matches: ${r.mine.matches || ''}`, r.mine.problem ? `What may cause a problem: ${r.mine.problem}` : '',
+    ...(Array.isArray(r.options) ? r.options : []).map((o, i) => `Way ${i + 1}: ${o.approach}. First step: ${o.first_step}${o.person ? ` Who helps: ${o.person}` : ''}`)].filter(Boolean).join('\n');
+  return JSON.stringify(r);
+}
+// The messages for the next turn: the situation and who was there open the first message; every earlier turn and its answer
+// follow in order; next = { kind, text } is his newest message. Returns { history, text } for pCallClaude.
+function pConvoMessages({ words, who, turns, next }) {
+  const head = `What's going on: ${words || '(not written)'}${(who || []).length ? `\nWho was there (his names): ${who.join(', ')}` : ''}`;
+  const history = [];
+  (turns || []).forEach((t, i) => {
+    history.push({ role: 'user', content: i === 0 ? `${head}\n${pTurnAsk(t)}` : pTurnAsk(t) });
+    history.push({ role: 'assistant', content: pTurnAnswer(t.result) });
+  });
+  return { history, text: history.length ? pTurnAsk(next) : `${head}\n${pTurnAsk(next)}` };
+}
+window.nwConvoMessages = pConvoMessages;
 // mode 'ways' (default): returns { result: { mine: { matches, problem }, options: [...] }, saved }.
 // mode 'ask' ("Ask me first"): returns { result: { works, question }, saved }.
+// mode 'reply' (only with convo): returns { result: { answer, first_step }, saved }.
+// convo (Went wrong, Nov 26): { turns, who, kind, entry } sends the whole conversation so far; myTry is his newest message.
 // Work text is sent (Nov 15) and, since Nov 25, kept in the saved copy of the ask like any other text.
-async function pCompareTry({ words, myTry, of, screen, joy, mode = 'ways' }) {
+async function pCompareTry({ words, myTry, of, screen, joy, mode = 'ways', convo }) {
   const ask = mode === 'ask';
-  const system = `${P_VOICE}\n\n${ask ? P_MYTRY_ASK_RULE : P_MYTRY_RULE}${joy && !ask ? `\n${P_MYTRY_JOY_RULE}` : ''}`;
-  const text = `${joy ? 'The joy' : "What's going on"}: ${words || '(not written)'}\nLeft to myself, I'd: ${myTry}`;
-  const rec = { kind: 'compare', of, mode, words, myTry };
-  const { data, saved } = await pCallClaude({ system, text, format: ask ? P_MYTRY_ASK_FORMAT : P_MYTRY_FORMAT, ask: rec, screen: `${screen || of}-compare` });
+  const reply = !!convo && mode === 'reply';
+  const system = `${P_VOICE}\n\n${reply ? P_REPLY_RULE : ask ? P_MYTRY_ASK_RULE : P_MYTRY_RULE}${joy && !ask && !reply ? `\n${P_MYTRY_JOY_RULE}` : ''}${convo ? `\n\n${P_CONVO_RULE}` : ''}`;
+  let text = `${joy ? 'The joy' : "What's going on"}: ${words || '(not written)'}\nLeft to myself, I'd: ${myTry}`;
+  let history;
+  if (convo) ({ history, text } = pConvoMessages({ words, who: convo.who, turns: convo.turns, next: { kind: convo.kind || 'try', text: myTry } }));
+  const rec = { kind: 'compare', of, mode, words, myTry, ...(convo ? { entry: convo.entry, turn: (convo.turns || []).length + 1 } : {}) };
+  const { data, saved } = await pCallClaude({ system, text, history, format: reply ? P_REPLY_FORMAT : ask ? P_MYTRY_ASK_FORMAT : P_MYTRY_FORMAT, ask: rec, screen: `${screen || of}-compare` });
   const raw = (data?.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
   let result;
   try { result = JSON.parse(raw); } catch (_) { throw pAskError('Claude sent something that could not be read.', saved); }
+  if (reply) {
+    if (!result || typeof result.answer !== 'string') throw pAskError('Claude sent something that could not be read.', saved);
+    return { result: { answer: result.answer.trim(), first_step: typeof result.first_step === 'string' && result.first_step.trim() ? result.first_step.trim() : null }, saved };
+  }
   if (ask) {
     if (!result || typeof result.works !== 'string' || typeof result.question !== 'string') throw pAskError('Claude sent something that could not be read.', saved);
     return { result: { works: result.works.trim(), question: result.question.trim() }, saved };
@@ -15187,12 +15247,12 @@ function usePMyTry(id) {
     try { const { result, saved } = await pCompareTry({ words: keep.words, myTry: keep.myTry, of: keep.of, screen: keep.screen, ...(keep.extra || {}), mode: 'ways' }); setSt({ ...keep, busy: false, result, saved }); return { result, myTry: keep.myTry }; }
     catch (e) { setSt({ ...keep, busy: false, err: e.message, saved: e.saved }); return null; }
   };
-  return { myTry, setMyTry, askFirst: askFirst !== false, setAskFirst,
+  return { myTry, setMyTry, clearMyTry, askFirst: askFirst !== false, setAskFirst,
     box: <PMyTryBox value={myTry} onChange={setMyTry} askFirst={askFirst !== false} onAskFirst={setAskFirst} />,
     view: <PCompareView st={st} onWays={ways} />, run, ways, st };
 }
 
-// ── Went wrong (Nov 15): practice:wrong:<YYYY_MM> = { month, entries: [{ id, at, time, what, did, who, part, myTry, compare, bd }] } ──
+// ── Went wrong (Nov 15): practice:wrong:<YYYY_MM> = { month, entries: [{ id, at, time, what, did, who, part, myTry, compare, bd, thread? }] } ──
 // Append-only, merged by id. Until Nov 25, 2026 a work entry (work:, VINE, ASMP, STARR, RTI) stayed on this device only
 // (__nw_wrong_work); he asked for only confidential: things to stay on a device, so work entries are saved like any other
 // and the ones still on a device move to practice:wrong on the next read (nwWrongMoveWork).
@@ -15316,14 +15376,110 @@ function WrongPanel({ tab, onDone }) {
   );
 }
 
-// One Went wrong entry: Edit, Remove (with Undo), Compare.
+// What a Went wrong entry sends to Claude as "What's going on".
+const pWrongWords = (e) => `${e.what}${e.part ? ` (which part: ${e.part})` : ''}${e.did ? `. What I did next: ${e.did}` : ''}`;
+// Before Nov 26 an entry kept only its last answer (compare). Every answer is also in practice:asks:<day>, so an entry with no
+// thread yet gets its earlier tries and answers from there: the asks about this entry (by its id, or by the same words), from
+// the entry's day to today, 14 days at most. Read only; they are written onto the entry with the next answer.
+async function pWrongSeedTurns(e) {
+  const words = pWrongWords(e);
+  const recs = [];
+  const today = pLocalISO(new Date());
+  const d = new Date(e.at);
+  for (let n = 0; n < 14 && pLocalISO(d) <= today; n++, d.setDate(d.getDate() + 1)) {
+    const r = await pRead(P_KEYS.asks(pDayKey(d)));
+    (r.data && Array.isArray(r.data.entries) ? r.data.entries : []).forEach(a => {
+      if (a && a.kind === 'compare' && a.of === 'wrong' && a.text && (a.entry ? a.entry === e.id : a.words === words)) recs.push(a);
+    });
+  }
+  const turns = [];
+  recs.sort((a, b) => String(a.at).localeCompare(String(b.at))).forEach(a => {
+    let result;
+    try { result = JSON.parse(a.text); } catch (_) { return; }
+    if (!result || typeof result !== 'object') return;
+    const prev = turns[turns.length - 1];
+    const mode = a.mode || 'ways';
+    const kind = mode === 'reply' ? 'reply' : (mode === 'ways' && prev && prev.kind === 'try' && prev.mode === 'ask' && prev.text === a.myTry) ? 'ways' : 'try';
+    turns.push({ id: a.id, at: a.at, kind, mode, text: a.myTry || '', result });
+  });
+  if (!turns.length && e.compare && e.myTry) turns.push({ id: `t_${e.id}`, at: e.at, kind: 'try', mode: e.compare.works ? 'ask' : 'ways', text: e.myTry, result: e.compare });
+  return turns;
+}
+window.nwWrongSeedTurns = pWrongSeedTurns;
+
+// One message and its answer in a Went wrong conversation.
+function WrongTurn({ t, onWays, busy }) {
+  const r = t.result || {};
+  const opts = Array.isArray(r.options) ? r.options : [];
+  return (
+    <div data-nw-wrong-turn={t.kind} style={pCard({ borderLeft: `3px solid ${PC.accent}`, marginTop: 8 })}>
+      <div data-nw-wrong-you style={{ fontSize: 13, color: PC.muted, lineHeight: 1.5, marginBottom: 4 }}>
+        {t.kind === 'reply' ? 'You replied' : t.kind === 'ways' ? 'You asked' : 'Your try'}{t.at ? ` (${pTimeHM(new Date(t.at))})` : ''}: {t.kind === 'ways' ? 'Show me ways' : t.text}
+      </div>
+      {typeof r.answer === 'string' && <>
+        <div style={{ fontSize: 14, color: PC.text, lineHeight: 1.5 }}>{r.answer}</div>
+        {r.first_step && <div style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, marginTop: 4 }}><strong>First step:</strong> {r.first_step}</div>}
+      </>}
+      {typeof r.works === 'string' && <>
+        <div data-pr-compare-works style={{ fontSize: 14, color: PC.text, lineHeight: 1.5 }}>{r.works}</div>
+        <div data-pr-compare-question style={{ fontSize: 15, color: PC.text, lineHeight: 1.5, marginTop: 6, fontWeight: 600 }}>{r.question}</div>
+        {onWays && <button data-nw-wrong-ways style={pBtn('ghost', { marginTop: 8 })} disabled={busy || !pOnline()} onClick={onWays}>Show me ways</button>}
+      </>}
+      {r.mine && <>
+        <div data-pr-compare-mine style={{ fontSize: 14, color: PC.text, lineHeight: 1.5 }}>{r.mine.matches}</div>
+        {r.mine.problem && <div style={{ fontSize: 14, color: PC.warn, lineHeight: 1.5, marginTop: 4 }}>{r.mine.problem}</div>}
+      </>}
+      {opts.length > 0 && <>
+        <div style={{ ...pLabel, marginTop: 10 }}>Other ways</div>
+        {opts.map((o, i) => (
+          <div key={i} data-pr-compare-option style={{ fontSize: 14, color: PC.text, lineHeight: 1.5, marginBottom: 6 }}>
+            <strong>{o.approach}</strong>. First step: {o.first_step}{o.person ? <span style={{ color: PC.muted }}> · Who helps: {o.person}</span> : null}
+          </div>
+        ))}
+      </>}
+    </div>
+  );
+}
+
+// One Went wrong entry: Edit, Remove (with Undo), Compare. Compare is one conversation (Nov 26): every try, "Show me ways"
+// and typed reply is answered with everything said before, and the whole conversation is kept on the entry as thread.
 function WrongRow({ e, tab, names, onChanged }) {
   const [open, setOpen, clearOpen] = window.useDraft(tab, `wrong-edit-open:${e.id}`, false);
   const [form, setForm, clearForm] = window.useDraft(tab, open ? `wrong-edit:${e.id}` : null, { what: e.what, did: e.did || '', part: e.part || '' });
   const [cmp, setCmp] = useState(false);
   const mt = usePMyTry(`wrong:${e.id}`);
+  const [reply, setReply, clearReply] = window.useDraft('practice', `wrong-reply:${e.id}`, '');
+  const [turns, setTurns] = useState(Array.isArray(e.thread) ? e.thread : null);
+  const [talking, setTalking] = useState('');
+  const [talkErr, setTalkErr] = useState('');
+  const [talkSaved, setTalkSaved] = useState(undefined);
   const [busy, wrap] = window.useBusy();
   const [err, setErr] = useState('');
+  useEffect(() => { if (Array.isArray(e.thread) && e.thread.length >= (turns || []).length) setTurns(e.thread); }, [e.thread]);
+  useEffect(() => {
+    if (!cmp || turns) return;
+    let live = true;
+    pWrongSeedTurns(e).then(t => { if (live) setTurns(t); }).catch(() => { if (live) setTurns([]); });
+    return () => { live = false; };
+  }, [cmp]);
+  // Sends one message with the whole conversation so far, shows the answer and keeps it on the entry.
+  const talk = async (kind, text, mode) => {
+    const before = turns || [];
+    setTalking(kind); setTalkErr('');
+    try {
+      const { result, saved } = await pCompareTry({ words: pWrongWords(e), myTry: text, of: 'wrong', screen: 'wrong', mode, convo: { turns: before, who: e.who || [], kind, entry: e.id } });
+      const now = new Date();
+      const turn = { id: `t_${now.getTime().toString(36)}${Math.random().toString(36).slice(2, 5)}`, at: now.toISOString(), kind, mode, text, result };
+      const next = [...before, turn];
+      setTurns(next); setTalkSaved(saved);
+      try {
+        await pWrongWrite(e, (l) => l.map(x => (x.id === e.id ? { ...x, thread: next, ...(kind === 'try' ? { myTry: text, compare: result } : {}) } : x)));
+        onChanged();
+      } catch (x) { setTalkErr(`The answer is here, but it was not kept on this entry: ${x.message}`); }
+      return turn;
+    } catch (x) { setTalkErr(x.message); setTalkSaved(x.saved); return null; }
+    finally { setTalking(''); }
+  };
   const f = form || {};
   const saveEdit = wrap(async () => {
     if (!(f.what || '').trim()) return;
@@ -15345,9 +15501,17 @@ function WrongRow({ e, tab, names, onChanged }) {
     } catch (x) { setErr(x.message); }
   });
   const compare = wrap(async () => {
-    const r = await mt.run(`${e.what}${e.part ? ` (which part: ${e.part})` : ''}${e.did ? `. What I did next: ${e.did}` : ''}`, 'wrong', 'wrong');
-    if (r) { try { await pWrongWrite(e, (l) => l.map(x => (x.id === e.id ? { ...x, myTry: r.myTry, compare: r.result || r.ask } : x))); } catch (_) {} }
+    const t = (mt.myTry || '').trim();
+    if (!t || !turns) return;
+    if (await talk('try', t, mt.askFirst ? 'ask' : 'ways')) mt.clearMyTry();
   });
+  const showWays = wrap(async (t) => { await talk('ways', t.text, 'ways'); });
+  const sendReply = wrap(async () => {
+    const t = (reply || '').trim();
+    if (!t || !turns || !turns.length) return;
+    if (await talk('reply', t, 'reply')) clearReply();
+  });
+  const lastIdx = (turns || []).length - 1;
   return (
     <div data-nw-wrong-row style={{ fontSize: 13, padding: '6px 0', borderBottom: '1px solid #262626', overflowWrap: 'anywhere' }}>
       <div><span style={{ color: '#9ca3af' }}>{e.iso.slice(5)} {e.time}{e.onlyHere ? ' · on this device only' : ''}</span> · {e.what}</div>
@@ -15371,11 +15535,23 @@ function WrongRow({ e, tab, names, onChanged }) {
         </div>
       )}
       {cmp && (
-        <div style={{ marginTop: 6 }}>
-          {mt.box}
-          <button style={{ ...nwQuickBtn, ...nwQuickBtnOn }} disabled={busy || !pOnline() || !(mt.myTry || '').trim()} onClick={compare}>Compare my try</button>
-          {!pOnline() && <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 4 }}>Compare needs the internet. Your try stays in the box.</div>}
-          {mt.view}
+        <div data-nw-wrong-convo style={{ marginTop: 6 }}>
+          {!turns ? <div style={{ fontSize: 12, color: '#9ca3af', marginBottom: 6 }}>Reading what you already wrote here…</div>
+            : turns.map((t, i) => <WrongTurn key={t.id || i} t={t} busy={busy}
+                onWays={i === lastIdx && t.kind === 'try' && t.mode === 'ask' ? () => showWays(t) : null} />)}
+          {talking && <div style={{ fontSize: 13, color: '#9ca3af', marginTop: 8 }}>{talking === 'ways' ? 'Finding ways…' : talking === 'reply' ? 'Answering your reply…' : 'Comparing your try…'}</div>}
+          {talkErr && <div style={{ marginTop: 8 }}><PNote msg={`❌ ${talkErr}`} /></div>}
+          <PSaved saved={talkSaved} />
+          <div style={{ marginTop: 8 }}>{mt.box}</div>
+          <button style={{ ...nwQuickBtn, ...nwQuickBtnOn }} disabled={busy || !turns || !pOnline() || !(mt.myTry || '').trim()} onClick={compare}>Compare my try</button>
+          {turns && turns.length > 0 && (
+            <div data-nw-wrong-reply style={{ marginTop: 10 }}>
+              <div style={nwQuickLabel}>OR JUST REPLY</div>
+              <textarea aria-label="Reply" rows={2} value={reply} onChange={ev => setReply(ev.target.value)} placeholder="Say what you'd say back, like in a chat" style={{ ...nwQuickInput, marginTop: 4 }} />
+              <button style={{ ...nwQuickBtn, ...nwQuickBtnOn, marginTop: 6 }} disabled={busy || !pOnline() || !(reply || '').trim()} onClick={sendReply}>Send reply</button>
+            </div>
+          )}
+          {!pOnline() && <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 4 }}>Compare needs the internet. Your try stays in the box.{turns && turns.length > 0 ? ' Reply needs it too; your reply stays in its box.' : ''}</div>}
         </div>
       )}
       {err && <div role="alert" style={{ color: '#fca5a5' }}>{err}</div>}

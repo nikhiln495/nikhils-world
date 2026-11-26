@@ -311,7 +311,13 @@ full text of a long capture is already in the Pastes doc (so a retry only writes
 Since build v5 (Nov 15, 2026). `{ "month", "entries": [{ id, at, time, what, did, who[], part, myTry, compare, bd, edits? }] }`,
 one doc per month, append-only, merged by `id` (`ENTRIES_KEY`). Only `what` is required; the rest may be empty. `did` may be
 `Nothing yet`; `who` may be `["Nobody"]`. `myTry` and `compare` (`{ mine: { matches, problem }, options: [{ approach,
-first_step, person }] }`, or with "Ask me first" `{ works, question }`) are filled by Compare. `bd` is the id of its Brain Dump capture. An edit keeps what it said before in
+first_step, person }] }`, or with "Ask me first" `{ works, question }`) are filled by Compare: the last try and its answer.
+Since Nov 26, 2026 Compare is one conversation and the whole of it is kept as `thread: [{ id, at, kind, mode, text, result }]`,
+oldest first: `kind` is `try` (a "Left to myself, I'd" try), `ways` ("Show me ways" after an Ask-me-first answer) or `reply`
+(a typed reply, answered as `{ answer, first_step }`). Every call sends the situation, `who` and every earlier turn and answer.
+An entry with no `thread` gets its earlier turns from `practice:asks:<day>` (records with `of: "wrong"` and the same `entry`
+or `words`, from its day up to 14 days on) when Compare opens; they are written into `thread` with the next answer. Asks made
+in a conversation also carry `entry` (the entry's id) and `turn` (its place, from 1). `bd` is the id of its Brain Dump capture. An edit keeps what it said before in
 `edits: [{ at, from }]`. A work entry (work:, VINE, ASMP, STARR, RTI) is
 written here like any other since Nov 25, 2026. Before that it stayed in `__nw_wrong_work` (NW-DEVICE-CACHE) on the device that
 made it; the next read there moves those entries here and removes the key.

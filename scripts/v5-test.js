@@ -513,6 +513,60 @@ async function part3() {
     await w.browser.close();
   }
 
+  console.log('\n[v5 3c2. Went wrong is one conversation (Nov 26): earlier tries and answers come back, a reply and a new try carry them all]');
+  {
+    const REPLIED = { answer: 'Then the sigh and the cold room were Corky, not Bubbess.', first_step: 'Find Bubbess and say one sentence.' };
+    const convoProxy = async (body) => {
+      const props = body.output_config && body.output_config.format && body.output_config.format.schema.properties;
+      return textReply(props && props.answer ? REPLIED : props && props.works ? ASKED : COMPARE);
+    };
+    const words = 'TEST left the window open. What I did next: asked to light the fire';
+    const entry = { id: 'w_convo1', at: '2026-11-15T17:00:00.000Z', time: '08:00', what: 'TEST left the window open', did: 'asked to light the fire', who: ['Corky', 'Bubbess'], part: '', myTry: 'Close the window', compare: ASKED };
+    const asks = { date: '2026-11-15', entries: [
+      { id: 'a_old1', at: '2026-11-15T17:01:00.000Z', kind: 'compare', of: 'wrong', mode: 'ask', words, myTry: 'Close the window', text: JSON.stringify(ASKED) },
+      { id: 'a_old2', at: '2026-11-15T17:02:00.000Z', kind: 'compare', of: 'wrong', mode: 'ways', words, myTry: 'Close the window', text: JSON.stringify(COMPARE) },
+      { id: 'a_other', at: '2026-11-15T17:03:00.000Z', kind: 'compare', of: 'wrong', mode: 'ways', words: 'TEST something else', myTry: 'x', text: JSON.stringify(COMPARE) },
+    ] };
+    const ctx = await open({ proxy: convoProxy, fakeFirestore: { ...asDocs(F.base()), ...asDocs({ 'practice:wrong:2026_11': { month: '2026_11', entries: [entry] }, 'practice:asks:2026_11_15': asks }) } });
+    const { page } = ctx;
+    await page.locator('[data-nw-quick="wrong"]').click();
+    await wait(page, 800);
+    const row = page.locator('[data-nw-wrong-row]').filter({ hasText: 'TEST left the window open' });
+    await row.getByRole('button', { name: 'Compare', exact: true }).click();
+    await wait(page, 1200);
+    const kinds = await row.locator('[data-nw-wrong-turn]').evaluateAll(els => els.map(e => e.getAttribute('data-nw-wrong-turn')));
+    ok(JSON.stringify(kinds) === '["try","ways"]', 'the earlier try and its "Show me ways" answer come back from the saved answers (and nothing from another entry) → ' + JSON.stringify(kinds));
+    ok((await row.innerText()).includes('Who helps: Someone who asks questions out loud'), 'with the ways that were already given');
+    await row.locator('textarea[aria-label="Reply"]').fill('It was Corky who sighed, not Bubbess');
+    await row.getByRole('button', { name: 'Send reply' }).click();
+    await wait(page, 1500);
+    const rc = ctx.proxyCalls[ctx.proxyCalls.length - 1];
+    ok(rc && rc.messages.length === 5 && rc.messages.map(m => m.role).join() === 'user,assistant,user,assistant,user', 'the reply is sent with the whole conversation so far → ' + (rc && rc.messages.map(m => m.role).join()));
+    ok(rc && /^What's going on: TEST left the window open/.test(rc.messages[0].content) && /Who was there \(his names\): Corky, Bubbess/.test(rc.messages[0].content) && /Left to myself, I'd: Close the window/.test(rc.messages[0].content), 'the first message holds the situation, who was there and the first try');
+    ok(rc && /Show me ways/.test(rc.messages[2].content) && /Way 2: Tell one person/.test(rc.messages[3].content) && rc.messages[4].content === 'My reply: It was Corky who sighed, not Bubbess', 'the answers already given and his reply follow in order');
+    ok(rc && /one continuing conversation/.test(rc.system[0].text) && /Do not start over with general options/.test(rc.system[0].text) && /Never move an action, a feeling, a place or a word from one person to another/.test(rc.system[0].text) && JSON.stringify(Object.keys(rc.output_config.format.schema.properties)) === '["answer","first_step"]' && schemaProblems(rc.output_config.format.schema).length === 0 && !rc.tool_choice, 'with the rule to keep people as he named them, and a plain answer plus one first step');
+    ok((await row.innerText()).includes('Then the sigh and the cold room were Corky, not Bubbess.') && (await row.innerText()).includes('First step: Find Bubbess and say one sentence.'), 'the answer to the reply shows');
+    let doc = await cloudDoc(page, 'practice_wrong_2026_11');
+    let e2 = doc.entries.find(x => x.id === 'w_convo1');
+    ok(e2 && e2.thread && e2.thread.length === 3 && e2.thread[2].kind === 'reply' && e2.myTry === 'Close the window' && e2.what === entry.what && JSON.stringify(e2.who) === '["Corky","Bubbess"]', 'the conversation is kept on the entry, and nothing else on it changes');
+    // A new try (Ask me first is on): it carries everything too, and "Show me ways" follows it.
+    await row.locator('[data-pr-mytry] textarea').fill('Say sorry to Bubbess');
+    await row.getByRole('button', { name: 'Compare my try' }).click();
+    await wait(page, 1500);
+    const tc = ctx.proxyCalls[ctx.proxyCalls.length - 1];
+    ok(tc && tc.messages.length === 7 && tc.messages[6].content === "Left to myself, I'd: Say sorry to Bubbess" && /What works:/.test(tc.messages[1].content), 'a new try is sent after the reply and its answer');
+    await row.locator('[data-nw-wrong-ways]').click();
+    await wait(page, 1500);
+    const wc = ctx.proxyCalls[ctx.proxyCalls.length - 1];
+    ok(wc && wc.messages.length === 9 && wc.messages[8].content === 'Show me ways for my last try.' && JSON.stringify(Object.keys(wc.output_config.format.schema.properties)) === '["mine","options"]', '"Show me ways" asks for ways for that try, with everything before it');
+    doc = await cloudDoc(page, 'practice_wrong_2026_11');
+    e2 = doc.entries.find(x => x.id === 'w_convo1');
+    ok(e2 && e2.thread.length === 5 && e2.myTry === 'Say sorry to Bubbess' && e2.compare && e2.compare.works, 'the entry keeps all five, and its last try and answer as before');
+    const saved = await page.evaluate(() => JSON.parse(window.__fakeDocs.get('practice_asks_2026_11_15').value).entries.filter(e => e.entry === 'w_convo1').map(e => `${e.mode}:${e.turn}`));
+    ok(saved.join() === 'reply:3,ask:4,ways:5', 'each answer is saved to today\'s answers with the entry and its place in the conversation → ' + saved.join());
+    await finish(ctx, 'went wrong conversation');
+  }
+
   console.log('\n[v5 3d. Work rows go to What now?; the saved record keeps their text (Nov 25)]');
   {
     const plan = { patterns: ['The consent form and the tax folder both wait'], options: [{ title: 'Start with the call', steps: [
